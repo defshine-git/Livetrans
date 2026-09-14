@@ -1,6 +1,6 @@
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.1.0 (Production Hardened)
+ * Version: 2.2.0 (Production Hardened)
  * 
  * Major Fixes & Enhancements:
  * 1. Differential Save Protocol (lastSavedIndex tracking prevents duplicate doc entries)
@@ -681,7 +681,7 @@ class TranslationService {
 
     // Layer 1: Gemini REST API
     if (apiKey && apiKey.trim() !== '') {
-      const modelsToTry = ['gemini-3.5-flash-lite'];
+      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-exp'];
 
       for (const modelName of modelsToTry) {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
@@ -859,9 +859,10 @@ class App {
     this._initElements();
     this._loadSettings();
     this._bindEvents();
+    this._checkHashConfig();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.1.0)。差分同期・インプレースUIが有効です。');
+    this.log('info', '初期化完了 (v2.2.0)。差分同期・インプレースUIが有効です。');
   }
 
   log(type, message) {
@@ -919,6 +920,15 @@ class App {
     this.elBtnSaveSettings = document.getElementById('btn-save-settings');
 
     this.elToastContainer = document.getElementById('toast-container');
+
+    // QR Code Modal elements
+    this.elBtnOpenQr = document.getElementById('btn-open-qr');
+    this.elQrModal = document.getElementById('qr-modal');
+    this.elBtnCloseQrModal = document.getElementById('btn-close-qr-modal');
+    this.elBtnDoneQrModal = document.getElementById('btn-done-qr-modal');
+    this.elQrCanvas = document.getElementById('qr-canvas');
+    this.elInputShareUrl = document.getElementById('input-share-url');
+    this.elBtnCopyShareUrl = document.getElementById('btn-copy-share-url');
   }
 
   _loadSettings() {
@@ -1076,6 +1086,40 @@ class App {
     };
     this.geminiClient.onInterimCallback = (text) => this._renderInterim(text);
     this.geminiClient.onFinalCallback = (finalText, langCode) => this._handleFinalSpeech(finalText, langCode);
+
+    // QR Modal Events
+    if (this.elBtnOpenQr) {
+      this.elBtnOpenQr.addEventListener('click', () => this._openQrModal());
+    }
+    if (this.elBtnCloseQrModal) {
+      this.elBtnCloseQrModal.addEventListener('click', () => {
+        this.elQrModal.style.display = 'none';
+      });
+    }
+    if (this.elBtnDoneQrModal) {
+      this.elBtnDoneQrModal.addEventListener('click', () => {
+        this.elQrModal.style.display = 'none';
+      });
+    }
+    if (this.elQrModal) {
+      this.elQrModal.addEventListener('click', (e) => {
+        if (e.target === this.elQrModal) this.elQrModal.style.display = 'none';
+      });
+    }
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.elQrModal && this.elQrModal.style.display === 'flex') {
+        this.elQrModal.style.display = 'none';
+      }
+    });
+    if (this.elBtnCopyShareUrl) {
+      this.elBtnCopyShareUrl.addEventListener('click', () => {
+        if (this.elInputShareUrl.value) {
+          navigator.clipboard.writeText(this.elInputShareUrl.value).then(() => {
+            this.showToast('スマホ連携用URLをクリップボードにコピーしました。', 'info');
+          });
+        }
+      });
+    }
   }
 
   _syncDocModeUI() {
@@ -1506,6 +1550,95 @@ class App {
       this.elUnsavedBadge.style.display = 'none';
     }
   }
+
+  /**
+   * PCで設定された情報をURLフラグメント(#setup=...)としてQRコード化
+   */
+  _openQrModal() {
+    if (!this.apiKey && !this.gasUrl) {
+      this.showToast('先に「⚙️ 設定」でGemini APIキーまたはGAS設定を入力してください。', 'warning');
+      this.elModal.style.display = 'flex';
+      return;
+    }
+
+    const config = {
+      apiKey: this.apiKey || '',
+      gasUrl: this.gasUrl || '',
+      gasToken: this.gasToken || '',
+      direction: this.direction || 'auto',
+      engineMode: this.engineMode || 'auto',
+      liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
+      autoSave: this.autoSave,
+      docMode: this.docMode || 'new',
+      lastDocId: this.lastDocId || ''
+    };
+
+    try {
+      const jsonStr = JSON.stringify(config);
+      // Safe UTF-8 to Base64
+      const b64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g, (match, p1) => String.fromCharCode('0x' + p1)));
+      
+      const baseUrl = window.location.origin + window.location.pathname;
+      const shareUrl = `${baseUrl}#setup=${encodeURIComponent(b64)}`;
+
+      this.elInputShareUrl.value = shareUrl;
+
+      // Render QR Code onto canvas
+      if (window.QRCode && QRCode.renderCanvas && this.elQrCanvas) {
+        QRCode.renderCanvas(this.elQrCanvas, shareUrl, {
+          size: 240,
+          margin: 2,
+          dark: '#1F2328',
+          light: '#FFFFFF'
+        });
+      }
+
+      this.elQrModal.style.display = 'flex';
+      this.log('info', 'スマホ連携用QRコードを表示しました。');
+    } catch (err) {
+      console.error('Failed to generate QR code:', err);
+      this.showToast('QRコードの生成に失敗しました: ' + err.message, 'error');
+    }
+  }
+
+  /**
+   * スマホでの読み取り時: URLフラグメント(#setup=...)から設定をインポート
+   */
+  _checkHashConfig() {
+    const hash = window.location.hash;
+    if (hash && hash.startsWith('#setup=')) {
+      try {
+        const rawData = hash.substring(7);
+        const jsonStr = decodeURIComponent(Array.prototype.map.call(atob(decodeURIComponent(rawData)), (c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+        const config = JSON.parse(jsonStr);
+
+        if (config.apiKey) ConfigManager.set(ConfigManager.STORAGE_KEYS.API_KEY, config.apiKey);
+        if (config.gasUrl) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_URL, config.gasUrl);
+        if (config.gasToken) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, config.gasToken);
+        if (config.direction) ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, config.direction);
+        if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
+        if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
+        if (config.autoSave !== undefined) ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(config.autoSave));
+        if (config.docMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, config.docMode);
+        if (config.lastDocId) ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, config.lastDocId);
+
+        // Security: Remove hash from URL so secrets don't persist in address bar
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+
+        setTimeout(() => {
+          this._loadSettings();
+          this.log('success', 'スマホ連携: PCで設定された情報（APIキー・GAS設定）をインポートしました！');
+          this.showToast('📱 PCからの設定をインポートしました！', 'success');
+        }, 150);
+      } catch (err) {
+        console.warn('Failed to parse setup hash:', err);
+        this.log('error', `設定インポート失敗: ${err.message}`);
+      }
+    }
+  }
+
 
   showToast(message, type = 'info') {
     if (!this.elToastContainer) return;
