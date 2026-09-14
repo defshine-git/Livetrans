@@ -920,7 +920,6 @@ class AudioCaptureService {
     this.filterNode = null;
     this.analyserNode = null;
     this.processorNode = null;
-    this.sentenceSplitter.reset();
     this.isRecording = false;
     this.isPaused = false;
     this.gainValue = 2.5; // 遠距離集音ブースト初期値 (推奨 2.5x)
@@ -1113,7 +1112,6 @@ class AudioCaptureService {
     this.filterNode.connect(this.processorNode);
     this.processorNode.connect(this.audioContext.destination);
 
-    this.sentenceSplitter.reset();
     this.isRecording = true;
     this.isPaused = false;
   }
@@ -2514,6 +2512,7 @@ class App {
         this.log('success', 'ブラウザ標準音声認識 + Gemini翻訳パイプラインが起動しました。');
       }
 
+      if (this.sentenceSplitter) this.sentenceSplitter.reset();
       this.isRecording = true;
       this.isPaused = false;
       this.elLivePreview.style.display = 'flex';
@@ -2547,6 +2546,7 @@ class App {
       try { this.webSpeechService.stop(); } catch (e) {}
     }
 
+    if (this.sentenceSplitter) this.sentenceSplitter.reset();
     this.isRecording = false;
     this.isPaused = false;
     this.activeEngine = 'none';
