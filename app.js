@@ -1,6 +1,6 @@
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.0.0 (Production Hardened)
+ * Version: 2.1.0 (Production Hardened)
  * 
  * Major Fixes & Enhancements:
  * 1. Differential Save Protocol (lastSavedIndex tracking prevents duplicate doc entries)
@@ -614,16 +614,23 @@ class GeminiLiveClient {
 }
 
 // ==========================================
-// 5. Translation Service & Sequential FIFO Queue
+// 5. Translation Service & 3-Layer Resilient Queue
 // ==========================================
 class TranslationService {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
+    this.onLogCallback = null;
   }
 
-  enqueue(text, direction, apiKey, recordId, onComplete) {
-    this.queue.push({ text, direction, apiKey, recordId, onComplete });
+  log(type, message) {
+    if (this.onLogCallback) {
+      this.onLogCallback(type, `[Translation] ${message}`);
+    }
+  }
+
+  enqueue(text, direction, apiKey, gasUrl, gasToken, recordId, onComplete) {
+    this.queue.push({ text, direction, apiKey, gasUrl, gasToken, recordId, onComplete });
     this._processNext();
   }
 
@@ -633,14 +640,14 @@ class TranslationService {
 
     const job = this.queue.shift();
     try {
-      const result = await this._executeTranslation(job.text, job.direction, job.apiKey);
+      const result = await this._executeTranslation(job);
       if (job.onComplete) {
         job.onComplete(job.recordId, result);
       }
     } catch (err) {
-      console.warn('Translation job failed:', err);
+      this.log('error', `翻訳ジョブ致命的エラー: ${err.message}`);
       if (job.onComplete) {
-        job.onComplete(job.recordId, { translated: '(翻訳エラー)', speakerLang: 'auto' });
+        job.onComplete(job.recordId, { translated: '(翻訳失敗)', speakerLang: 'auto' });
       }
     } finally {
       this.isProcessing = false;
@@ -648,7 +655,7 @@ class TranslationService {
     }
   }
 
-  async _executeTranslation(text, direction, apiKey) {
+  async _executeTranslation({ text, direction, apiKey, gasUrl, gasToken }) {
     if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
 
     let srcLang = 'ja';
@@ -672,35 +679,105 @@ class TranslationService {
                  + `2. Do not include quotes, explanations, prefixes, or notes.\n\n`
                  + `Text:\n${text}`;
 
-    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+    // Layer 1: Gemini REST API
+    if (apiKey && apiKey.trim() !== '') {
+      const modelsToTry = ['gemini-3.5-flash-lite'];
 
-    for (const modelName of modelsToTry) {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.1,
-              maxOutputTokens: 800
+      for (const modelName of modelsToTry) {
+        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+        try {
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 800
+              }
+            })
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+              const transText = data.candidates[0].content.parts[0].text.trim();
+              this.log('success', `Gemini (${modelName}) 翻訳完了: "${transText}"`);
+              return {
+                translated: transText,
+                speakerLang: srcLang
+              };
             }
+          } else {
+            const errData = await res.json().catch(() => null);
+            const errDetail = errData?.error?.message || `HTTP ${res.status}`;
+            this.log('warn', `Gemini (${modelName}) 失敗: ${errDetail}`);
+          }
+        } catch (err) {
+          this.log('warn', `Gemini (${modelName}) 通信エラー: ${err.message}`);
+        }
+      }
+    } else {
+      this.log('warn', 'Gemini APIキーが未入力のため、フォールバック翻訳を使用します。');
+    }
+
+    // Layer 2: GAS Web App (LanguageApp) Fallback
+    if (gasUrl && gasUrl.trim() !== '') {
+      this.log('info', 'GAS (LanguageApp) による自動フォールバック翻訳を実行中...');
+      try {
+        const gasRes = await fetch(gasUrl.trim(), {
+          method: 'POST',
+          mode: 'cors',
+          redirect: 'follow',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({
+            action: 'translate',
+            token: gasToken || '',
+            text: text,
+            srcLang: srcLang,
+            targetLang: targetLang
           })
         });
 
-        if (res.ok) {
-          const data = await res.json();
-          if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+        if (gasRes.ok) {
+          const gasData = await gasRes.json();
+          if (gasData.status === 'success' && gasData.translated) {
+            this.log('success', `GAS翻訳完了: "${gasData.translated}"`);
             return {
-              translated: data.candidates[0].content.parts[0].text.trim(),
+              translated: gasData.translated.trim(),
+              speakerLang: srcLang
+            };
+          } else if (gasData.message) {
+            this.log('warn', `GAS翻訳応答エラー: ${gasData.message}`);
+          }
+        } else {
+          this.log('warn', `GAS翻訳通信エラー: HTTP ${gasRes.status}`);
+        }
+      } catch (gasErr) {
+        this.log('warn', `GAS翻訳接続失敗: ${gasErr.message}`);
+      }
+    }
+
+    // Layer 3: Web Google Translate Endpoint Fallback
+    this.log('info', 'Web翻訳エンジンによるフォールバックを実行中...');
+    try {
+      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${srcLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+      const gtxRes = await fetch(gtxUrl);
+      if (gtxRes.ok) {
+        const gtxData = await gtxRes.json();
+        if (gtxData && gtxData[0]) {
+          const transText = gtxData[0].map(item => item[0]).join('').trim();
+          if (transText) {
+            this.log('success', `Web翻訳完了: "${transText}"`);
+            return {
+              translated: transText,
               speakerLang: srcLang
             };
           }
         }
-      } catch (err) {
-        console.warn(`Translation attempt with ${modelName} failed:`, err);
       }
+    } catch (gtxErr) {
+      this.log('warn', `Web翻訳接続失敗: ${gtxErr.message}`);
     }
 
     return {
@@ -771,6 +848,7 @@ class App {
     this.webSpeechService = new WebSpeechService();
     this.geminiClient = new GeminiLiveClient();
     this.translationService = new TranslationService();
+    this.translationService.onLogCallback = (type, msg) => this.log(type, msg);
 
     this.activeEngine = 'none';
     this.records = [];
@@ -783,7 +861,7 @@ class App {
     this._bindEvents();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.0.0)。差分同期・インプレースUIが有効です。');
+    this.log('info', '初期化完了 (v2.1.0)。差分同期・インプレースUIが有効です。');
   }
 
   log(type, message) {
@@ -1188,6 +1266,8 @@ class App {
       finalText,
       this.direction,
       this.apiKey,
+      this.gasUrl,
+      this.gasToken,
       recordId,
       (id, transResult) => this._onTranslationComplete(id, transResult)
     );
