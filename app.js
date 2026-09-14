@@ -1427,6 +1427,27 @@ class App {
     }
   }
 
+  showToast(message, type = 'info') {
+    if (!this.elToastContainer) return;
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    
+    let icon = 'ℹ️';
+    if (type === 'success') icon = '✅';
+    if (type === 'error') icon = '⚠️';
+    if (type === 'warning') icon = '🔔';
+
+    toast.innerHTML = `<span>${icon}</span><span>${this._escapeHTML(message)}</span>`;
+    this.elToastContainer.appendChild(toast);
+
+    setTimeout(() => {
+      toast.style.transition = 'opacity 0.3s, transform 0.3s';
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateY(10px)';
+      setTimeout(() => toast.remove(), 300);
+    }, 4000);
+  }
+
   _escapeHTML(str) {
     if (!str) return '';
     return String(str)
@@ -1442,3 +1463,4 @@ class App {
 document.addEventListener('DOMContentLoaded', () => {
   window.app = new App();
 });
+
