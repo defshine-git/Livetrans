@@ -920,6 +920,7 @@ class AudioCaptureService {
     this.filterNode = null;
     this.analyserNode = null;
     this.processorNode = null;
+    this.sentenceSplitter.reset();
     this.isRecording = false;
     this.isPaused = false;
     this.gainValue = 2.5; // 遠距離集音ブースト初期値 (推奨 2.5x)
@@ -1112,6 +1113,7 @@ class AudioCaptureService {
     this.filterNode.connect(this.processorNode);
     this.processorNode.connect(this.audioContext.destination);
 
+    this.sentenceSplitter.reset();
     this.isRecording = true;
     this.isPaused = false;
   }
@@ -1922,6 +1924,115 @@ class GasStorageClient {
 }
 
 // ==========================================
+// StreamSentenceSplitter (リアルタイム文分割・自動チャンキング機構)
+// 早口・連続スピーチ時でも文ごとに自動確定して即座に翻訳へ送る
+// ==========================================
+class StreamSentenceSplitter {
+  constructor() {
+    this.confirmedText = '';
+    this.lastRawText = '';
+  }
+
+  reset() {
+    this.confirmedText = '';
+    this.lastRawText = '';
+  }
+
+  feed(currentFullText, onChunk) {
+    if (!currentFullText) return '';
+    this.lastRawText = currentFullText;
+
+    let unconfirmed = '';
+    if (this.confirmedText && currentFullText.startsWith(this.confirmedText)) {
+      unconfirmed = currentFullText.slice(this.confirmedText.length).trim();
+    } else if (this.confirmedText && currentFullText.length > this.confirmedText.length) {
+      unconfirmed = currentFullText.slice(this.confirmedText.length).trim();
+    } else {
+      unconfirmed = currentFullText.trim();
+    }
+
+    if (!unconfirmed) {
+      return '';
+    }
+
+    const emitted = [];
+    let remaining = unconfirmed;
+
+    while (true) {
+      // 1. 文末記号 ([.?!。！？]) ＋ スペース ＋ 次の文の開始文字 を検出
+      const m = remaining.match(/^([\s\S]*?[.?!。！？])(?:\s+([A-Z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff][\s\S]*)|$)/);
+      if (m) {
+        const sentence = m[1].trim();
+        const nextPart = m[2];
+        if (nextPart) {
+          emitted.push(sentence);
+          remaining = nextPart.trim();
+          continue;
+        } else if (sentence.length >= 70) {
+          emitted.push(sentence);
+          remaining = '';
+          break;
+        } else {
+          break;
+        }
+      } else {
+        // 2. ピリオド等が付かない長文（140文字以上）は、カンマ等で安全に分割
+        if (remaining.length >= 140) {
+          const commaM = remaining.match(/^([\s\S]*?[,、;])\s+([\s\S]+)$/);
+          if (commaM && commaM[1].trim().length >= 40) {
+            emitted.push(commaM[1].trim());
+            remaining = commaM[2].trim();
+            continue;
+          }
+        }
+        break;
+      }
+    }
+
+    if (emitted.length > 0) {
+      if (remaining) {
+        const pos = currentFullText.lastIndexOf(remaining);
+        if (pos !== -1) {
+          this.confirmedText = currentFullText.slice(0, pos);
+        } else {
+          this.confirmedText += ' ' + emitted.join(' ');
+        }
+      } else {
+        this.confirmedText = currentFullText;
+      }
+
+      for (const s of emitted) {
+        if (onChunk) onChunk(s);
+      }
+    }
+
+    return remaining;
+  }
+
+  flush(finalText, onChunk) {
+    const textToFlush = finalText || this.lastRawText;
+    let leftover = '';
+    if (textToFlush) {
+      if (this.confirmedText && textToFlush.startsWith(this.confirmedText)) {
+        leftover = textToFlush.slice(this.confirmedText.length).trim();
+      } else if (textToFlush.length > this.confirmedText.length) {
+        leftover = textToFlush.slice(this.confirmedText.length).trim();
+      } else {
+        leftover = textToFlush.trim();
+      }
+    }
+
+    this.confirmedText = '';
+    this.lastRawText = '';
+
+    if (leftover && onChunk) {
+      onChunk(leftover);
+    }
+    return leftover;
+  }
+}
+
+// ==========================================
 // 7. Main Application Controller
 // ==========================================
 class App {
@@ -1929,6 +2040,7 @@ class App {
     this.audioService = new AudioCaptureService();
     this.webSpeechService = new WebSpeechService();
     this.geminiClient = new GeminiLiveClient();
+    this.sentenceSplitter = new StreamSentenceSplitter();
     this.translationService = new TranslationService();
     this.translationService.onLogCallback = (type, msg) => this.log(type, msg);
 
@@ -2115,6 +2227,7 @@ class App {
       if (confirm('タイムラインの翻訳履歴を全消去しますか？')) {
         this.records = [];
         this.savedRecordCount = 0;
+        this.sentenceSplitter.reset();
         this.hasUnsavedChanges = false;
         this.elTranscriptList.innerHTML = '';
         this.elEmptyState.style.display = 'block';
@@ -2243,8 +2356,18 @@ class App {
       this.log('warn', `セッション終了切断: Code ${code}`);
       this.stopRecording();
     };
-    this.geminiClient.onInterimCallback = (text) => this._renderInterim(text);
-    this.geminiClient.onFinalCallback = (finalText, langCode) => this._handleFinalSpeech(finalText, langCode);
+    this.geminiClient.onInterimCallback = (text) => {
+      const rem = this.sentenceSplitter.feed(text, (chunk) => {
+        this._handleFinalSpeech(chunk, null);
+      });
+      this._renderInterim(rem);
+    };
+    this.geminiClient.onFinalCallback = (finalText, langCode) => {
+      this.sentenceSplitter.flush(finalText, (chunk) => {
+        this._handleFinalSpeech(chunk, langCode);
+      });
+      this._renderInterim('');
+    };
 
     // QR Modal Events
     if (this.elBtnOpenQr) {
@@ -2367,8 +2490,18 @@ class App {
 
         this.webSpeechService.start(
           this.direction,
-          (interim) => this._renderInterim(interim),
-          (finalText, lang) => this._handleFinalSpeech(finalText, lang),
+          (interim) => {
+            const rem = this.sentenceSplitter.feed(interim, (chunk) => {
+              this._handleFinalSpeech(chunk, null);
+            });
+            this._renderInterim(rem);
+          },
+          (finalText, lang) => {
+            this.sentenceSplitter.flush(finalText, (chunk) => {
+              this._handleFinalSpeech(chunk, lang);
+            });
+            this._renderInterim('');
+          },
           (err) => {
             this.log('error', `WebSpeechエラー: ${err.message}`);
             this.showToast(err.message, 'error');
