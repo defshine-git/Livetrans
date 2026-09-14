@@ -46,7 +46,13 @@
             <span class="btn-icon-symbol">⏸️</span>
             <span class="btn-text">一時停止</span>
           </button>
-          
+          <div class="control-group source-group">
+            <label for="select-audio-source" class="control-label">音源:</label>
+            <select id="select-audio-source" class="select-input" title="音声入力元を選択">
+              <option value="mic" selected>マイク (対面会話)</option>
+              <option value="display">タブ・PC音声 (イヤホン・ウェブ会議)</option>
+            </select>
+          </div>
           <div class="control-group direction-group">
             <label for="select-direction" class="control-label">翻訳:</label>
             <select id="select-direction" class="select-input">

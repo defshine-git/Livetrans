@@ -883,7 +883,8 @@ class ConfigManager {
     GAIN: 'glt_mic_gain',
     LAST_DOC_ID: 'glt_last_doc_id',
     ENGINE_MODE: 'glt_engine_mode',
-    LIVE_MODEL: 'glt_live_model'
+    LIVE_MODEL: 'glt_live_model',
+    AUDIO_SOURCE: 'glt_audio_source'
   };
 
   static get(key, defaultValue = '') {
@@ -957,36 +958,84 @@ class AudioCaptureService {
     return Promise.resolve();
   }
 
-  async start(onChunk, onVolume) {
+  async start(onChunk, onVolume, sourceType = 'mic', onEnded = null) {
     if (this.isRecording) return;
     this.onChunkCallback = onChunk;
     this.onVolumeCallback = onVolume;
 
     await this.ensureContext();
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
-    }
+    if (sourceType === 'display') {
+      // タブ・PC・システム音声キャプチャ (getDisplayMedia)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error('お使いのブラウザはタブ・PC音声のキャプチャに対応していません。Chrome または Edge をご利用ください。');
+      }
 
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: false, // 遠くの小声を拾うため過剰抑制を無効化
-          autoGainControl: true,
-          googAutoGainControl: true,
-          googNoiseSuppression: false,
-          googHighpassFilter: false
+      let displayStream;
+      try {
+        displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: 1 },
+            height: { ideal: 1 },
+            frameRate: { ideal: 1 }
+          },
+          audio: {
+            channelCount: 1,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false
+          }
+        });
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          throw new Error('画面・音声共有がキャンセルされました。');
         }
-      });
-    } catch (err) {
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        throw new Error('マイクへのアクセスが拒否されました。ブラウザのアドレスバーからマイク使用を許可してください。');
-      } else if (err.name === 'NotFoundError') {
-        throw new Error('利用可能なマイク機器が見つかりませんでした。');
-      } else {
-        throw new Error(`マイクの取得に失敗しました: ${err.message}`);
+        throw new Error(`PC音声の共有に失敗しました: ${err.message}`);
+      }
+
+      const audioTracks = displayStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        displayStream.getTracks().forEach((t) => t.stop());
+        throw new Error('音声が共有されていません。共有ウィンドウで「タブの音声も共有」または「音声を共有」のチェックボックスに必ずチェックを入れてください。');
+      }
+
+      // 不要なビデオトラックを停止して負荷を低減
+      displayStream.getVideoTracks().forEach((t) => t.stop());
+
+      this.mediaStream = new MediaStream([audioTracks[0]]);
+
+      // ユーザーがブラウザの共有停止ボタンを押した時のハンドラ
+      if (onEnded) {
+        audioTracks[0].onended = () => {
+          onEnded();
+        };
+      }
+    } else {
+      // 通常のマイク入力 (getUserMedia)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
+      }
+
+      try {
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: false,
+            autoGainControl: true,
+            googAutoGainControl: true,
+            googNoiseSuppression: false,
+            googHighpassFilter: false
+          }
+        });
+      } catch (err) {
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          throw new Error('マイクへのアクセスが拒否されました。ブラウザのアドレスバーからマイク使用を許可してください。');
+        } else if (err.name === 'NotFoundError') {
+          throw new Error('利用可能なマイク機器が見つかりませんでした。');
+        } else {
+          throw new Error(`マイクの取得に失敗しました: ${err.message}`);
+        }
       }
     }
 
@@ -1918,6 +1967,7 @@ class App {
     this.elBtnPauseRecord = document.getElementById('btn-pause-record');
     this.elSelectDirection = document.getElementById('select-direction');
     this.elSelectCategory = document.getElementById('select-category');
+    this.elSelectAudioSource = document.getElementById('select-audio-source');
     this.elSelectGain = document.getElementById('select-gain');
     this.elSelectDefaultGain = document.getElementById('select-default-gain');
     this.elBtnClearFeed = document.getElementById('btn-clear-feed');
@@ -1979,6 +2029,7 @@ class App {
     this.apiKey = ConfigManager.get(ConfigManager.STORAGE_KEYS.API_KEY, '');
     this.gasUrl = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_URL, '');
     this.gasToken = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_TOKEN, '');
+    this.audioSource = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, 'mic');
     this.direction = ConfigManager.get(ConfigManager.STORAGE_KEYS.DIRECTION, 'auto');
     this.category = ConfigManager.get(ConfigManager.STORAGE_KEYS.CATEGORY, 'HKC');
     this.gain = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAIN, '2.5');
@@ -1994,6 +2045,7 @@ class App {
     this.elInputApiKey.value = this.apiKey;
     this.elInputGasUrl.value = this.gasUrl;
     this.elInputGasToken.value = this.gasToken;
+    if (this.elSelectAudioSource) this.elSelectAudioSource.value = this.audioSource;
     this.elSelectDirection.value = this.direction;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
     if (this.elSelectGain) this.elSelectGain.value = this.gain;
@@ -2016,6 +2068,18 @@ class App {
   _bindEvents() {
     this.elBtnToggleRecord.addEventListener('click', () => this.toggleRecording());
     this.elBtnPauseRecord.addEventListener('click', () => this.togglePause());
+
+    if (this.elSelectAudioSource) {
+      this.elSelectAudioSource.addEventListener('change', (e) => {
+        this.audioSource = e.target.value;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, this.audioSource);
+        this.log('info', `音源切り替え: ${this.audioSource === 'display' ? '🖥️ タブ・PC音声 (イヤホン再生音)' : '🎤 マイク入力'}`);
+        this._updateUIState();
+        if (this.isRecording) {
+          this.showToast('音源設定を変更しました。再起動後に適用されます。', 'info');
+        }
+      });
+    }
 
     this.elSelectDirection.addEventListener('change', (e) => {
       this.direction = e.target.value;
@@ -2261,10 +2325,19 @@ class App {
           this.log('info', 'Gemini Live WebSocket へ接続試行中...');
           await this.geminiClient.connect(this.apiKey, this.direction, this.liveModel);
 
-          this.log('info', 'マイク音声取得開始 (Anti-Aliased 16kHz)...');
+          const isDisplay = this.audioSource === 'display';
+          this.log('info', isDisplay ? '🖥️ タブ・PC音声キャプチャ開始 (16kHz PCM)...' : '🎤 マイク音声取得開始 (Anti-Aliased 16kHz)...');
+          if (isDisplay) {
+            this.showToast('共有ウィンドウで「タブの音声も共有」にチェックを入れてください。', 'info');
+          }
           await this.audioService.start(
             (chunk) => this.geminiClient.sendAudioChunk(chunk),
-            (volume) => this._updateMeter(volume)
+            (volume) => this._updateMeter(volume),
+            this.audioSource,
+            () => {
+              this.log('info', 'ユーザーにより画面・音声共有が停止されました。');
+              this.stopRecording();
+            }
           );
 
           this.activeEngine = 'gemini-live';
@@ -2285,6 +2358,9 @@ class App {
       }
 
       if (!liveConnected) {
+        if (this.audioSource === 'display') {
+          throw new Error('タブ・PC音声キャプチャは Gemini Live API で動作します。Gemini APIキーおよびネットワーク設定をご確認ください。');
+        }
         if (!this.webSpeechService.isSupported()) {
           throw new Error('ブラウザの音声認識APIが利用できません。Chrome または Edge でアクセスしてください。');
         }
@@ -2817,8 +2893,9 @@ class App {
       this.elBtnPauseRecord.disabled = false;
     } else {
       this.elBtnToggleRecord.classList.remove('is-recording');
-      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '🎤';
-      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '録音開始';
+      const isDisplay = this.audioSource === 'display';
+      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = isDisplay ? '🖥️' : '🎤';
+      this.elBtnToggleRecord.querySelector('.btn-text').textContent = isDisplay ? 'PC音声共有開始' : '録音開始';
       this.elBtnPauseRecord.disabled = true;
       this.elBtnPauseRecord.querySelector('.btn-text').textContent = '一時停止';
     }
