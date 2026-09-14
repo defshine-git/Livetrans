@@ -2,7 +2,7 @@
  * app.js - Frontend Client Logic for Gemini Live Bilingual Translator
  * Model: models/gemini-3.5-transcribe-live
  * 
- * Production Refactored & Reviewed Version
+ * v1.1.0: Real-time Live Transcription (v1beta WebSockets) + Fast Concurrent Translation
  */
 
 // ==========================================
@@ -15,7 +15,8 @@ class ConfigManager {
     DIRECTION: 'glt_translation_direction',
     AUTO_SAVE: 'glt_auto_save_enabled',
     DOC_MODE: 'glt_doc_mode',
-    LAST_DOC_ID: 'glt_last_doc_id'
+    LAST_DOC_ID: 'glt_last_doc_id',
+    TRANS_MODEL: 'glt_translation_model'
   };
 
   static get(key, defaultValue = '') {
@@ -38,7 +39,7 @@ class ConfigManager {
 }
 
 // ==========================================
-// 2. Audio Capture Service (Web Audio API & Downsampling)
+// 2. Audio Capture Service (Web Audio API & 16kHz PCM)
 // ==========================================
 class AudioCaptureService {
   constructor() {
@@ -52,9 +53,6 @@ class AudioCaptureService {
     this.onVolumeCallback = null;
   }
 
-  /**
-   * Safari/iOS対策: ユーザーインタラクションの同期待機スタックで即時コンテキストを確保・再開
-   */
   ensureContext() {
     if (!this.audioContext || this.audioContext.state === 'closed') {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -73,32 +71,40 @@ class AudioCaptureService {
 
     await this.ensureContext();
 
-    // マイク入力ストリームの取得
-    this.mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
+    try {
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+    } catch (err) {
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        throw new Error('マイクへのアクセスが拒否されました。ブラウザのアドレスバーの鍵アイコンからマイクの許可を設定してください。');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        throw new Error('利用可能なマイク機器が見つかりませんでした。マイクの接続を確認してください。');
+      } else {
+        throw new Error(`マイクの初期化に失敗しました: ${err.message}`);
       }
-    });
+    }
 
     const source = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // 音量メータ用 AnalyserNode
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 256;
     source.connect(this.analyser);
 
-    // AudioProcessor (バッファ: 4096)
-    const bufferSize = 4096;
+    // 2048 samples at 16kHz is 128ms chunks (recommended 100-200ms)
+    const bufferSize = 2048;
     this.processor = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
 
     const inputSampleRate = this.audioContext.sampleRate;
     const targetSampleRate = 16000;
 
     this.processor.onaudioprocess = (e) => {
-      // ハウリング防止: 出力バッファを必ず無音化
+      // Prevent feedback loop by muting output
       const outputBuffer = e.outputBuffer.getChannelData(0);
       outputBuffer.fill(0);
 
@@ -106,7 +112,7 @@ class AudioCaptureService {
 
       const inputBuffer = e.inputBuffer.getChannelData(0);
 
-      // 音量RMS計算
+      // Volume calculation
       if (this.onVolumeCallback && this.analyser) {
         let sum = 0;
         for (let i = 0; i < inputBuffer.length; i++) {
@@ -116,9 +122,9 @@ class AudioCaptureService {
         this.onVolumeCallback(rms);
       }
 
-      // 16000Hz 16bit PCMへダウンサンプリング
-      const downsampledBuffer = this._downsampleBuffer(inputBuffer, inputSampleRate, targetSampleRate);
-      const base64Chunk = this._int16ToBase64(downsampledBuffer);
+      // Downsample to 16kHz Int16 PCM
+      const downsampled = this._downsampleBuffer(inputBuffer, inputSampleRate, targetSampleRate);
+      const base64Chunk = this._int16ToBase64(downsampled);
 
       if (this.onChunkCallback && base64Chunk) {
         this.onChunkCallback(base64Chunk);
@@ -208,11 +214,12 @@ class AudioCaptureService {
 }
 
 // ==========================================
-// 3. Gemini Live WebSocket Client
+// 3. Gemini Live WebSocket Client (models/gemini-3.5-transcribe-live)
 // ==========================================
 class GeminiLiveClient {
   static MODEL = 'models/gemini-3.5-transcribe-live';
-  static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent';
+  // Note: Gemini Live API uses v1beta endpoint
+  static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 
   constructor() {
     this.ws = null;
@@ -221,7 +228,6 @@ class GeminiLiveClient {
     this.isConnected = false;
     this.isSetupComplete = false;
     this.chunkQueue = [];
-    this.accumulatedText = '';
 
     this._connectResolve = null;
     this._connectReject = null;
@@ -232,6 +238,7 @@ class GeminiLiveClient {
     this.onFinalCallback = null;
     this.onStatusChangeCallback = null;
     this.onErrorCallback = null;
+    this.onDisconnectCallback = null;
   }
 
   connect(apiKey, direction) {
@@ -241,13 +248,12 @@ class GeminiLiveClient {
       this.isSetupComplete = false;
       this.isConnected = false;
       this.chunkQueue = [];
-      this.accumulatedText = '';
 
       this._connectResolve = resolve;
       this._connectReject = reject;
 
       if (!apiKey) {
-        return reject(new Error('Gemini API キーが未設定です。設定画面で入力してください。'));
+        return reject(new Error('Gemini API キーが未設定です。「⚙️ 設定」から有効なAPIキーを入力してください。'));
       }
 
       const url = `${GeminiLiveClient.WS_URL}?key=${encodeURIComponent(this.apiKey)}`;
@@ -255,52 +261,63 @@ class GeminiLiveClient {
       try {
         this.ws = new WebSocket(url);
       } catch (err) {
-        return reject(err);
+        return reject(new Error(`WebSocket初期化エラー: ${err.message}`));
       }
 
       this._updateStatus('connecting');
 
-      // 10秒接続タイムアウト
+      // 12-second connection timeout
       this._connectTimeout = setTimeout(() => {
         if (!this.isSetupComplete) {
+          const timeoutErr = new Error('Gemini Live API への接続がタイムアウトしました。APIキーまたはネットワーク接続を確認してください。');
           this.disconnect();
-          reject(new Error('Gemini Live API への接続がタイムアウトしました。APIキーまたはネットワークを確認してください。'));
+          reject(timeoutErr);
         }
-      }, 10000);
+      }, 12000);
 
       this.ws.onopen = () => {
+        console.log('[GeminiLive] WebSocket opened. Sending setup payload...');
         this._sendSetupMessage();
       };
 
       this.ws.onmessage = async (event) => {
-        let msg = event.data;
+        let raw = event.data;
         if (event.data instanceof Blob) {
-          msg = await event.data.text();
+          raw = await event.data.text();
         }
-        this._handleServerMessage(msg);
+        this._handleServerMessage(raw);
       };
 
       this.ws.onerror = (event) => {
-        console.error('WebSocket Error:', event);
+        console.error('[GeminiLive] WebSocket error event:', event);
         this._cleanupTimeout();
         this._updateStatus('error');
         if (this._connectReject) {
-          this._connectReject(new Error('WebSocket 通信接続エラーが発生しました。'));
+          this._connectReject(new Error('Gemini Live API サーバーへの接続に失敗しました。APIキーが正しいか確認してください。'));
           this._connectReject = null;
-        }
-        if (this.onErrorCallback) {
-          this.onErrorCallback('WebSocket通信エラーが発生しました。');
         }
       };
 
       this.ws.onclose = (event) => {
+        console.warn(`[GeminiLive] WebSocket closed. Code: ${event.code}, Reason: "${event.reason}", Clean: ${event.wasClean}`);
         this._cleanupTimeout();
+
+        const wasConnected = this.isConnected && this.isSetupComplete;
         this.isConnected = false;
         this.isSetupComplete = false;
         this._updateStatus('idle');
+
         if (this._connectReject) {
-          this._connectReject(new Error(`WebSocketが切断されました (Code: ${event.code})`));
+          let errorMsg = `接続が切断されました (Code: ${event.code})`;
+          if (event.code === 1006) {
+            errorMsg = `Gemini Live API に接続できませんでした (Code: 1006)。APIキーが有効か、Google AI Studioで該当機能が利用可能か確認してください。`;
+          } else if (event.code === 1007 || event.code === 1008) {
+            errorMsg = `API認証またはリクエスト形式エラーです (Code: ${event.code}${event.reason ? ' - ' + event.reason : ''})。`;
+          }
+          this._connectReject(new Error(errorMsg));
           this._connectReject = null;
+        } else if (wasConnected && this.onDisconnectCallback) {
+          this.onDisconnectCallback(event.code, event.reason);
         }
       };
     });
@@ -316,6 +333,12 @@ class GeminiLiveClient {
   disconnect() {
     this._cleanupTimeout();
     if (this.ws) {
+      if (this.ws.readyState === WebSocket.OPEN) {
+        try {
+          // Send audioStreamEnd before closing
+          this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+        } catch (e) {}
+      }
       try {
         this.ws.close();
       } catch (e) {}
@@ -324,7 +347,6 @@ class GeminiLiveClient {
     this.isConnected = false;
     this.isSetupComplete = false;
     this.chunkQueue = [];
-    this.accumulatedText = '';
     this._updateStatus('idle');
   }
 
@@ -338,7 +360,6 @@ class GeminiLiveClient {
       return;
     }
 
-    // Flush queued chunks first
     while (this.chunkQueue.length > 0) {
       const qChunk = this.chunkQueue.shift();
       this._dispatchChunk(qChunk);
@@ -348,14 +369,13 @@ class GeminiLiveClient {
   }
 
   _dispatchChunk(base64Data) {
+    // Standard format for Live Transcribe v1beta
     const payload = {
       realtimeInput: {
-        mediaChunks: [
-          {
-            mimeType: 'audio/pcm;rate=16000',
-            data: base64Data
-          }
-        ]
+        audio: {
+          data: base64Data,
+          mimeType: 'audio/pcm;rate=16000'
+        }
       }
     };
     try {
@@ -366,61 +386,53 @@ class GeminiLiveClient {
   }
 
   _sendSetupMessage() {
-    let instruction = '';
+    // Configure language hints based on user selection
+    let languageCodes = [];
     if (this.direction === 'ja-to-en') {
-      instruction = 'You are a professional real-time Japanese-to-English speech interpreter. '
-                  + 'Transcribe the spoken Japanese input accurately and translate it into natural, fluent English.';
+      languageCodes = ['ja-JP'];
     } else if (this.direction === 'en-to-ja') {
-      instruction = 'You are a professional real-time English-to-Japanese speech interpreter. '
-                  + 'Transcribe the spoken English input accurately and translate it into natural, polite Japanese.';
+      languageCodes = ['en-US'];
     } else {
-      instruction = 'You are a professional real-time bilingual speech interpreter between Japanese and English. '
-                  + 'If Japanese speech is detected, transcribe Japanese and translate into natural English. '
-                  + 'If English speech is detected, transcribe English and translate into natural Japanese.';
+      languageCodes = []; // auto-detect
     }
 
-    instruction += ' Output each translated utterance strictly as an individual JSON object with keys: '
-                 + '"speakerLang" ("ja" or "en"), "original" (transcribed text), and "translated" (translated text). '
-                 + 'Do not output markdown code blocks. Output one JSON object per utterance.';
-
+    // Official setup payload for models/gemini-3.5-transcribe-live
     const setupPayload = {
       setup: {
         model: GeminiLiveClient.MODEL,
         generationConfig: {
-          responseModalities: ['TEXT'],
-          temperature: 0.2
+          responseModalities: ['TEXT']
         },
-        systemInstruction: {
-          parts: [{ text: instruction }]
+        inputAudioTranscription: {
+          languageCodes: languageCodes,
+          mode: 'SMART'
         }
       }
     };
 
+    console.log('[GeminiLive] Sending setupPayload:', JSON.stringify(setupPayload));
     this.ws.send(JSON.stringify(setupPayload));
   }
 
   _handleServerMessage(rawMessage) {
     try {
-      let data = rawMessage;
-      if (typeof rawMessage === 'string') {
-        data = JSON.parse(rawMessage);
-      }
+      const data = typeof rawMessage === 'string' ? JSON.parse(rawMessage) : rawMessage;
 
-      // 1. Setup Complete
+      // 1. Setup complete acknowledgment
       if (data.setupComplete) {
+        console.log('[GeminiLive] SetupComplete acknowledged by server!');
         this.isConnected = true;
         this.isSetupComplete = true;
         this._cleanupTimeout();
         this._updateStatus('recording');
 
-        // Resolve connection promise
         if (this._connectResolve) {
           this._connectResolve();
           this._connectResolve = null;
           this._connectReject = null;
         }
 
-        // Flush queued chunks
+        // Flush initial audio buffer
         while (this.chunkQueue.length > 0) {
           const qChunk = this.chunkQueue.shift();
           this._dispatchChunk(qChunk);
@@ -428,124 +440,29 @@ class GeminiLiveClient {
         return;
       }
 
-      // 2. Server Content
+      // 2. Transcription server content
       if (data.serverContent) {
         const sc = data.serverContent;
-        if (sc.modelTurn && sc.modelTurn.parts) {
-          sc.modelTurn.parts.forEach((part) => {
-            if (part.text) {
-              this.accumulatedText += part.text;
-              if (this.onInterimCallback) {
-                this.onInterimCallback(this.accumulatedText);
-              }
-              this._extractAndProcessJSON();
-            }
-          });
+
+        // Interim hypothesis (streaming speech preview)
+        if (sc.interimInputTranscription && sc.interimInputTranscription.text) {
+          const interimText = sc.interimInputTranscription.text;
+          if (this.onInterimCallback) {
+            this.onInterimCallback(interimText);
+          }
         }
 
-        if (sc.turnComplete) {
-          this._finalizeRemainingText();
+        // Finalized transcription (speaker paused or completed speech turn)
+        if (sc.inputTranscription && sc.inputTranscription.text) {
+          const finalText = sc.inputTranscription.text.trim();
+          const langCode = sc.inputTranscription.languageCode || null;
+          if (finalText.length > 0 && this.onFinalCallback) {
+            this.onFinalCallback(finalText, langCode);
+          }
         }
       }
     } catch (e) {
-      console.warn('Error handling server message:', e, rawMessage);
-    }
-  }
-
-  /**
-   * ストリーミング文字列から完全な { ... } オブジェクトを安全に抽出（複数個・エスケープ考慮）
-   */
-  _extractAndProcessJSON() {
-    let text = this.accumulatedText;
-    let i = 0;
-    let lastParsedEnd = 0;
-
-    while (i < text.length) {
-      if (text[i] === '{') {
-        let depth = 0;
-        let inString = false;
-        let escape = false;
-        let start = i;
-        let matched = false;
-
-        for (let j = i; j < text.length; j++) {
-          const c = text[j];
-          if (escape) {
-            escape = false;
-            continue;
-          }
-          if (c === '\\') {
-            escape = true;
-            continue;
-          }
-          if (c === '"') {
-            inString = !inString;
-            continue;
-          }
-          if (!inString) {
-            if (c === '{') depth++;
-            else if (c === '}') {
-              depth--;
-              if (depth === 0) {
-                const candidate = text.substring(start, j + 1);
-                try {
-                  const parsed = JSON.parse(candidate);
-                  if (parsed.original || parsed.translated) {
-                    if (this.onFinalCallback) {
-                      this.onFinalCallback({
-                        timestamp: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                        speakerLang: parsed.speakerLang || (this.direction === 'ja-to-en' ? 'ja' : this.direction === 'en-to-ja' ? 'en' : 'auto'),
-                        original: parsed.original || '',
-                        translated: parsed.translated || ''
-                      });
-                    }
-                    lastParsedEnd = j + 1;
-                    matched = true;
-                    i = j + 1;
-                    break;
-                  }
-                } catch (e) {
-                  // Not valid JSON yet
-                }
-              }
-            }
-          }
-        }
-
-        if (!matched) {
-          break; // Incomplete JSON chunk, wait for more tokens
-        }
-      } else {
-        i++;
-      }
-    }
-
-    if (lastParsedEnd > 0) {
-      this.accumulatedText = text.substring(lastParsedEnd).trim();
-      if (this.onInterimCallback) {
-        this.onInterimCallback(this.accumulatedText);
-      }
-    }
-  }
-
-  _finalizeRemainingText() {
-    this._extractAndProcessJSON();
-
-    const remaining = this.accumulatedText.trim();
-    if (remaining.length > 0) {
-      // JSONでパースできなかったプレーンテキストをフォールバック反映
-      if (this.onFinalCallback) {
-        this.onFinalCallback({
-          timestamp: new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          speakerLang: this.direction === 'ja-to-en' ? 'ja' : this.direction === 'en-to-ja' ? 'en' : 'auto',
-          original: remaining,
-          translated: '(逐次テキスト)'
-        });
-      }
-      this.accumulatedText = '';
-      if (this.onInterimCallback) {
-        this.onInterimCallback('');
-      }
+      console.warn('Error parsing server message:', e, rawMessage);
     }
   }
 
@@ -557,7 +474,80 @@ class GeminiLiveClient {
 }
 
 // ==========================================
-// 4. GAS Storage Client (Google Docs Integration)
+// 4. Translation Service (Fast Concurrent REST Translation)
+// ==========================================
+class TranslationService {
+  static async translate(text, direction, apiKey) {
+    if (!text || text.trim() === '') return '';
+
+    // Automatic language detection if direction is auto
+    let srcLang = 'ja';
+    let targetLang = 'en';
+
+    if (direction === 'ja-to-en') {
+      srcLang = 'ja';
+      targetLang = 'en';
+    } else if (direction === 'en-to-ja') {
+      srcLang = 'en';
+      targetLang = 'ja';
+    } else {
+      // Auto: detect whether text contains Japanese characters
+      const hasJapanese = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text);
+      srcLang = hasJapanese ? 'ja' : 'en';
+      targetLang = hasJapanese ? 'en' : 'ja';
+    }
+
+    const prompt = `You are a professional simultaneous interpreter. Translate the following text from ${srcLang === 'ja' ? 'Japanese' : 'English'} into fluent, natural ${targetLang === 'ja' ? 'Japanese' : 'English'}.\n`
+                 + `Strict requirements:\n`
+                 + `1. Return ONLY the direct translation.\n`
+                 + `2. Do not include quotes, markdown formatting, explanations, or notes.\n\n`
+                 + `Text to translate:\n${text}`;
+
+    // Try models: gemini-2.5-flash -> gemini-1.5-flash
+    const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    let lastError = null;
+
+    for (const modelName of modelsToTry) {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 1000
+            }
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+            return {
+              translated: data.candidates[0].content.parts[0].text.trim(),
+              speakerLang: srcLang
+            };
+          }
+        } else {
+          lastError = new Error(`Model ${modelName} HTTP ${res.status}`);
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    console.warn('Translation REST call failed:', lastError);
+    return {
+      translated: '(翻訳取得失敗)',
+      speakerLang: srcLang
+    };
+  }
+}
+
+// ==========================================
+// 5. GAS Storage Client (Google Docs Integration)
 // ==========================================
 class GasStorageClient {
   static async ping(gasUrl) {
@@ -590,7 +580,7 @@ class GasStorageClient {
       mode: 'cors',
       redirect: 'follow',
       headers: {
-        'Content-Type': 'text/plain' // CORS preflight (OPTIONS) 回避
+        'Content-Type': 'text/plain' // Bypass CORS preflight
       },
       body: JSON.stringify(payload)
     });
@@ -608,7 +598,7 @@ class GasStorageClient {
 }
 
 // ==========================================
-// 5. Main Application Controller
+// 6. Main Application Controller
 // ==========================================
 class App {
   constructor() {
@@ -627,11 +617,9 @@ class App {
   }
 
   _initElements() {
-    // Header & Status
     this.elStatusBadge = document.getElementById('connection-status');
     this.elBtnSettings = document.getElementById('btn-open-settings');
 
-    // Controls
     this.elBtnToggleRecord = document.getElementById('btn-toggle-record');
     this.elBtnPauseRecord = document.getElementById('btn-pause-record');
     this.elSelectDirection = document.getElementById('select-direction');
@@ -640,24 +628,20 @@ class App {
     this.elSaveDocsText = document.getElementById('btn-save-docs-text');
     this.elUnsavedBadge = document.getElementById('unsaved-badge');
 
-    // Document options
     this.elRadioDocModes = document.getElementsByName('doc-save-mode');
     this.elInputDocTitle = document.getElementById('input-doc-title');
     this.elInputDocId = document.getElementById('input-doc-id');
     this.elSavedDocBanner = document.getElementById('saved-doc-banner');
     this.elSavedDocLink = document.getElementById('saved-doc-link');
 
-    // Live interim & meter
     this.elMeterBar = document.querySelector('.meter-bar');
     this.elInterimText = document.getElementById('interim-text');
 
-    // Timeline feed
     this.elTranscriptList = document.getElementById('transcript-list');
     this.elEmptyState = document.getElementById('empty-state');
     this.elRecordCount = document.getElementById('record-count');
     this.elBtnCopyAll = document.getElementById('btn-copy-all');
 
-    // Settings Modal
     this.elModal = document.getElementById('settings-modal');
     this.elBtnCloseModal = document.getElementById('btn-close-modal');
     this.elInputApiKey = document.getElementById('input-gemini-key');
@@ -668,7 +652,6 @@ class App {
     this.elCheckAutoSave = document.getElementById('check-auto-save');
     this.elBtnSaveSettings = document.getElementById('btn-save-settings');
 
-    // Toast
     this.elToastContainer = document.getElementById('toast-container');
   }
 
@@ -696,12 +679,10 @@ class App {
   }
 
   _bindEvents() {
-    // Record toggle
     this.elBtnToggleRecord.addEventListener('click', () => this.toggleRecording());
     this.elBtnPauseRecord.addEventListener('click', () => this.togglePause());
 
-    // Direction change
-    this.elSelectDirection.addEventListener('change', async (e) => {
+    this.elSelectDirection.addEventListener('change', (e) => {
       this.direction = e.target.value;
       ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, this.direction);
       if (this.isRecording) {
@@ -709,7 +690,6 @@ class App {
       }
     });
 
-    // Clear feed
     this.elBtnClearFeed.addEventListener('click', () => {
       if (this.records.length === 0) return;
       if (confirm('タイムラインの翻訳履歴をクリアしますか？（未保存の履歴は失われます）')) {
@@ -721,10 +701,8 @@ class App {
       }
     });
 
-    // Save to Google Docs
     this.elBtnSaveDocs.addEventListener('click', () => this.saveToDocs());
 
-    // Doc Mode Toggle
     for (const radio of this.elRadioDocModes) {
       radio.addEventListener('change', (e) => {
         this.docMode = e.target.value;
@@ -733,10 +711,9 @@ class App {
       });
     }
 
-    // Copy all
     this.elBtnCopyAll.addEventListener('click', () => this.copyAllTranscripts());
 
-    // Modal events
+    // Modal
     this.elBtnSettings.addEventListener('click', () => {
       this.elModal.style.display = 'flex';
       this.elInputApiKey.focus();
@@ -776,7 +753,6 @@ class App {
       this.showToast('設定を保存しました。', 'success');
     });
 
-    // Test GAS Connection
     this.elBtnTestGas.addEventListener('click', async () => {
       const url = this.elInputGasUrl.value.trim();
       if (!url) {
@@ -804,8 +780,19 @@ class App {
     // Gemini Client Callbacks
     this.geminiClient.onStatusChangeCallback = (status) => this._handleGeminiStatus(status);
     this.geminiClient.onErrorCallback = (err) => this.showToast(err, 'error');
+    this.geminiClient.onDisconnectCallback = (code, reason) => {
+      console.warn(`[App] Session closed by server: ${code} ${reason}`);
+      this.audioService.stop();
+      this.isRecording = false;
+      this.isPaused = false;
+      this._updateMeter(0);
+      this._renderInterim('');
+      this._updateUIState();
+      this.showToast(`翻訳セッションが切断されました (Code: ${code})。再開するには再度ボタンを押してください。`, 'warning');
+    };
+
     this.geminiClient.onInterimCallback = (text) => this._renderInterim(text);
-    this.geminiClient.onFinalCallback = (item) => this._addRecord(item);
+    this.geminiClient.onFinalCallback = (finalText, langCode) => this._handleFinalSpeech(finalText, langCode);
   }
 
   _syncDocModeUI() {
@@ -836,13 +823,13 @@ class App {
     try {
       this._updateStatus('connecting');
 
-      // Safari/iOS対策: ユーザーインタラクションの同期待機内でAudioContextを先行生成
+      // 1. Initialize AudioContext on user touch/click gesture
       await this.audioService.ensureContext();
 
-      // 1. WebSocket 接続
+      // 2. Connect WebSocket to models/gemini-3.5-transcribe-live
       await this.geminiClient.connect(this.apiKey, this.direction);
 
-      // 2. 音声キャプチャ開始
+      // 3. Start Audio capture
       await this.audioService.start(
         (chunk) => this.geminiClient.sendAudioChunk(chunk),
         (volume) => this._updateMeter(volume)
@@ -851,7 +838,7 @@ class App {
       this.isRecording = true;
       this.isPaused = false;
       this._updateUIState();
-      this.showToast('リアルタイム翻訳を開始しました。', 'success');
+      this.showToast('リアルタイム翻訳を開始しました。マイクに向かって話してください。', 'success');
     } catch (err) {
       console.error('Failed to start recording:', err);
       this.audioService.stop();
@@ -872,7 +859,6 @@ class App {
     this._updateUIState();
     this.showToast('翻訳セッションを停止しました。', 'info');
 
-    // セッション終了時の自動保存（設定時）
     if (this.autoSave && this.unsavedCount > 0 && this.gasUrl) {
       await this.saveToDocs(true);
     }
@@ -907,19 +893,51 @@ class App {
         : 'マイクを開始すると、リアルタイムの発話と翻訳プレビューがここに表示されます...';
     } else {
       this.elInterimText.className = 'interim-active';
-      this.elInterimText.textContent = text;
+      this.elInterimText.textContent = `認識中: ${text}`;
     }
   }
 
-  _addRecord(item) {
-    this.records.push(item);
+  /**
+   * 音声認識の確定テキストを受信した際の処理
+   */
+  async _handleFinalSpeech(finalText, langCode) {
+    if (!finalText || finalText.trim() === '') return;
+
+    // Clear interim view
+    this._renderInterim('');
+
+    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    
+    // Create record object
+    const recordIndex = this.records.length;
+    const record = {
+      timestamp: timestamp,
+      speakerLang: langCode || (this.direction === 'ja-to-en' ? 'ja' : this.direction === 'en-to-ja' ? 'en' : 'auto'),
+      original: finalText,
+      translated: '翻訳中...'
+    };
+
+    this.records.push(record);
     this.unsavedCount++;
     this._renderTranscriptList();
     this._updateUIState();
 
-    // 10発話ごとの自動バックアップ
-    if (this.autoSave && this.unsavedCount >= 10 && this.gasUrl) {
-      this.saveToDocs(true);
+    // Fast asynchronous translation via Gemini API
+    try {
+      const transResult = await TranslationService.translate(finalText, this.direction, this.apiKey);
+      record.translated = transResult.translated;
+      record.speakerLang = transResult.speakerLang;
+      this._renderTranscriptList();
+      this._updateUIState();
+
+      // Trigger auto-save every 10 utterances
+      if (this.autoSave && this.unsavedCount >= 10 && this.gasUrl) {
+        this.saveToDocs(true);
+      }
+    } catch (err) {
+      console.warn('Translation error:', err);
+      record.translated = '(翻訳エラー)';
+      this._renderTranscriptList();
     }
   }
 
@@ -939,8 +957,11 @@ class App {
       const card = document.createElement('div');
       card.className = 'transcript-card';
 
-      const langClass = record.speakerLang === 'ja' ? 'tag-ja' : record.speakerLang === 'en' ? 'tag-en' : 'tag-ja';
-      const langLabel = record.speakerLang ? record.speakerLang.toUpperCase() : 'AUTO';
+      const isJa = record.speakerLang === 'ja';
+      const langClass = isJa ? 'tag-ja' : 'tag-en';
+      const langLabel = (record.speakerLang || 'AUTO').toUpperCase();
+
+      const isTranslating = record.translated === '翻訳中...';
 
       card.innerHTML = `
         <div class="card-header">
@@ -952,7 +973,7 @@ class App {
         </div>
         <div class="card-body">
           <p class="orig-text">${this._escapeHTML(record.original)}</p>
-          <p class="trans-text">${this._escapeHTML(record.translated)}</p>
+          <p class="trans-text ${isTranslating ? 'is-translating' : ''}">${this._escapeHTML(record.translated)}</p>
         </div>
       `;
 
@@ -966,7 +987,6 @@ class App {
       this.elTranscriptList.appendChild(card);
     });
 
-    // タイムライン最下部へスクロール
     this.elTranscriptList.lastElementChild?.scrollIntoView({ behavior: 'smooth' });
   }
 
@@ -1005,12 +1025,10 @@ class App {
       this.unsavedCount = 0;
       this._updateUIState();
 
-      // バナー表示
       this.elSavedDocBanner.style.display = 'flex';
       this.elSavedDocLink.href = result.documentUrl;
       this.elSavedDocLink.textContent = `${result.documentTitle || 'ドキュメント'} を開く ↗`;
 
-      // 新規作成時はIDを保持
       if (result.documentId) {
         this.lastDocId = result.documentId;
         ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, this.lastDocId);
@@ -1085,7 +1103,6 @@ class App {
   }
 
   _updateUIState() {
-    // Record Button
     if (this.isRecording) {
       this.elBtnToggleRecord.classList.add('is-recording');
       this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '⏹️';
@@ -1107,7 +1124,6 @@ class App {
       this.elBtnPauseRecord.querySelector('.btn-icon-symbol').textContent = '⏸️';
     }
 
-    // Unsaved badge
     if (this.unsavedCount > 0) {
       this.elUnsavedBadge.style.display = 'inline-block';
       this.elUnsavedBadge.textContent = this.unsavedCount;

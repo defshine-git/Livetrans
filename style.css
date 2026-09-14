@@ -709,3 +709,22 @@ body {
     align-items: stretch;
   }
 }
+
+/* Translating indicator */
+.trans-text.is-translating {
+  color: var(--text-muted);
+  font-weight: normal;
+  font-style: italic;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.trans-text.is-translating::after {
+  content: '...';
+  animation: dots 1.2s steps(4, jump-none) infinite;
+}
+@keyframes dots {
+  0%, 20% { content: '.'; }
+  40% { content: '..'; }
+  60%, 100% { content: '...'; }
+}
