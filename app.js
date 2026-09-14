@@ -516,8 +516,6 @@ QRCode.prototype = {
 	},
 	
 	make : function() {
-		// Calculate automatically typeNumber if provided is < 1
-		// [BUG FIX] typeNumber loop bounds check: changed `< 40` to `<= 40`
 		if (this.typeNumber < 1 ){
 			var typeNumber = 1;
 			for (typeNumber = 1; typeNumber <= 40; typeNumber++) {
@@ -851,7 +849,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.5.0 (Bilingual Transcriber UI Grid & Audit Enhanced)
+ * Version: 2.6.0 (Unified Google Document Sync & Stability Release)
  * 
  * Features:
  * 1. 2-Column Body Grid (原文 / 訳文) with responsive single-column layout.
@@ -859,7 +857,7 @@ global.QRCode = QRCode;
  * 3. In-place card actions: Edit (✏️), Retry (🔄), Delete (🗑️), Copy (📋).
  * 4. Dedicated Live Transcription Banner with audio meter.
  * 5. Full Markdown table copy for meeting minutes.
- * 6. Hardened Gemini Live 10-min Resumption, Cascade Translation, and Differential Docs Sync.
+ * 6. Single Document Sync: 確定した全翻訳をひとつのGoogleドキュメントとして確実に同期・保存。
  */
 
 const ROLES = [
@@ -971,12 +969,11 @@ class AudioCaptureService {
     }
 
     try {
-      // Optimized audio constraints: avoid overly aggressive noiseSuppression which cuts distant voices
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: false, // Disabled to prevent cutting distant soft speech
+          noiseSuppression: false, // 遠くの小声を拾うため過剰抑制を無効化
           autoGainControl: true,
           googAutoGainControl: true,
           googNoiseSuppression: false,
@@ -995,45 +992,41 @@ class AudioCaptureService {
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // 1. Highpass Filter: 80Hz cutoff (removes AC hum, room rumble, and desk vibrations without affecting vocal clarity)
+    // 1. Highpass Filter: 80Hz cutoff
     this.highpassNode = this.audioContext.createBiquadFilter();
     this.highpassNode.type = 'highpass';
     this.highpassNode.frequency.value = 80;
     this.highpassNode.Q.value = 0.7;
 
-    // 2. Pre-amp Gain Booster: Amplifies distant/soft speech to ensure reliable ASR feature extraction
+    // 2. Pre-amp Gain Booster
     this.gainNode = this.audioContext.createGain();
     this.gainNode.gain.value = this.gainValue;
 
-    // 3. Dynamics Compressor: Automatically manages dynamic range, boosting weak distant voices while preventing near-mic clipping
+    // 3. Dynamics Compressor
     this.compressorNode = this.audioContext.createDynamicsCompressor();
-    this.compressorNode.threshold.value = -32; // dB (wide capture threshold)
-    this.compressorNode.knee.value = 24;      // dB (smooth compression onset)
-    this.compressorNode.ratio.value = 8;       // 8:1 (firm peak limiter)
-    this.compressorNode.attack.value = 0.003;  // 3ms fast attack
-    this.compressorNode.release.value = 0.20;  // 200ms natural recovery
+    this.compressorNode.threshold.value = -32;
+    this.compressorNode.knee.value = 24;
+    this.compressorNode.ratio.value = 8;
+    this.compressorNode.attack.value = 0.003;
+    this.compressorNode.release.value = 0.20;
 
-    // 4. Lowpass Anti-Aliasing Filter: 7.5kHz cutoff for clean 16kHz target downsampling
+    // 4. Lowpass Anti-Aliasing Filter
     this.filterNode = this.audioContext.createBiquadFilter();
     this.filterNode.type = 'lowpass';
     this.filterNode.frequency.value = 7500;
 
-    // Signal Routing: Source -> Highpass -> Gain -> Compressor -> Lowpass -> Destination
     this.sourceNode.connect(this.highpassNode);
     this.highpassNode.connect(this.gainNode);
     this.gainNode.connect(this.compressorNode);
     this.compressorNode.connect(this.filterNode);
 
-    // Analyser for real-time volume metering
     this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 256;
     this.filterNode.connect(this.analyserNode);
 
-    // Audio Processor (buffer: 2048 samples = ~128ms chunks)
     const bufferSize = 2048;
     this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
     
-    // Retain global reference to avoid GC reclamation
     if (typeof window !== 'undefined') {
       window._activeAudioProcessorNode = this.processorNode;
     }
@@ -1043,7 +1036,7 @@ class AudioCaptureService {
 
     this.processorNode.onaudioprocess = (e) => {
       const outputBuffer = e.outputBuffer.getChannelData(0);
-      outputBuffer.fill(0); // Feedback mute
+      outputBuffer.fill(0);
 
       if (!this.isRecording || this.isPaused) return;
 
@@ -1092,7 +1085,6 @@ class AudioCaptureService {
     if (this.audioContext) { this.audioContext.close().catch(() => {}); this.audioContext = null; }
   }
 
-  // Highly optimized buffer pooling downsampler: zero allocation in audio loop
   _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
     if (inputSampleRate === outputSampleRate) {
       const len = buffer.length;
@@ -1132,7 +1124,6 @@ class AudioCaptureService {
     return result;
   }
 
-  // Optimized chunk encoder with pre-sized typed view
   _int16ToBase64(int16Array) {
     const uint8 = new Uint8Array(int16Array.buffer, int16Array.byteOffset, int16Array.byteLength);
     let binary = '';
@@ -1268,7 +1259,7 @@ class WebSpeechService {
 }
 
 // ==========================================
-// 4. Gemini Live WebSocket Client (with Session Resumption)
+// 4. Gemini Live WebSocket Client
 // ==========================================
 class GeminiLiveClient {
   static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -1289,7 +1280,6 @@ class GeminiLiveClient {
     this._connectTimeout = null;
     this._sessionTimer = null;
 
-    // Callbacks
     this.onInterimCallback = null;
     this.onFinalCallback = null;
     this.onStatusChangeCallback = null;
@@ -1570,8 +1560,7 @@ class GeminiLiveClient {
 }
 
 // ==========================================
-// [FIX 1] Shared fetch with AbortController timeout
-// 1件のハングでキュー全体が永久停止するのを防止する共通ユーティリティ
+// Shared fetch with AbortController timeout
 // ==========================================
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   const controller = new AbortController();
@@ -1584,14 +1573,13 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 }
 
 // ==========================================
-// 5. Translation Service & 3-Layer Resilient Queue
+// 5. Translation Service & Resilient Queue
 // ==========================================
 class TranslationService {
   constructor() {
     this.queue = [];
     this.isProcessing = false;
     this.onLogCallback = null;
-    // [FIX 4] 直近で成功したモデルを記憶し、次回はそこから試行して無駄往復を削減
     this._preferredModel = null;
   }
 
@@ -1661,7 +1649,6 @@ class TranslationService {
         'gemini-2.0-flash',
         'gemini-1.5-flash'
       ];
-      // [FIX 4] 前回成功したモデルを先頭に置き、以降の発話は原則1往復で確定させる
       const modelsToTry = this._preferredModel
         ? [this._preferredModel, ...baseModels.filter((m) => m !== this._preferredModel)]
         : baseModels;
@@ -1669,7 +1656,6 @@ class TranslationService {
       for (const modelName of modelsToTry) {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
         try {
-          // [FIX 1] タイムアウト付きfetchでハングによるキュー全停止を防止
           const res = await fetchWithTimeout(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1686,7 +1672,6 @@ class TranslationService {
             const data = await res.json();
             if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
               const transText = data.candidates[0].content.parts[0].text.trim();
-              // [FIX 4] 成功モデルを記憶
               this._preferredModel = modelName;
               this.log('success', `Gemini (${modelName}) 翻訳完了: "${transText}"`);
               return {
@@ -1697,7 +1682,6 @@ class TranslationService {
           } else {
             const errData = await res.json().catch(() => null);
             const errDetail = errData?.error?.message || `HTTP ${res.status}`;
-            // [FIX 4] 記憶していたモデルが失敗したら記憶を破棄し、次回は先頭から再評価
             if (this._preferredModel === modelName) this._preferredModel = null;
             this.log('warn', `Gemini (${modelName}) 失敗: ${errDetail}`);
           }
@@ -1715,7 +1699,6 @@ class TranslationService {
     if (gasUrl && gasUrl.trim() !== '') {
       this.log('info', 'GAS (LanguageApp) による自動フォールバック翻訳を実行中...');
       try {
-        // [FIX 1] GASフォールバックにもタイムアウトを付与
         const gasRes = await fetchWithTimeout(gasUrl.trim(), {
           method: 'POST',
           mode: 'cors',
@@ -1776,7 +1759,6 @@ class GasStorageClient {
   static async ping(gasUrl, token) {
     if (!gasUrl) throw new Error('GAS Web App URLが設定されていません。');
     
-    // Check URL structure first
     const trimmedUrl = gasUrl.trim();
     if (!trimmedUrl.startsWith('https://script.google.com/')) {
       throw new Error('GAS Web App URLは "https://script.google.com/..." で始まる必要があります。');
@@ -1786,7 +1768,6 @@ class GasStorageClient {
     }
 
     try {
-      // [FIX 1] 疎通テストにもタイムアウトを付与し、無応答時にUIが固まらないようにする
       const res = await fetchWithTimeout(trimmedUrl, {
         method: 'POST',
         mode: 'cors',
@@ -1821,9 +1802,12 @@ class GasStorageClient {
     }
   }
 
-  static async saveTranscript(gasUrl, { documentId, title, folderId, records, direction, category, model, token }) {
+  /**
+   * 確定翻訳をGoogleドキュメントへ保存・同期
+   */
+  static async saveTranscript(gasUrl, { documentId, title, folderId, records, direction, category, model, token, saveMode = 'sync' }) {
     if (!gasUrl) throw new Error('GAS Web App URLが未設定です。');
-    if (!records || records.length === 0) throw new Error('保存対象の差分レコードがありません。');
+    if (!records || records.length === 0) throw new Error('保存対象の確定翻訳レコードがありません。');
 
     const trimmedUrl = gasUrl.trim();
     if (trimmedUrl.endsWith('/edit')) {
@@ -1841,12 +1825,13 @@ class GasStorageClient {
       model: model || 'models/gemini-3.5-transcribe-live',
       direction: direction || 'AUTO',
       category: category || 'HKC',
+      saveMode: saveMode, // 'sync' (デフォルト: ひとつのドキュメントとして上書き同期)
       records: records
     };
 
     let res;
     try {
-      // [FIX 1] 保存処理は本文が大きくなり得るため、やや長め(20秒)のタイムアウトを付与
+      // 確定翻訳全体の同期書き込みに対応するため、タイムアウトを40秒に設定
       res = await fetchWithTimeout(trimmedUrl, {
         method: 'POST',
         mode: 'cors',
@@ -1855,10 +1840,10 @@ class GasStorageClient {
           'Content-Type': 'text/plain'
         },
         body: JSON.stringify(payload)
-      }, 20000);
+      }, 40000);
     } catch (netErr) {
       if (netErr.name === 'AbortError') {
-        throw new Error('GAS保存が20秒以内に完了しませんでした（タイムアウト）。件数が多い場合は分割保存をお試しください。');
+        throw new Error('GAS保存が40秒以内に完了しませんでした（タイムアウト）。通信環境またはGoogle Apps Scriptの実行状況を確認してください。');
       }
       throw new Error('GASサーバーと通信できませんでした (CORSまたは接続遮断)。GASのデプロイで「アクセスできるユーザー: 全員」が設定されているか確認してください。');
     }
@@ -1879,7 +1864,9 @@ class GasStorageClient {
     }
 
     if (data.status === 'error') {
-      throw new Error(data.message || 'GAS処理エラー');
+      const err = new Error(data.message || 'GAS処理エラー');
+      err.code = data.code;
+      throw err;
     }
     return data;
   }
@@ -1898,7 +1885,8 @@ class App {
 
     this.activeEngine = 'none';
     this.records = [];
-    this.lastSavedIndex = 0;
+    this.savedRecordCount = 0; // 最後にドキュメントに同期保存した確定翻訳数
+    this.hasUnsavedChanges = false;
     this.isRecording = false;
     this.isPaused = false;
 
@@ -1908,7 +1896,7 @@ class App {
     this._checkHashConfig();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.5.0)。2カラム対面監査UI・インライン編集機能が有効です。');
+    this.log('info', '初期化完了 (v2.6.0)。確定翻訳の一元Googleドキュメント同期機能が有効です。');
   }
 
   log(type, message) {
@@ -1947,7 +1935,6 @@ class App {
     this.elSavedDocBanner = document.getElementById('saved-doc-banner');
     this.elSavedDocLink = document.getElementById('saved-doc-link');
 
-    // Live Preview elements (matching b9abbcfb.html)
     this.elLivePreview = document.getElementById('livePreview');
     this.elLiveText = document.getElementById('liveText');
     this.elLiveEngineTag = document.getElementById('liveEngineTag');
@@ -2063,7 +2050,8 @@ class App {
       if (this.records.length === 0) return;
       if (confirm('タイムラインの翻訳履歴を全消去しますか？')) {
         this.records = [];
-        this.lastSavedIndex = 0;
+        this.savedRecordCount = 0;
+        this.hasUnsavedChanges = false;
         this.elTranscriptList.innerHTML = '';
         this.elEmptyState.style.display = 'block';
         this.elRecordCount.textContent = '0 件の発話';
@@ -2087,6 +2075,8 @@ class App {
       if (sanitized !== e.target.value) {
         e.target.value = sanitized;
       }
+      this.hasUnsavedChanges = true;
+      this._updateUIState();
     });
 
     this.elBtnCopyAll.addEventListener('click', () => this.copyAllTranscripts());
@@ -2167,7 +2157,7 @@ class App {
         const res = await GasStorageClient.ping(url, this.elInputGasToken.value.trim());
         if (res.status === 'ok' || res.status === 'success') {
           const authNote = res.authRequired ? ' (認証保護あり)' : '';
-          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.5.0'})${authNote}`;
+          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.6.0'})${authNote}`;
           this.elGasTestResult.className = 'test-result-text success';
           this.log('success', `GAS Web App 疎通確認完了: ${url}`);
         } else {
@@ -2358,8 +2348,8 @@ class App {
     this.log('info', 'セッション停止完了。');
     this.showToast('翻訳セッションを停止しました。', 'info');
 
-    const unsavedCount = this.records.length - this.lastSavedIndex;
-    if (this.autoSave && unsavedCount > 0 && this.gasUrl) {
+    // 自動保存が有効で、未保存の確定翻訳がある場合は自動同期
+    if (this.autoSave && this.hasUnsavedChanges && this.gasUrl) {
       await this.saveToDocs(true);
     }
   }
@@ -2412,8 +2402,12 @@ class App {
   }
 
   /**
-   * 音声確定時: b9abbcfb.html のカード構造（2カラム原文/訳文・話者タグ・アクション完備）を生成
+   * 確定翻訳レコード（翻訳完了済みの発話一覧）を取得
    */
+  getFinalizedRecords() {
+    return this.records.filter((r) => !r.isTranslating && r.translatedText && r.translatedText.trim() !== '');
+  }
+
   _handleFinalSpeech(finalText, langCode) {
     if (!finalText || finalText.trim() === '') return;
 
@@ -2422,7 +2416,6 @@ class App {
     const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
     const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    // 日本語判定に基づくデフォルト話者ロール（日本語はAuditor、英語はYard Rep）
     const hasJa = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(finalText);
     const initialSpeaker = hasJa ? ROLES[0] : ROLES[1];
     const engineLabel = this.activeEngine === 'gemini-live' ? 'Gemini Live' : 'Web Speech';
@@ -2441,6 +2434,7 @@ class App {
     };
 
     this.records.push(record);
+    this.hasUnsavedChanges = true;
     this._appendSingleCard(record);
     this._updateUIState();
 
@@ -2458,9 +2452,6 @@ class App {
     );
   }
 
-  /**
-   * b9abbcfb.html の card テンプレートと完全に同一の要素を構築
-   */
   _appendSingleCard(item) {
     this.elEmptyState.style.display = 'none';
     this.elRecordCount.textContent = `${this.records.length} 件の発話`;
@@ -2511,7 +2502,6 @@ class App {
       </div>
     `;
 
-    // Event delegation for in-place actions
     card.addEventListener('click', (e) => {
       const a = e.target.dataset?.a;
 
@@ -2548,7 +2538,9 @@ class App {
         document.getElementById(`${item.id}_trans`).textContent = editTrans;
         document.getElementById(`${item.id}_edit`).classList.remove('open');
         document.getElementById(`${item.id}_view`).style.display = 'grid';
-        this.showToast('修正内容を保存しました。', 'success');
+        this.hasUnsavedChanges = true;
+        this._updateUIState();
+        this.showToast('修正内容を保存しました（Googleドキュメントへ未反映）。', 'success');
         return;
       }
 
@@ -2556,6 +2548,8 @@ class App {
       if (a === 'retry') {
         item.isTranslating = true;
         document.getElementById(`${item.id}_trans`).textContent = '⏳ 再翻訳中...';
+        this.hasUnsavedChanges = true;
+        this._updateUIState();
         this.translationService.enqueue(
           item.originalText,
           this.direction,
@@ -2575,6 +2569,7 @@ class App {
         if (confirm('この発話をタイムラインから削除しますか？')) {
           this.records = this.records.filter((x) => x.id !== item.id);
           card.remove();
+          this.hasUnsavedChanges = true;
           this.elRecordCount.textContent = `${this.records.length} 件の発話`;
           if (this.records.length === 0) {
             this.elEmptyState.style.display = 'block';
@@ -2594,6 +2589,8 @@ class App {
         e.target.className = 'tag speaker';
         if (item.speaker.includes('Auditor')) e.target.classList.add('auditor');
         else if (item.speaker.includes('Yard')) e.target.classList.add('yard');
+        this.hasUnsavedChanges = true;
+        this._updateUIState();
       }
     });
 
@@ -2613,15 +2610,21 @@ class App {
       transEl.textContent = transResult.translated;
     }
 
+    this.hasUnsavedChanges = true;
+    this._updateUIState();
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
 
-    // Check auto-save threshold (every 10 unsaved items)
-    const unsavedCount = this.records.length - this.lastSavedIndex;
-    if (this.autoSave && unsavedCount >= 10 && this.gasUrl) {
+    // 自動保存: 未保存の確定翻訳が10件に達した際に自動同期
+    const finalizedCount = this.getFinalizedRecords().length;
+    const unsaved = finalizedCount - this.savedRecordCount;
+    if (this.autoSave && unsaved >= 10 && this.gasUrl) {
       this.saveToDocs(true);
     }
   }
 
+  /**
+   * 確定翻訳をひとつのGoogleドキュメントとして保存・同期
+   */
   async saveToDocs(isAuto = false) {
     if (!this.gasUrl) {
       if (!isAuto) {
@@ -2631,9 +2634,9 @@ class App {
       return;
     }
 
-    // Wait for in-flight translations to finish (up to 5 seconds)
+    // 未完了の翻訳ジョブの終了を待機（最大約5秒）
     if (this.translationService.isProcessing || this.translationService.queue.length > 0) {
-      this.log('info', '未完了の翻訳ジョブの終了を待機しています...');
+      this.log('info', '進行中の翻訳処理の完了を待機しています...');
       let waitLimit = 0;
       while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 25) {
         await new Promise((r) => setTimeout(r, 200));
@@ -2641,23 +2644,23 @@ class App {
       }
     }
 
-    let eligibleCount = 0;
-    for (let i = this.lastSavedIndex; i < this.records.length; i++) {
-      if (this.records[i].isTranslating || !this.records[i].translatedText) {
-        break;
-      }
-      eligibleCount++;
-    }
+    const finalizedItems = this.getFinalizedRecords();
 
-    if (eligibleCount === 0) {
+    if (finalizedItems.length === 0) {
       if (!isAuto) {
-        const hasPending = this.records.slice(this.lastSavedIndex).some(r => r.isTranslating);
-        this.showToast(hasPending ? '現在翻訳処理中のため、完了後に保存してください。' : '新しく追加された未保存の差分はありません。', 'info');
+        const hasPending = this.records.some((r) => r.isTranslating);
+        this.showToast(
+          hasPending
+            ? '現在翻訳処理中のため、完了後に保存してください。'
+            : '保存対象の確定翻訳がありません。録音・発話後に保存してください。',
+          'info'
+        );
       }
       return;
     }
 
-    const unsavedRecords = this.records.slice(this.lastSavedIndex, this.lastSavedIndex + eligibleCount).map(r => ({
+    // 確定翻訳リストを整形
+    const recordsToSave = finalizedItems.map((r) => ({
       timestamp: r.time,
       speaker: r.speaker,
       speakerLang: r.speakerLang,
@@ -2666,51 +2669,64 @@ class App {
       engine: r.engine
     }));
 
-    const isExisting = this.docMode === 'existing';
-    const rawDocId = isExisting ? this.elInputDocId.value.trim() : '';
-    const docId = GasStorageClient.extractDocId(rawDocId);
+    // 保存先ドキュメントIDの決定
+    const isExistingMode = this.docMode === 'existing';
+    let docId = isExistingMode ? (this.elInputDocId.value.trim() || this.lastDocId) : '';
+    docId = GasStorageClient.extractDocId(docId);
     const title = this.elInputDocTitle.value.trim();
-
-    if (isExisting && !docId) {
-      this.showToast('追記先の既存ドキュメントIDを入力してください。', 'warning');
-      this.elInputDocId.focus();
-      return;
-    }
+    const folderId = this.elInputFolderId ? this.elInputFolderId.value.trim() : this.folderId;
 
     this.elBtnSaveDocs.disabled = true;
-    this.elSaveDocsText.textContent = '差分保存中...';
-    this.log('info', `Google ドキュメント差分同期開始 (保存対象: ${unsavedRecords.length}件)...`);
+    this.elSaveDocsText.textContent = isExistingMode ? 'ドキュメント同期中...' : 'ドキュメント保存中...';
+    this.log(
+      'info',
+      `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
+    );
 
     try {
-      const result = await GasStorageClient.saveTranscript(this.gasUrl, {
-        token: this.gasToken,
-        documentId: docId,
-        title: title,
-        records: unsavedRecords,
-        direction: this.direction,
-        category: this.category,
-        model: this.liveModel
-      });
-
-      this.lastSavedIndex += eligibleCount;
-      this._updateUIState();
-
-      this.elSavedDocBanner.style.display = 'flex';
-      this.elSavedDocLink.href = result.documentUrl;
-      this.elSavedDocLink.textContent = `📄 ${result.documentTitle || 'ドキュメント'} を開く ↗`;
-      if (result.folderUrl && this.elSavedFolderLink && this.elSavedFolderSep) {
-        this.elSavedFolderSep.style.display = 'inline';
-        this.elSavedFolderLink.style.display = 'inline';
-        this.elSavedFolderLink.href = result.folderUrl;
-        this.elSavedFolderLink.textContent = `📁 ${result.folderName || 'フォルダ'} ↗`;
+      let result;
+      try {
+        result = await GasStorageClient.saveTranscript(this.gasUrl, {
+          token: this.gasToken,
+          documentId: docId,
+          title: title,
+          folderId: folderId,
+          records: recordsToSave,
+          direction: this.direction,
+          category: this.category,
+          model: this.liveModel,
+          saveMode: 'sync' // 確定翻訳全体をひとつのドキュメントとして最新同期
+        });
+      } catch (saveErr) {
+        // もし指定した既存Docが存在しなかった場合、自動的に新規作成にフォールバック
+        if (saveErr.code === 'DOC_NOT_FOUND' && docId) {
+          this.log('warn', `指定ドキュメント (ID: ${docId}) が開けなかったため、新規Googleドキュメントとして再作成します...`);
+          result = await GasStorageClient.saveTranscript(this.gasUrl, {
+            token: this.gasToken,
+            documentId: '',
+            title: title,
+            folderId: folderId,
+            records: recordsToSave,
+            direction: this.direction,
+            category: this.category,
+            model: this.liveModel,
+            saveMode: 'sync'
+          });
+        } else {
+          throw saveErr;
+        }
       }
-      this.log('success', `Google ドキュメント差分追記完了 (保存後累計: ${this.lastSavedIndex}件): ${result.documentUrl}`);
+
+      this.savedRecordCount = recordsToSave.length;
+      this.hasUnsavedChanges = false;
+      this._updateUIState();
 
       if (result.documentId) {
         this.lastDocId = result.documentId;
         ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, this.lastDocId);
         this.elInputDocId.value = this.lastDocId;
         
+        // 次回以降の保存は自動的にこの同一ドキュメントへ同期更新
         this.docMode = 'existing';
         ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, 'existing');
         for (const radio of this.elRadioDocModes) {
@@ -2719,8 +2735,21 @@ class App {
         this._syncDocModeUI();
       }
 
+      this.elSavedDocBanner.style.display = 'flex';
+      this.elSavedDocLink.href = result.documentUrl;
+      this.elSavedDocLink.textContent = `📄 ${result.documentTitle || 'ドキュメント'} を開く ↗`;
+      if (result.folderUrl && this.elSavedFolderLink && this.elSavedFolderSep) {
+        this.elSavedFolderSep.style.display = 'inline';
+        this.elSavedFolderLink.style.display = 'inline';
+        this.elSavedFolderLink.href = result.folderUrl;
+        this.elSavedFolderLink.textContent = `📁 ${result.folderName || '保存先フォルダ'} ↗`;
+      }
+      this.log('success', `Google ドキュメント同期保存完了 (確定翻訳: 全${recordsToSave.length}件): ${result.documentUrl}`);
+
       this.showToast(
-        isAuto ? `${unsavedRecords.length}件の差分を自動バックアップしました。` : `${unsavedRecords.length}件の差分をGoogleドキュメントに保存完了しました！`,
+        isAuto
+          ? `確定翻訳 (全${recordsToSave.length}件) をGoogleドキュメントに自動同期しました。`
+          : `確定翻訳 (全${recordsToSave.length}件) をひとつのGoogleドキュメントとして保存完了しました！`,
         'success'
       );
     } catch (err) {
@@ -2734,9 +2763,6 @@ class App {
     }
   }
 
-  /**
-   * b9abbcfb.html 仕様: 議事録Markdownテーブル形式で全コピー
-   */
   copyAllTranscripts() {
     if (this.records.length === 0) {
       this.showToast('コピーする履歴がありません。', 'warning');
@@ -2805,10 +2831,13 @@ class App {
       this.elBtnPauseRecord.querySelector('.btn-icon-symbol').textContent = '⏸️';
     }
 
-    const unsaved = this.records.length - this.lastSavedIndex;
-    if (unsaved > 0) {
+    const finalizedCount = this.getFinalizedRecords().length;
+    const unsavedCount = Math.max(0, finalizedCount - this.savedRecordCount);
+
+    if (unsavedCount > 0 || (this.hasUnsavedChanges && finalizedCount > 0)) {
       this.elUnsavedBadge.style.display = 'inline-block';
-      this.elUnsavedBadge.textContent = unsaved;
+      this.elUnsavedBadge.textContent = unsavedCount > 0 ? unsavedCount : '未保存';
+      this.elUnsavedBadge.title = `${unsavedCount}件の未保存確定翻訳があります`;
     } else {
       this.elUnsavedBadge.style.display = 'none';
     }
@@ -2826,7 +2855,8 @@ class App {
       gasUrl: this.gasUrl || '',
       gasToken: this.gasToken || '',
       direction: this.direction || 'auto',
-      category: this.category || 'HKC', gain: this.gain || '2.5',
+      category: this.category || 'HKC',
+      gain: this.gain || '2.5',
       engineMode: this.engineMode || 'auto',
       liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
       autoSave: this.autoSave,

@@ -1,13 +1,14 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Bilingual Translator
- * Version: 2.5.0 (Hardened Production Release with Designated Folder & Glossary Integration)
+ * Version: 2.6.0 (Unified Google Document Sync & Production Hardened)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および バックアップ翻訳 (action: 'translate')
- * 2. 指定フォルダへの自動格納 (OUTPUT_FOLDER_ID: 15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f)
- * 3. 専門用語データベース連携 (SPREADSHEET_ID: 1LaCapvqgu-qQUXuMyGNqiqvbSl5TjWhFt4EOllcvON0)
- * 4. 共有トークン認証 (SECRET_TOKEN)
- * 5. LanguageApp.translate によるバックアップ翻訳機能
+ * 2. 確定翻訳の一元管理: 確定した全発話・翻訳レコードを「ひとつのGoogleドキュメント」として確実に同期・保存
+ * 3. 指定フォルダへの自動格納 (OUTPUT_FOLDER_ID: 15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f)
+ * 4. 専門用語データベース連携 (SPREADSHEET_ID: 1LaCapvqgu-qQUXuMyGNqiqvbSl5TjWhFt4EOllcvON0)
+ * 5. 共有トークン認証 (SECRET_TOKEN)
+ * 6. LanguageApp.translate によるバックアップ翻訳機能
  */
 
 var DEFAULT_CONFIG = {
@@ -119,7 +120,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '2.5.0',
+        version: '2.6.0',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -143,7 +144,7 @@ function doGet(e) {
   return createJsonResponse({
     status: 'ok',
     service: 'Bilingual Transcriber Backend',
-    version: '2.5.0',
+    version: '2.6.0',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
@@ -151,9 +152,6 @@ function doGet(e) {
   });
 }
 
-/**
- * URLまたはID文字列から正規のGoogle Docs IDを抽出
- */
 /**
  * URLまたはID文字列から正規のGoogle Drive フォルダIDを抽出
  */
@@ -167,6 +165,9 @@ function extractFolderId(input) {
   return str;
 }
 
+/**
+ * URLまたはID文字列から正規のGoogle Docs IDを抽出
+ */
 function extractDocumentId(input) {
   if (!input) return '';
   var str = String(input).trim();
@@ -178,11 +179,13 @@ function extractDocumentId(input) {
 }
 
 /**
- * 差分レコード群を Google ドキュメントに保存し、指定フォルダへ自動格納
+ * 確定翻訳レコード群を「ひとつのGoogleドキュメント」として保存・同期
+ * saveMode: 'sync' (デフォルト: 全文同期・上書き更新) または 'append' (末尾追記)
  */
 function handleSaveTranscript(payload, config) {
   var rawDocId = payload.documentId ? String(payload.documentId).trim() : '';
   var documentId = extractDocumentId(rawDocId);
+  var saveMode = payload.saveMode || 'sync'; // デフォルトはひとつのドキュメントとして完全同期
 
   // 可変フォルダIDの取得: クライアント指定 > 設定 > デフォルト
   var rawFolderId = payload.folderId || payload.outputFolderId || '';
@@ -198,9 +201,9 @@ function handleSaveTranscript(payload, config) {
 
   if (records.length === 0) {
     return {
-      status: 'success',
-      message: '追記対象の差分レコードがありません。',
-      savedCount: 0
+      status: 'error',
+      code: 'NO_RECORDS',
+      message: '保存対象の確定翻訳レコードがありません。'
     };
   }
 
@@ -211,7 +214,11 @@ function handleSaveTranscript(payload, config) {
     try {
       doc = DocumentApp.openById(documentId);
     } catch (openErr) {
-      throw new Error('指定されたドキュメント (ID: ' + documentId + ') を開けませんでした。IDが正しいか確認してください。(' + openErr.message + ')');
+      return {
+        status: 'error',
+        code: 'DOC_NOT_FOUND',
+        message: '指定されたGoogleドキュメント (ID: ' + documentId + ') を開けませんでした。IDが正しいか確認してください。(' + openErr.message + ')'
+      };
     }
   } else {
     try {
@@ -224,32 +231,51 @@ function handleSaveTranscript(payload, config) {
 
   var body = doc.getBody();
 
-  if (isNew) {
-    body.setPageWidth(595.27);
-    body.setPageHeight(841.88);
-    body.setMarginLeft(40);
-    body.setMarginRight(40);
-    body.setMarginTop(40);
-    body.setMarginBottom(40);
+  // ページレイアウト設定 (A4縦、余白40pt)
+  body.setPageWidth(595.27);
+  body.setPageHeight(841.88);
+  body.setMarginLeft(40);
+  body.setMarginRight(40);
+  body.setMarginTop(40);
+  body.setMarginBottom(40);
 
-    var titleP = body.appendParagraph(title);
+  var dirLabel = (direction === 'AUTO' || direction === 'auto')
+    ? '自動切替 (英⇄日)'
+    : ((direction === 'ja-to-en' || direction === 'JA_TO_EN') ? '日本語 ➔ 英語' : '英語 ➔ 日本語');
+
+  if (isNew || saveMode === 'sync') {
+    // 【ひとつのGoogleドキュメント同期保存】: 既存内容をクリアし、最新の確定翻訳全件で完全同期
+    if (!isNew) {
+      body.clear();
+      // タイトルが明示指定されていればファイル名も更新
+      if (payload.title && String(payload.title).trim() !== '') {
+        try { doc.setName(title); } catch (e) {}
+      }
+    }
+
+    // body.clear() された直後は1つの空段落が存在するため、先頭段落を再利用してタイトルを設定
+    var paragraphs = body.getParagraphs();
+    var titleP = (paragraphs && paragraphs.length > 0) ? paragraphs[0] : body.appendParagraph('');
+    titleP.setText(doc.getName() || title);
     titleP.setHeading(DocumentApp.ParagraphHeading.HEADING1);
     titleP.setForegroundColor('#1b365d');
 
-    var dirLabel = (direction === 'AUTO') ? '自動切替 (英⇄日)' : ((direction === 'ja-to-en' || direction === 'JA_TO_EN') ? '日本語 ➔ 英語' : '英語 ➔ 日本語');
-    var metaStr = '■ 作成日時: ' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + ' (JST)  |  分野: ' + category + '  |  認識モデル: ' + modelName + '  |  翻訳設定: ' + dirLabel;
+    var timeLabel = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + ' (JST)';
+    var metaStr = '■ 最終更新: ' + timeLabel + '  |  確定発話数: ' + records.length + '件  |  分野: ' + category + '  |  翻訳設定: ' + dirLabel;
     var metaP = body.appendParagraph(metaStr);
     metaP.setForegroundColor('#57606a');
     metaP.setFontSize(9.5);
     body.appendHorizontalRule();
   } else {
+    // 従来の追記モード (append) が明示指定された場合
     body.appendHorizontalRule();
-    var sepStr = '追記セッション: ' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + ' (JST) [分野: ' + category + ' / 新規追加: ' + records.length + '件]';
+    var sepStr = '追記セッション: ' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + ' (JST) [分野: ' + category + ' / 追加: ' + records.length + '件]';
     var sepP = body.appendParagraph(sepStr);
     sepP.setHeading(DocumentApp.ParagraphHeading.HEADING3);
     sepP.setForegroundColor('#57606a');
   }
 
+  // 確定翻訳レコードの書き込み
   records.forEach(function(item, index) {
     var timeStr = item.timestamp || item.time || Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
     var speakerLabel = item.speaker || '発話';
@@ -258,7 +284,7 @@ function handleSaveTranscript(payload, config) {
     var headP = body.appendParagraph('[' + timeStr + ']  【' + speakerLabel + ' (' + langBadge + ')】');
     headP.setHeading(DocumentApp.ParagraphHeading.HEADING4);
     headP.setForegroundColor('#1b365d');
-    headP.setSpacingBefore(6);
+    headP.setSpacingBefore(8);
     headP.setSpacingAfter(2);
 
     var origText = item.original || item.originalText || '(なし)';
@@ -296,11 +322,22 @@ function handleSaveTranscript(payload, config) {
     } catch (folderErr) {
       console.warn('指定フォルダ (' + folderId + ') へのファイル移動失敗: ' + folderErr.message);
     }
+  } else if (!isNew) {
+    try {
+      var existingFile = DriveApp.getFileById(doc.getId());
+      var parents = existingFile.getParents();
+      if (parents.hasNext()) {
+        var parentFolder = parents.next();
+        targetFolderName = parentFolder.getName();
+        targetFolderUrl = parentFolder.getUrl();
+      }
+    } catch (e) {}
   }
 
   return {
     status: 'success',
     isNew: isNew,
+    saveMode: saveMode,
     documentId: doc.getId(),
     documentUrl: doc.getUrl(),
     documentTitle: doc.getName(),
@@ -364,3 +401,4 @@ function createJsonResponse(data) {
   return ContentService.createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
