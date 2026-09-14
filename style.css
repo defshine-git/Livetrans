@@ -778,3 +778,55 @@ body {
 .trans-text {
   transition: color 0.3s ease;
 }
+
+/* QR Code Modal Styles */
+.qr-modal-dialog {
+  max-width: 460px;
+}
+.qr-modal-body {
+  text-align: center;
+}
+.qr-instruction {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  text-align: left;
+  margin-bottom: 12px;
+}
+.qr-canvas-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 14px;
+  background: #FFFFFF;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  margin: 0 auto 12px;
+  width: fit-content;
+  box-shadow: var(--shadow-sm);
+}
+#qr-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.qr-warning-note {
+  font-size: 11.5px;
+  color: #1A7F37;
+  background: #DAFBE1;
+  border: 1px solid rgba(26, 127, 55, 0.3);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 14px;
+  text-align: left;
+}
+.qr-link-copy-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.qr-link-copy-row .text-input {
+  flex-grow: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+}

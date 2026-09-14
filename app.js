@@ -681,7 +681,7 @@ class TranslationService {
 
     // Layer 1: Gemini REST API
     if (apiKey && apiKey.trim() !== '') {
-      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.0-flash-exp'];
+      const modelsToTry = ['gemini-3.5-flash-lite'];
 
       for (const modelName of modelsToTry) {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
@@ -862,7 +862,7 @@ class App {
     this._checkHashConfig();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.2.0)。差分同期・インプレースUIが有効です。');
+    this.log('info', '初期化完了 (v2.2.1)。差分同期・インプレースUIが有効です。');
   }
 
   log(type, message) {
@@ -1676,4 +1676,3 @@ class App {
 document.addEventListener('DOMContentLoaded', () => {
   window.app = new App();
 });
-
