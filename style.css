@@ -336,9 +336,12 @@ body {
 
 .doc-input-wrapper {
   flex-grow: 1;
+  display: flex;
+  gap: 8px;
 }
 .doc-input-wrapper .text-input {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
 }
 
 .saved-doc-banner {
@@ -511,7 +514,7 @@ body {
 }
 
 @keyframes card-appear {
-  from { opacity: 0; transform: translateY(6px); }
+  from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: translateY(0); }
 }
 

@@ -67,6 +67,16 @@
             </select>
           </div>
 
+          <div class="control-group gain-group">
+            <label for="select-gain" class="control-label">感度:</label>
+            <select id="select-gain" class="select-input" title="マイク集音感度・遠距離ブースト設定">
+              <option value="1.0">標準 (1.0x / 近距離)</option>
+              <option value="1.8">高感度 (1.8x / 中距離)</option>
+              <option value="2.5" selected>遠距離集音 (2.5x / 推奨)</option>
+              <option value="3.5">超遠距離 (3.5x / 大部屋)</option>
+            </select>
+          </div>
+
           <div class="action-spacer"></div>
 
           <button id="btn-clear-feed" class="btn btn-outline" title="タイムラインをクリア">
@@ -92,6 +102,7 @@
           </div>
           <div class="doc-input-wrapper">
             <input type="text" id="input-doc-title" class="text-input" placeholder="ドキュメント名 (空欄で日時自動付与)">
+            <input type="text" id="input-folder-id" class="text-input" placeholder="📁 保存先フォルダID/URL (空欄で規定フォルダ)">
             <input type="text" id="input-doc-id" class="text-input" placeholder="既存ドキュメントIDまたはURLを入力" style="display: none;">
           </div>
         </div>
@@ -100,7 +111,9 @@
         <div id="saved-doc-banner" class="saved-doc-banner" style="display: none;">
           <span class="doc-banner-icon">✅</span>
           <span class="doc-banner-text">保存完了: </span>
-          <a id="saved-doc-link" href="#" target="_blank" rel="noopener noreferrer" class="doc-banner-link">ドキュメントを開く ↗</a>
+          <a id="saved-doc-link" href="#" target="_blank" rel="noopener noreferrer" class="doc-banner-link">📄 ドキュメントを開く ↗</a>
+          <span id="saved-folder-sep" style="display: none; margin: 0 4px; color: var(--border-color);">|</span>
+          <a id="saved-folder-link" href="#" target="_blank" rel="noopener noreferrer" class="doc-banner-link" style="display: none;">📁 保存先フォルダ ↗</a>
         </div>
       </section>
 
@@ -214,6 +227,31 @@
             <input type="password" id="input-gas-token" class="text-input" placeholder="GAS側でSECRET_TOKENを設定した場合のみ入力">
             <small class="form-help">
               第三者による不正保存リクエストを遮断するためのパスコードです。
+            </small>
+          </div>
+
+          <div class="form-group">
+            <label for="input-default-folder-id">
+              既定のGoogleドライブ保存先フォルダID / URL
+            </label>
+            <input type="text" id="input-default-folder-id" class="text-input" placeholder="例: 15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f またはフォルダURL">
+            <small class="form-help">
+              新規作成ドキュメントの保存先フォルダです。URLを貼り付けても自動抽出されます。
+            </small>
+          </div>
+
+          <div class="form-group">
+            <label for="select-default-gain">
+              既定のマイク感度 (遠距離集音ブースト)
+            </label>
+            <select id="select-default-gain" class="select-input">
+              <option value="1.0">標準 (1.0x / 1〜2名近距離)</option>
+              <option value="1.8">高感度 (1.8x / 2〜4名中距離)</option>
+              <option value="2.5" selected>遠距離集音 (2.5x / 遠席・会議室推奨)</option>
+              <option value="3.5">超遠距離 (3.5x / 大会議室・現場ヤード)</option>
+            </select>
+            <small class="form-help">
+              80Hzハイパスフィルターとダイナミクスコンプレッサーにより、音割れを防ぎながら遠くの人の発話のみをクリアに増幅します。
             </small>
           </div>
 

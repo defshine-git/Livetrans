@@ -881,6 +881,8 @@ class ConfigManager {
     CATEGORY: 'glt_category',
     AUTO_SAVE: 'glt_auto_save_enabled',
     DOC_MODE: 'glt_doc_mode',
+    FOLDER_ID: 'glt_output_folder_id',
+    GAIN: 'glt_mic_gain',
     LAST_DOC_ID: 'glt_last_doc_id',
     ENGINE_MODE: 'glt_engine_mode',
     LIVE_MODEL: 'glt_live_model'
@@ -913,13 +915,34 @@ class AudioCaptureService {
     this.audioContext = null;
     this.mediaStream = null;
     this.sourceNode = null;
+    this.highpassNode = null;
+    this.gainNode = null;
+    this.compressorNode = null;
     this.filterNode = null;
     this.analyserNode = null;
     this.processorNode = null;
     this.isRecording = false;
     this.isPaused = false;
+    this.gainValue = 2.5; // 遠距離集音ブースト初期値 (推奨 2.5x)
     this.onChunkCallback = null;
     this.onVolumeCallback = null;
+
+    // Buffer pooling to eliminate garbage collection latency spikes
+    this._cachedBuffer = null;
+  }
+
+  setGain(val) {
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      this.gainValue = num;
+      if (this.gainNode && this.audioContext && this.audioContext.state !== 'closed') {
+        try {
+          this.gainNode.gain.setTargetAtTime(this.gainValue, this.audioContext.currentTime, 0.05);
+        } catch (e) {
+          this.gainNode.gain.value = this.gainValue;
+        }
+      }
+    }
   }
 
   ensureContext() {
@@ -948,12 +971,16 @@ class AudioCaptureService {
     }
 
     try {
+      // Optimized audio constraints: avoid overly aggressive noiseSuppression which cuts distant voices
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
           echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+          noiseSuppression: false, // Disabled to prevent cutting distant soft speech
+          autoGainControl: true,
+          googAutoGainControl: true,
+          googNoiseSuppression: false,
+          googHighpassFilter: false
         }
       });
     } catch (err) {
@@ -968,18 +995,45 @@ class AudioCaptureService {
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
+    // 1. Highpass Filter: 80Hz cutoff (removes AC hum, room rumble, and desk vibrations without affecting vocal clarity)
+    this.highpassNode = this.audioContext.createBiquadFilter();
+    this.highpassNode.type = 'highpass';
+    this.highpassNode.frequency.value = 80;
+    this.highpassNode.Q.value = 0.7;
+
+    // 2. Pre-amp Gain Booster: Amplifies distant/soft speech to ensure reliable ASR feature extraction
+    this.gainNode = this.audioContext.createGain();
+    this.gainNode.gain.value = this.gainValue;
+
+    // 3. Dynamics Compressor: Automatically manages dynamic range, boosting weak distant voices while preventing near-mic clipping
+    this.compressorNode = this.audioContext.createDynamicsCompressor();
+    this.compressorNode.threshold.value = -32; // dB (wide capture threshold)
+    this.compressorNode.knee.value = 24;      // dB (smooth compression onset)
+    this.compressorNode.ratio.value = 8;       // 8:1 (firm peak limiter)
+    this.compressorNode.attack.value = 0.003;  // 3ms fast attack
+    this.compressorNode.release.value = 0.20;  // 200ms natural recovery
+
+    // 4. Lowpass Anti-Aliasing Filter: 7.5kHz cutoff for clean 16kHz target downsampling
     this.filterNode = this.audioContext.createBiquadFilter();
     this.filterNode.type = 'lowpass';
     this.filterNode.frequency.value = 7500;
-    this.sourceNode.connect(this.filterNode);
 
+    // Signal Routing: Source -> Highpass -> Gain -> Compressor -> Lowpass -> Destination
+    this.sourceNode.connect(this.highpassNode);
+    this.highpassNode.connect(this.gainNode);
+    this.gainNode.connect(this.compressorNode);
+    this.compressorNode.connect(this.filterNode);
+
+    // Analyser for real-time volume metering
     this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 256;
     this.filterNode.connect(this.analyserNode);
 
+    // Audio Processor (buffer: 2048 samples = ~128ms chunks)
     const bufferSize = 2048;
     this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
     
+    // Retain global reference to avoid GC reclamation
     if (typeof window !== 'undefined') {
       window._activeAudioProcessorNode = this.processorNode;
     }
@@ -989,7 +1043,7 @@ class AudioCaptureService {
 
     this.processorNode.onaudioprocess = (e) => {
       const outputBuffer = e.outputBuffer.getChannelData(0);
-      outputBuffer.fill(0);
+      outputBuffer.fill(0); // Feedback mute
 
       if (!this.isRecording || this.isPaused) return;
 
@@ -997,10 +1051,11 @@ class AudioCaptureService {
 
       if (this.onVolumeCallback && this.analyserNode) {
         let sum = 0;
-        for (let i = 0; i < inputBuffer.length; i++) {
+        const len = inputBuffer.length;
+        for (let i = 0; i < len; i++) {
           sum += inputBuffer[i] * inputBuffer[i];
         }
-        const rms = Math.sqrt(sum / inputBuffer.length);
+        const rms = Math.sqrt(sum / len);
         this.onVolumeCallback(rms);
       }
 
@@ -1019,67 +1074,48 @@ class AudioCaptureService {
     this.isPaused = false;
   }
 
-  pause() {
-    this.isPaused = true;
-  }
-
-  resume() {
-    this.isPaused = false;
-  }
+  pause() { this.isPaused = true; }
+  resume() { this.isPaused = false; }
 
   stop() {
     this.isRecording = false;
     this.isPaused = false;
-
-    if (typeof window !== 'undefined') {
-      window._activeAudioProcessorNode = null;
-    }
-
-    if (this.processorNode) {
-      try { this.processorNode.disconnect(); } catch (e) {}
-      this.processorNode = null;
-    }
-    if (this.analyserNode) {
-      try { this.analyserNode.disconnect(); } catch (e) {}
-      this.analyserNode = null;
-    }
-    if (this.filterNode) {
-      try { this.filterNode.disconnect(); } catch (e) {}
-      this.filterNode = null;
-    }
-    if (this.sourceNode) {
-      try { this.sourceNode.disconnect(); } catch (e) {}
-      this.sourceNode = null;
-    }
-    if (this.mediaStream) {
-      try {
-        this.mediaStream.getTracks().forEach((track) => track.stop());
-      } catch (e) {}
-      this.mediaStream = null;
-    }
-    if (this.audioContext) {
-      this.audioContext.close().catch(() => {});
-      this.audioContext = null;
-    }
+    if (typeof window !== 'undefined') window._activeAudioProcessorNode = null;
+    if (this.processorNode) { try { this.processorNode.disconnect(); } catch (e) {} this.processorNode = null; }
+    if (this.analyserNode) { try { this.analyserNode.disconnect(); } catch (e) {} this.analyserNode = null; }
+    if (this.filterNode) { try { this.filterNode.disconnect(); } catch (e) {} this.filterNode = null; }
+    if (this.compressorNode) { try { this.compressorNode.disconnect(); } catch (e) {} this.compressorNode = null; }
+    if (this.gainNode) { try { this.gainNode.disconnect(); } catch (e) {} this.gainNode = null; }
+    if (this.highpassNode) { try { this.highpassNode.disconnect(); } catch (e) {} this.highpassNode = null; }
+    if (this.sourceNode) { try { this.sourceNode.disconnect(); } catch (e) {} this.sourceNode = null; }
+    if (this.mediaStream) { try { this.mediaStream.getTracks().forEach((track) => track.stop()); } catch (e) {} this.mediaStream = null; }
+    if (this.audioContext) { this.audioContext.close().catch(() => {}); this.audioContext = null; }
   }
 
+  // Highly optimized buffer pooling downsampler: zero allocation in audio loop
   _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
     if (inputSampleRate === outputSampleRate) {
-      const output = new Int16Array(buffer.length);
-      for (let i = 0; i < buffer.length; i++) {
-        const s = Math.max(-1, Math.min(1, buffer[i]));
-        output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      const len = buffer.length;
+      if (!this._cachedBuffer || this._cachedBuffer.length !== len) {
+        this._cachedBuffer = new Int16Array(len);
       }
-      return output;
+      for (let i = 0; i < len; i++) {
+        const s = Math.max(-1, Math.min(1, buffer[i]));
+        this._cachedBuffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return this._cachedBuffer;
     }
 
     const ratio = inputSampleRate / outputSampleRate;
     const newLength = Math.round(buffer.length / ratio);
-    const result = new Int16Array(newLength);
+    if (!this._cachedBuffer || this._cachedBuffer.length !== newLength) {
+      this._cachedBuffer = new Int16Array(newLength);
+    }
+    const result = this._cachedBuffer;
     let offsetResult = 0;
     let offsetBuffer = 0;
 
-    while (offsetResult < result.length) {
+    while (offsetResult < newLength) {
       const nextOffsetBuffer = Math.round((offsetResult + 1) * ratio);
       let accum = 0;
       let count = 0;
@@ -1096,12 +1132,14 @@ class AudioCaptureService {
     return result;
   }
 
+  // Optimized chunk encoder with pre-sized typed view
   _int16ToBase64(int16Array) {
-    const uint8 = new Uint8Array(int16Array.buffer);
+    const uint8 = new Uint8Array(int16Array.buffer, int16Array.byteOffset, int16Array.byteLength);
     let binary = '';
+    const len = uint8.byteLength;
     const chunkSize = 8192;
-    for (let i = 0; i < uint8.length; i += chunkSize) {
-      const chunk = uint8.subarray(i, i + chunkSize);
+    for (let i = 0; i < len; i += chunkSize) {
+      const chunk = uint8.subarray(i, Math.min(i + chunkSize, len));
       binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
@@ -1532,6 +1570,20 @@ class GeminiLiveClient {
 }
 
 // ==========================================
+// [FIX 1] Shared fetch with AbortController timeout
+// 1件のハングでキュー全体が永久停止するのを防止する共通ユーティリティ
+// ==========================================
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ==========================================
 // 5. Translation Service & 3-Layer Resilient Queue
 // ==========================================
 class TranslationService {
@@ -1539,6 +1591,8 @@ class TranslationService {
     this.queue = [];
     this.isProcessing = false;
     this.onLogCallback = null;
+    // [FIX 4] 直近で成功したモデルを記憶し、次回はそこから試行して無駄往復を削減
+    this._preferredModel = null;
   }
 
   log(type, message) {
@@ -1601,17 +1655,22 @@ class TranslationService {
 
     // Layer 1: Gemini REST API (Cascade Fallback)
     if (apiKey && apiKey.trim() !== '') {
-      const modelsToTry = [
+      const baseModels = [
         'gemini-3.5-flash-lite',
         'gemini-2.5-flash',
         'gemini-2.0-flash',
         'gemini-1.5-flash'
       ];
+      // [FIX 4] 前回成功したモデルを先頭に置き、以降の発話は原則1往復で確定させる
+      const modelsToTry = this._preferredModel
+        ? [this._preferredModel, ...baseModels.filter((m) => m !== this._preferredModel)]
+        : baseModels;
 
       for (const modelName of modelsToTry) {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
         try {
-          const res = await fetch(endpoint, {
+          // [FIX 1] タイムアウト付きfetchでハングによるキュー全停止を防止
+          const res = await fetchWithTimeout(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1621,12 +1680,14 @@ class TranslationService {
                 maxOutputTokens: 800
               }
             })
-          });
+          }, 12000);
 
           if (res.ok) {
             const data = await res.json();
             if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
               const transText = data.candidates[0].content.parts[0].text.trim();
+              // [FIX 4] 成功モデルを記憶
+              this._preferredModel = modelName;
               this.log('success', `Gemini (${modelName}) 翻訳完了: "${transText}"`);
               return {
                 translated: transText,
@@ -1636,10 +1697,14 @@ class TranslationService {
           } else {
             const errData = await res.json().catch(() => null);
             const errDetail = errData?.error?.message || `HTTP ${res.status}`;
+            // [FIX 4] 記憶していたモデルが失敗したら記憶を破棄し、次回は先頭から再評価
+            if (this._preferredModel === modelName) this._preferredModel = null;
             this.log('warn', `Gemini (${modelName}) 失敗: ${errDetail}`);
           }
         } catch (err) {
-          this.log('warn', `Gemini (${modelName}) 通信エラー: ${err.message}`);
+          if (this._preferredModel === modelName) this._preferredModel = null;
+          const reason = err.name === 'AbortError' ? 'タイムアウト (12秒)' : err.message;
+          this.log('warn', `Gemini (${modelName}) 通信エラー: ${reason}`);
         }
       }
     } else {
@@ -1650,7 +1715,8 @@ class TranslationService {
     if (gasUrl && gasUrl.trim() !== '') {
       this.log('info', 'GAS (LanguageApp) による自動フォールバック翻訳を実行中...');
       try {
-        const gasRes = await fetch(gasUrl.trim(), {
+        // [FIX 1] GASフォールバックにもタイムアウトを付与
+        const gasRes = await fetchWithTimeout(gasUrl.trim(), {
           method: 'POST',
           mode: 'cors',
           redirect: 'follow',
@@ -1662,7 +1728,7 @@ class TranslationService {
             srcLang: srcLang,
             targetLang: targetLang
           })
-        });
+        }, 15000);
 
         if (gasRes.ok) {
           const gasData = await gasRes.json();
@@ -1679,7 +1745,8 @@ class TranslationService {
           this.log('warn', `GAS翻訳通信エラー: HTTP ${gasRes.status}`);
         }
       } catch (gasErr) {
-        this.log('warn', `GAS翻訳接続失敗: ${gasErr.message}`);
+        const gasReason = gasErr.name === 'AbortError' ? 'タイムアウト (15秒)' : gasErr.message;
+        this.log('warn', `GAS翻訳接続失敗: ${gasReason}`);
       }
     }
 
@@ -1694,70 +1761,123 @@ class TranslationService {
 // 6. GAS Storage Client (Google Docs Integration)
 // ==========================================
 class GasStorageClient {
+  static extractFolderId(input) {
+    if (!input) return '';
+    const match = String(input).trim().match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    return (match && match[1]) ? match[1] : String(input).trim();
+  }
+
   static extractDocId(input) {
     if (!input) return '';
     const match = String(input).trim().match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-    if (match && match[1]) return match[1];
-    return String(input).trim();
+    return (match && match[1]) ? match[1] : String(input).trim();
   }
 
   static async ping(gasUrl, token) {
     if (!gasUrl) throw new Error('GAS Web App URLが設定されていません。');
     
+    // Check URL structure first
+    const trimmedUrl = gasUrl.trim();
+    if (!trimmedUrl.startsWith('https://script.google.com/')) {
+      throw new Error('GAS Web App URLは "https://script.google.com/..." で始まる必要があります。');
+    }
+    if (trimmedUrl.endsWith('/edit')) {
+      throw new Error('GASエディタの編集URLが設定されています。「デプロイ」→「ウェブアプリ」で発行されたURL (.../exec) を設定してください。');
+    }
+
     try {
-      const res = await fetch(gasUrl, {
+      // [FIX 1] 疎通テストにもタイムアウトを付与し、無応答時にUIが固まらないようにする
+      const res = await fetchWithTimeout(trimmedUrl, {
         method: 'POST',
         mode: 'cors',
         redirect: 'follow',
         headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify({ action: 'ping', token: token || '' })
-      });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch (e) {}
+      }, 12000);
 
-    const getRes = await fetch(gasUrl, {
-      method: 'GET',
-      mode: 'cors',
-      redirect: 'follow'
-    });
-    if (!getRes.ok) throw new Error(`HTTPステータス: ${getRes.status}`);
-    return await getRes.json();
+      const rawText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (jsonErr) {
+        if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('accounts.google.com')) {
+          throw new Error('Googleのログイン画面が返却されました。GASのデプロイ設定で「アクセスできるユーザー」を「全員 (Anyone)」に設定してください。');
+        }
+        throw new Error(`JSONパース失敗: ${rawText.slice(0, 80)}`);
+      }
+
+      if (data.status === 'error') {
+        throw new Error(data.message || 'GASエラー');
+      }
+      return data;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('GASサーバーが12秒以内に応答しませんでした（タイムアウト）。URLとデプロイ状態を確認してください。');
+      }
+      if (err.name === 'TypeError' && err.message.includes('fetch')) {
+        throw new Error('GASサーバーに接続できません (CORS/ネットワークエラー)。デプロイ設定で「アクセスできるユーザー: 全員」になっているか、URLが有効か確認してください。');
+      }
+      throw err;
+    }
   }
 
-  static async saveTranscript(gasUrl, { documentId, title, records, direction, category, model, token }) {
+  static async saveTranscript(gasUrl, { documentId, title, folderId, records, direction, category, model, token }) {
     if (!gasUrl) throw new Error('GAS Web App URLが未設定です。');
     if (!records || records.length === 0) throw new Error('保存対象の差分レコードがありません。');
 
-    const sanitizedDocId = GasStorageClient.extractDocId(documentId);
+    const trimmedUrl = gasUrl.trim();
+    if (trimmedUrl.endsWith('/edit')) {
+      throw new Error('GASエディタの編集URLが設定されています。「デプロイ」→「ウェブアプリ」で発行されたURL (.../exec) を設定してください。');
+    }
 
+    const sanitizedDocId = GasStorageClient.extractDocId(documentId);
     const payload = {
       action: 'save',
       token: token || '',
       documentId: sanitizedDocId,
       title: title || '',
+      folderId: GasStorageClient.extractFolderId(folderId),
+      outputFolderId: GasStorageClient.extractFolderId(folderId),
       model: model || 'models/gemini-3.5-transcribe-live',
       direction: direction || 'AUTO',
       category: category || 'HKC',
       records: records
     };
 
-    const res = await fetch(gasUrl, {
-      method: 'POST',
-      mode: 'cors',
-      redirect: 'follow',
-      headers: {
-        'Content-Type': 'text/plain'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!res.ok) {
-      throw new Error(`GAS通信エラー (HTTP ${res.status})`);
+    let res;
+    try {
+      // [FIX 1] 保存処理は本文が大きくなり得るため、やや長め(20秒)のタイムアウトを付与
+      res = await fetchWithTimeout(trimmedUrl, {
+        method: 'POST',
+        mode: 'cors',
+        redirect: 'follow',
+        headers: {
+          'Content-Type': 'text/plain'
+        },
+        body: JSON.stringify(payload)
+      }, 20000);
+    } catch (netErr) {
+      if (netErr.name === 'AbortError') {
+        throw new Error('GAS保存が20秒以内に完了しませんでした（タイムアウト）。件数が多い場合は分割保存をお試しください。');
+      }
+      throw new Error('GASサーバーと通信できませんでした (CORSまたは接続遮断)。GASのデプロイで「アクセスできるユーザー: 全員」が設定されているか確認してください。');
     }
 
-    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(`GAS通信HTTPエラー: ${res.status}`);
+    }
+
+    const rawText = await res.text();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (jsonErr) {
+      if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('accounts.google.com')) {
+        throw new Error('Googleのログイン画面に転送されました。GASのデプロイ設定で「アクセスできるユーザー」が「全員」になっているか確認してください。');
+      }
+      throw new Error(`GAS応答の解析失敗: ${rawText.slice(0, 100)}`);
+    }
+
     if (data.status === 'error') {
       throw new Error(data.message || 'GAS処理エラー');
     }
@@ -1810,6 +1930,8 @@ class App {
     this.elBtnPauseRecord = document.getElementById('btn-pause-record');
     this.elSelectDirection = document.getElementById('select-direction');
     this.elSelectCategory = document.getElementById('select-category');
+    this.elSelectGain = document.getElementById('select-gain');
+    this.elSelectDefaultGain = document.getElementById('select-default-gain');
     this.elBtnClearFeed = document.getElementById('btn-clear-feed');
     this.elBtnSaveDocs = document.getElementById('btn-save-docs');
     this.elSaveDocsText = document.getElementById('btn-save-docs-text');
@@ -1818,6 +1940,10 @@ class App {
     this.elRadioDocModes = document.getElementsByName('doc-save-mode');
     this.elInputDocTitle = document.getElementById('input-doc-title');
     this.elInputDocId = document.getElementById('input-doc-id');
+    this.elInputFolderId = document.getElementById('input-folder-id');
+    this.elInputDefaultFolderId = document.getElementById('input-default-folder-id');
+    this.elSavedFolderSep = document.getElementById('saved-folder-sep');
+    this.elSavedFolderLink = document.getElementById('saved-folder-link');
     this.elSavedDocBanner = document.getElementById('saved-doc-banner');
     this.elSavedDocLink = document.getElementById('saved-doc-link');
 
@@ -1868,10 +1994,14 @@ class App {
     this.gasToken = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_TOKEN, '');
     this.direction = ConfigManager.get(ConfigManager.STORAGE_KEYS.DIRECTION, 'auto');
     this.category = ConfigManager.get(ConfigManager.STORAGE_KEYS.CATEGORY, 'HKC');
+    this.gain = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAIN, '2.5');
     this.engineMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(ConfigManager.STORAGE_KEYS.LIVE_MODEL, 'models/gemini-3.5-transcribe-live');
     this.autoSave = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUTO_SAVE, 'false') === 'true';
     this.docMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.DOC_MODE, 'new');
+    this.folderId = ConfigManager.get(ConfigManager.STORAGE_KEYS.FOLDER_ID, '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f');
+    if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
+    if (this.elInputDefaultFolderId) this.elInputDefaultFolderId.value = this.folderId;
     this.lastDocId = ConfigManager.get(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, '');
 
     this.elInputApiKey.value = this.apiKey;
@@ -1879,6 +2009,9 @@ class App {
     this.elInputGasToken.value = this.gasToken;
     this.elSelectDirection.value = this.direction;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
+    if (this.elSelectGain) this.elSelectGain.value = this.gain;
+    if (this.elSelectDefaultGain) this.elSelectDefaultGain.value = this.gain;
+    this.audioService.setGain(this.gain);
     this.elSelectEngineMode.value = this.engineMode;
     this.elSelectLiveModel.value = this.liveModel;
     this.elCheckAutoSave.checked = this.autoSave;
@@ -1913,6 +2046,16 @@ class App {
         this.category = e.target.value;
         ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, this.category);
         this.log('info', `監査分野変更: ${this.category}`);
+      });
+    }
+
+    if (this.elSelectGain) {
+      this.elSelectGain.addEventListener('change', (e) => {
+        this.gain = e.target.value;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, this.gain);
+        this.audioService.setGain(this.gain);
+        this.log('info', `マイク集音感度変更: ${this.gain}x (遠距離ブースト適用)`);
+        this.showToast(`マイク感度を ${this.gain}x に設定しました。`, 'info');
       });
     }
 
@@ -1985,7 +2128,18 @@ class App {
       this.gasUrl = this.elInputGasUrl.value.trim();
       this.gasToken = this.elInputGasToken.value.trim();
       this.engineMode = this.elSelectEngineMode.value;
+      if (this.elSelectDefaultGain) {
+        this.gain = this.elSelectDefaultGain.value;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, this.gain);
+        if (this.elSelectGain) this.elSelectGain.value = this.gain;
+        this.audioService.setGain(this.gain);
+      }
       this.liveModel = this.elSelectLiveModel.value;
+      if (this.elInputDefaultFolderId) {
+        this.folderId = GasStorageClient.extractFolderId(this.elInputDefaultFolderId.value.trim()) || '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f';
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.FOLDER_ID, this.folderId);
+        if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
+      }
       this.autoSave = this.elCheckAutoSave.checked;
 
       ConfigManager.set(ConfigManager.STORAGE_KEYS.API_KEY, this.apiKey);
@@ -2076,9 +2230,11 @@ class App {
   _syncDocModeUI() {
     if (this.docMode === 'existing') {
       this.elInputDocTitle.style.display = 'none';
+      if (this.elInputFolderId) this.elInputFolderId.style.display = 'none';
       this.elInputDocId.style.display = 'block';
     } else {
       this.elInputDocTitle.style.display = 'block';
+      if (this.elInputFolderId) this.elInputFolderId.style.display = 'block';
       this.elInputDocId.style.display = 'none';
     }
   }
@@ -2441,8 +2597,7 @@ class App {
       }
     });
 
-    this.elTranscriptList.appendChild(card);
-    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    this.elTranscriptList.prepend(card);
   }
 
   _onTranslationComplete(recordId, transResult) {
@@ -2542,7 +2697,13 @@ class App {
 
       this.elSavedDocBanner.style.display = 'flex';
       this.elSavedDocLink.href = result.documentUrl;
-      this.elSavedDocLink.textContent = `${result.documentTitle || 'ドキュメント'} を開く ↗`;
+      this.elSavedDocLink.textContent = `📄 ${result.documentTitle || 'ドキュメント'} を開く ↗`;
+      if (result.folderUrl && this.elSavedFolderLink && this.elSavedFolderSep) {
+        this.elSavedFolderSep.style.display = 'inline';
+        this.elSavedFolderLink.style.display = 'inline';
+        this.elSavedFolderLink.href = result.folderUrl;
+        this.elSavedFolderLink.textContent = `📁 ${result.folderName || 'フォルダ'} ↗`;
+      }
       this.log('success', `Google ドキュメント差分追記完了 (保存後累計: ${this.lastSavedIndex}件): ${result.documentUrl}`);
 
       if (result.documentId) {
@@ -2665,7 +2826,7 @@ class App {
       gasUrl: this.gasUrl || '',
       gasToken: this.gasToken || '',
       direction: this.direction || 'auto',
-      category: this.category || 'HKC',
+      category: this.category || 'HKC', gain: this.gain || '2.5',
       engineMode: this.engineMode || 'auto',
       liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
       autoSave: this.autoSave,
@@ -2712,11 +2873,13 @@ class App {
         if (config.gasToken) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, config.gasToken);
         if (config.direction) ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, config.direction);
         if (config.category) ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, config.category);
+        if (config.gain) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, config.gain);
         if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
         if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
         if (config.autoSave !== undefined) ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(config.autoSave));
         if (config.docMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, config.docMode);
         if (config.lastDocId) ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, config.lastDocId);
+        if (config.folderId) ConfigManager.set(ConfigManager.STORAGE_KEYS.FOLDER_ID, config.folderId);
 
         if (window.history && window.history.replaceState) {
           window.history.replaceState(null, '', window.location.pathname + window.location.search);
