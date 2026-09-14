@@ -17,7 +17,7 @@
           <span class="logo-icon">🌐</span>
           <div class="logo-text">
             <h1>Gemini Live 翻訳</h1>
-            <span class="model-badge">models/gemini-3.5-transcribe-live</span>
+            <span id="active-engine-badge" class="model-badge">models/gemini-3.5-transcribe-live</span>
           </div>
         </div>
       </div>
@@ -75,7 +75,7 @@
             </label>
             <label class="radio-label">
               <input type="radio" name="doc-save-mode" value="existing">
-              既存ドキュメントに追記
+              既存ドキュメントに差分追記
             </label>
           </div>
           <div class="doc-input-wrapper">
@@ -102,6 +102,19 @@
         </div>
         <div id="interim-container" class="interim-box">
           <p id="interim-text" class="interim-placeholder">マイクを開始すると、リアルタイムの発話と翻訳プレビューがここに表示されます...</p>
+        </div>
+      </section>
+
+      <!-- Diagnostic & Log Console -->
+      <section class="diagnostic-section">
+        <div class="diag-header" id="toggle-diag">
+          <span>🛠️ 動作ログ・通信診断</span>
+          <span id="diag-toggle-icon">▼ 表示/非表示</span>
+        </div>
+        <div id="diag-log-container" class="diag-log-box">
+          <div id="diag-log" class="diag-log-content">
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v2.0.0)。</div>
+          </div>
         </div>
       </section>
 
@@ -143,8 +156,28 @@
               <button type="button" id="btn-toggle-key-vis" class="btn btn-sm btn-ghost">表示</button>
             </div>
             <small class="form-help">
-              Google AI Studioから取得したAPIキーを入力してください（ブラウザのlocalStorageに安全に保管されます）。
+              Google AI Studioから取得したAPIキー（ブラウザのlocalStorageに安全に保管されます）。
             </small>
+          </div>
+
+          <div class="form-group">
+            <label for="select-engine-mode">音声認識エンジン方式</label>
+            <select id="select-engine-mode" class="select-input">
+              <option value="auto" selected>自動フォールバック (Gemini Live を試行し、失敗時はブラウザ認識で継続)</option>
+              <option value="gemini-live">Gemini Live API のみ (models/gemini-3.5-transcribe-live)</option>
+              <option value="web-speech">ブラウザ標準音声認識 (Web Speech API) + Gemini 高速翻訳</option>
+            </select>
+            <small class="form-help">
+              WebSocket接続不可の環境でも「自動フォールバック」で安定動作します。
+            </small>
+          </div>
+
+          <div class="form-group">
+            <label for="select-live-model">Gemini Live モデル名</label>
+            <select id="select-live-model" class="select-input">
+              <option value="models/gemini-3.5-transcribe-live" selected>models/gemini-3.5-transcribe-live (最新音声認識)</option>
+              <option value="models/gemini-2.0-flash-exp">models/gemini-2.0-flash-exp (Live Agent)</option>
+            </select>
           </div>
 
           <div class="form-group">
@@ -152,9 +185,6 @@
               Google Apps Script (GAS) Web App URL
             </label>
             <input type="url" id="input-gas-url" class="text-input" placeholder="https://script.google.com/macros/s/.../exec">
-            <small class="form-help">
-              Googleドキュメント保存用GASの公開URL（ウェブアプリ実行URL）。
-            </small>
             <div class="gas-test-row">
               <button type="button" id="btn-test-gas" class="btn btn-sm btn-outline">GAS接続テスト</button>
               <span id="gas-test-result" class="test-result-text"></span>
@@ -162,9 +192,19 @@
           </div>
 
           <div class="form-group">
+            <label for="input-gas-token">
+              GAS 共有シークレットトークン (任意)
+            </label>
+            <input type="password" id="input-gas-token" class="text-input" placeholder="GAS側でSECRET_TOKENを設定した場合のみ入力">
+            <small class="form-help">
+              第三者による不正保存リクエストを遮断するためのパスコードです。
+            </small>
+          </div>
+
+          <div class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" id="check-auto-save">
-              10発話ごとに自動でGoogleドキュメントへバックアップ保存する
+              10発話ごとに自動でGoogleドキュメントへ差分バックアップ保存する
             </label>
           </div>
         </div>

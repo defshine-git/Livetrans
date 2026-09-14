@@ -728,3 +728,53 @@ body {
   40% { content: '..'; }
   60%, 100% { content: '...'; }
 }
+
+/* Diagnostic Panel */
+.diagnostic-section {
+  margin-bottom: 20px;
+}
+.diag-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 6px;
+  user-select: none;
+}
+.diag-header:hover {
+  color: var(--text-secondary);
+}
+.diag-log-box {
+  background: #1F2328;
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #E6EDF3;
+  max-height: 120px;
+  overflow-y: auto;
+  line-height: 1.4;
+}
+.log-line {
+  margin-bottom: 2px;
+  word-break: break-all;
+}
+.log-info { color: #8C959F; }
+.log-success { color: #3FB950; font-weight: 600; }
+.log-warn { color: #D29922; }
+.log-error { color: #F85149; font-weight: 600; }
+
+/* In-place card update animation */
+.transcript-card {
+  animation: card-appear 0.2s ease-out;
+}
+@keyframes card-appear {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.trans-text {
+  transition: color 0.3s ease;
+}
