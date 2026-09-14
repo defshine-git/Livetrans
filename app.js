@@ -974,17 +974,8 @@ class AudioCaptureService {
       let displayStream;
       try {
         displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: 1 },
-            height: { ideal: 1 },
-            frameRate: { ideal: 1 }
-          },
-          audio: {
-            channelCount: 1,
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false
-          }
+          video: true,
+          audio: true
         });
       } catch (err) {
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -1923,15 +1914,20 @@ class GasStorageClient {
 
 // ==========================================
 // StreamSentenceSplitter (リアルタイム文分割・自動チャンキング機構)
-// 早口・連続スピーチ時でも文ごとに自動確定して即座に翻訳へ送る
+// 短い会話も長文連続スピーチも、文・ポーズごとにテンポよく自動確定する
 // ==========================================
 class StreamSentenceSplitter {
   constructor() {
     this.confirmedText = '';
     this.lastRawText = '';
+    this.silenceTimer = null;
   }
 
   reset() {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
     this.confirmedText = '';
     this.lastRawText = '';
   }
@@ -1939,6 +1935,11 @@ class StreamSentenceSplitter {
   feed(currentFullText, onChunk) {
     if (!currentFullText) return '';
     this.lastRawText = currentFullText;
+
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
 
     let unconfirmed = '';
     if (this.confirmedText && currentFullText.startsWith(this.confirmedText)) {
@@ -1963,10 +1964,12 @@ class StreamSentenceSplitter {
         const sentence = m[1].trim();
         const nextPart = m[2];
         if (nextPart) {
+          // 次の文がすでに開始している場合は直前の文を即時確定
           emitted.push(sentence);
           remaining = nextPart.trim();
           continue;
-        } else if (sentence.length >= 70) {
+        } else if (sentence.length >= 50) {
+          // 1文がある程度まとまった長さ（50文字以上）に達していれば即時確定
           emitted.push(sentence);
           remaining = '';
           break;
@@ -1974,10 +1977,10 @@ class StreamSentenceSplitter {
           break;
         }
       } else {
-        // 2. ピリオド等が付かない長文（140文字以上）は、カンマ等で安全に分割
-        if (remaining.length >= 140) {
+        // 2. ピリオド等が付かない長文（120文字以上）は、カンマ等で安全に分割
+        if (remaining.length >= 120) {
           const commaM = remaining.match(/^([\s\S]*?[,、;])\s+([\s\S]+)$/);
-          if (commaM && commaM[1].trim().length >= 40) {
+          if (commaM && commaM[1].trim().length >= 35) {
             emitted.push(commaM[1].trim());
             remaining = commaM[2].trim();
             continue;
@@ -2000,14 +2003,30 @@ class StreamSentenceSplitter {
       }
 
       for (const s of emitted) {
-        if (onChunk) onChunk(s);
+        if (onChunk && s && s.trim()) onChunk(s.trim());
       }
+    }
+
+    // 3. 短い発話やポーズ検知：0.9秒間新しい文字が来なければ、残っている文を自動確定！
+    if (remaining && remaining.trim().length >= 2) {
+      this.silenceTimer = setTimeout(() => {
+        if (remaining && remaining.trim()) {
+          const chunk = remaining.trim();
+          this.confirmedText = currentFullText;
+          if (onChunk) onChunk(chunk);
+        }
+      }, 900);
     }
 
     return remaining;
   }
 
   flush(finalText, onChunk) {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+
     const textToFlush = finalText || this.lastRawText;
     let leftover = '';
     if (textToFlush) {
@@ -2023,8 +2042,8 @@ class StreamSentenceSplitter {
     this.confirmedText = '';
     this.lastRawText = '';
 
-    if (leftover && onChunk) {
-      onChunk(leftover);
+    if (leftover && leftover.trim() && onChunk) {
+      onChunk(leftover.trim());
     }
     return leftover;
   }
@@ -3152,7 +3171,7 @@ class App {
       toast.style.transition = 'opacity 0.3s, transform 0.3s';
       toast.style.opacity = '0';
       toast.style.transform = 'translateY(10px)';
-      setTimeout(() => toast.remove(), 300);
+      setTimeout(() => { if (toast.remove) toast.remove(); else if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
     }, 4000);
   }
 
