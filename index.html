@@ -2,11 +2,11 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gemini Live 日英・英日リアルタイム自動翻訳</title>
-  <meta name="description" content="Gemini Live API (models/gemini-3.5-transcribe-live) を利用した高精度リアルタイム双方向音声翻訳・Googleドキュメント保存Webアプリ">
-  <link rel="stylesheet" href="style.css?v=2.2.1">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌐</text></svg>">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Bilingual Transcriber - 現地監査音声認識・翻訳システム</title>
+  <meta name="description" content="Gemini Live API および Web Speech API に対応した現地監査音声認識・リアルタイム日英英日双方向翻訳Webアプリ">
+  <link rel="stylesheet" href="style.css?v=2.5.0">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
   <div class="app-wrapper">
@@ -14,20 +14,20 @@
     <header class="app-header">
       <div class="header-left">
         <div class="logo-badge">
-          <span class="logo-icon">🌐</span>
+          <span class="logo-icon">⚓</span>
           <div class="logo-text">
-            <h1>Gemini Live 翻訳</h1>
-            <span id="active-engine-badge" class="model-badge">models/gemini-3.5-transcribe-live</span>
+            <h1>Bilingual Transcriber</h1>
+            <span id="active-engine-badge" class="model-badge">Gemini Live</span>
           </div>
         </div>
       </div>
       <div class="header-right">
         <div id="connection-status" class="status-badge status-idle">
           <span class="status-dot"></span>
-          <span class="status-label">待機中</span>
+          <span id="status-text" class="status-label">待機中</span>
         </div>
         <button id="btn-open-qr" class="btn btn-secondary btn-sm" title="スマホ連携用QRコードを表示">📱 スマホ連携</button>
-        <button id="btn-open-settings" class="btn btn-icon" title="設定を開く" aria-label="設定">
+        <button id="btn-open-settings" class="btn btn-icon btn-secondary btn-sm" title="設定を開く" aria-label="設定">
           ⚙️ 設定
         </button>
       </div>
@@ -39,8 +39,8 @@
       <section class="control-panel card">
         <div class="control-row main-actions">
           <button id="btn-toggle-record" class="btn btn-primary btn-record">
-            <span class="btn-icon-symbol">🎙️</span>
-            <span class="btn-text">翻訳を開始</span>
+            <span class="btn-icon-symbol">🎤</span>
+            <span class="btn-text">録音開始</span>
           </button>
           <button id="btn-pause-record" class="btn btn-secondary" disabled>
             <span class="btn-icon-symbol">⏸️</span>
@@ -48,21 +48,32 @@
           </button>
           
           <div class="control-group direction-group">
-            <label for="select-direction" class="control-label">翻訳方向:</label>
+            <label for="select-direction" class="control-label">翻訳:</label>
             <select id="select-direction" class="select-input">
-              <option value="auto" selected>自動判別 (日 ⇄ 英)</option>
-              <option value="ja-to-en">日本語 → 英語 (JA → EN)</option>
-              <option value="en-to-ja">英語 → 日本語 (EN → JA)</option>
+              <option value="auto" selected>自動切替 (英 ⇄ 日)</option>
+              <option value="ja-to-en">固定: 日本語 ➔ 英語</option>
+              <option value="en-to-ja">固定: 英語 ➔ 日本語</option>
+            </select>
+          </div>
+
+          <div class="control-group category-group">
+            <label for="select-category" class="control-label">分野:</label>
+            <select id="select-category" class="select-input">
+              <option value="HKC" selected>HKC (香港条約)</option>
+              <option value="EU-SRR">EU-SRR</option>
+              <option value="HSE">HSE (安全衛生環境)</option>
+              <option value="IHM">IHM (有害物質一覧表)</option>
+              <option value="Common">全般</option>
             </select>
           </div>
 
           <div class="action-spacer"></div>
 
           <button id="btn-clear-feed" class="btn btn-outline" title="タイムラインをクリア">
-            🗑️ クリア
+            🗑️ ログクリア
           </button>
           <button id="btn-save-docs" class="btn btn-success" title="Google ドキュメントに保存">
-            📄 <span id="btn-save-docs-text">ドキュメントに保存</span>
+            💾 <span id="btn-save-docs-text">Google ドキュメントに保存</span>
             <span id="unsaved-badge" class="badge-count" style="display: none;">0</span>
           </button>
         </div>
@@ -81,7 +92,7 @@
           </div>
           <div class="doc-input-wrapper">
             <input type="text" id="input-doc-title" class="text-input" placeholder="ドキュメント名 (空欄で日時自動付与)">
-            <input type="text" id="input-doc-id" class="text-input" placeholder="既存ドキュメントIDを入力" style="display: none;">
+            <input type="text" id="input-doc-id" class="text-input" placeholder="既存ドキュメントIDまたはURLを入力" style="display: none;">
           </div>
         </div>
 
@@ -93,49 +104,54 @@
         </div>
       </section>
 
-      <!-- Interim / Live Transcription Display -->
+      <!-- Live Preview Section (Matching b9abbcfb.html .live format) -->
       <section class="live-stream-section">
-        <div class="section-title-bar">
-          <span class="section-title">リアルタイム認識プレビュー</span>
-          <span id="audio-meter" class="audio-meter" title="音声入力レベル">
-            <span class="meter-bar"></span>
-          </span>
-        </div>
-        <div id="interim-container" class="interim-box">
-          <p id="interim-text" class="interim-placeholder">マイクを開始すると、リアルタイムの発話と翻訳プレビューがここに表示されます...</p>
-        </div>
-      </section>
-
-      <!-- Diagnostic & Log Console -->
-      <section class="diagnostic-section">
-        <div class="diag-header" id="toggle-diag">
-          <span>🛠️ 動作ログ・通信診断</span>
-          <span id="diag-toggle-icon">▼ 表示/非表示</span>
-        </div>
-        <div id="diag-log-container" class="diag-log-box">
-          <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v2.2.1)。</div>
+        <div id="livePreview" class="live-card" style="display: none;">
+          <div class="live-head">
+            <div class="live-head-left">
+              <span>🔴 LIVE リアルタイム音声認識中</span>
+              <span id="audio-meter" class="audio-meter" title="音声入力レベル">
+                <span class="meter-bar"></span>
+              </span>
+            </div>
+            <div class="live-head-right">
+              <span id="liveEngineTag" class="tag engine">Gemini Live</span>
+            </div>
           </div>
+          <div id="liveText" class="live-text">話しかけてください...</div>
         </div>
       </section>
 
-      <!-- Finalized Translation Feed -->
+      <!-- Finalized Translation Timeline Feed (Matching b9abbcfb.html 2-column grid format) -->
       <section class="timeline-section">
         <div class="section-title-bar">
           <span class="section-title">確定翻訳タイムライン</span>
           <div class="timeline-actions">
             <span id="record-count" class="record-counter">0 件の発話</span>
-            <button id="btn-copy-all" class="btn btn-sm btn-ghost" title="全履歴をコピー">全履歴コピー</button>
+            <button id="btn-copy-all" class="btn btn-sm btn-ghost" title="全履歴を表形式(Markdown)でコピー">📋 全履歴コピー</button>
           </div>
         </div>
 
         <div id="transcript-feed" class="transcript-feed">
           <div id="empty-state" class="empty-state">
             <div class="empty-icon">💬</div>
-            <p class="empty-title">発話履歴はまだありません</p>
-            <p class="empty-desc">「翻訳を開始」ボタンを押してマイクに向かって話しかけてください。</p>
+            <h3 class="empty-title">対面ミーティング音声認識を開始してください</h3>
+            <p class="empty-desc">「録音開始」を押すと文字起こし・翻訳を開始します。</p>
           </div>
           <div id="transcript-list" class="transcript-list"></div>
+        </div>
+      </section>
+
+      <!-- Diagnostic & Log Console -->
+      <section class="diagnostic-section" style="margin-top: 20px;">
+        <div class="diag-header" id="toggle-diag">
+          <span>🛠️ 動作ログ・通信診断</span>
+          <span id="diag-toggle-icon">▼ 表示/非表示</span>
+        </div>
+        <div id="diag-log-container" class="diag-log-box" style="display: none;">
+          <div id="diag-log" class="diag-log-content">
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v2.5.0)。</div>
+          </div>
         </div>
       </section>
     </div>
@@ -182,7 +198,7 @@
 
           <div class="form-group">
             <label for="input-gas-url">
-              Google Apps Script (GAS) Web App URL
+              GAS Web App URL
             </label>
             <input type="url" id="input-gas-url" class="text-input" placeholder="https://script.google.com/macros/s/.../exec">
             <div class="gas-test-row">
@@ -214,8 +230,7 @@
       </div>
     </div>
 
-    <!-- Toast Container -->
-        <!-- QR Code Share Modal -->
+    <!-- QR Code Share Modal -->
     <div id="qr-modal" class="modal-overlay" style="display: none;">
       <div class="modal-dialog card qr-modal-dialog">
         <div class="modal-header">
@@ -243,9 +258,10 @@
       </div>
     </div>
 
+    <!-- Toast Container -->
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=2.2.1"></script>
+  <script src="app.js?v=2.5.0"></script>
 </body>
 </html>

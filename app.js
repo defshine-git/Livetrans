@@ -24,7 +24,6 @@ QR8bitByte.prototype = {
 	
 	write : function(buffer) {
 		for (var i = 0; i < this.data.length; i++) {
-			// not JIS ...
 			buffer.put(this.data.charCodeAt(i), 8);
 		}
 	}
@@ -191,7 +190,6 @@ QRPolynomial.prototype = {
 			num[x] ^= QRMath.gexp(QRMath.glog(e.get(x) ) + ratio);
 		}
 	
-		// recursive call
 		return new QRPolynomial(num, 0).mod(e);
 	}
 };
@@ -203,338 +201,128 @@ function QRRSBlock(totalCount, dataCount) {
 }
 
 QRRSBlock.RS_BLOCK_TABLE = [
-
-	// L
-	// M
-	// Q
-	// H
-
 	// 1
-	[1, 26, 19],
-	[1, 26, 16],
-	[1, 26, 13],
-	[1, 26, 9],
-	
+	[1, 26, 19], [1, 26, 16], [1, 26, 13], [1, 26, 9],
 	// 2
-	[1, 44, 34],
-	[1, 44, 28],
-	[1, 44, 22],
-	[1, 44, 16],
-
+	[1, 44, 34], [1, 44, 28], [1, 44, 22], [1, 44, 16],
 	// 3
-	[1, 70, 55],
-	[1, 70, 44],
-	[2, 35, 17],
-	[2, 35, 13],
-
+	[1, 70, 55], [1, 70, 44], [2, 35, 17], [2, 35, 13],
 	// 4		
-	[1, 100, 80],
-	[2, 50, 32],
-	[2, 50, 24],
-	[4, 25, 9],
-	
+	[1, 100, 80], [2, 50, 32], [2, 50, 24], [4, 25, 9],
 	// 5
-	[1, 134, 108],
-	[2, 67, 43],
-	[2, 33, 15, 2, 34, 16],
-	[2, 33, 11, 2, 34, 12],
-	
+	[1, 134, 108], [2, 67, 43], [2, 33, 15, 2, 34, 16], [2, 33, 11, 2, 34, 12],
 	// 6
-	[2, 86, 68],
-	[4, 43, 27],
-	[4, 43, 19],
-	[4, 43, 15],
-	
+	[2, 86, 68], [4, 43, 27], [4, 43, 19], [4, 43, 15],
 	// 7		
-	[2, 98, 78],
-	[4, 49, 31],
-	[2, 32, 14, 4, 33, 15],
-	[4, 39, 13, 1, 40, 14],
-	
+	[2, 98, 78], [4, 49, 31], [2, 32, 14, 4, 33, 15], [4, 39, 13, 1, 40, 14],
 	// 8
-	[2, 121, 97],
-	[2, 60, 38, 2, 61, 39],
-	[4, 40, 18, 2, 41, 19],
-	[4, 40, 14, 2, 41, 15],
-	
+	[2, 121, 97], [2, 60, 38, 2, 61, 39], [4, 40, 18, 2, 41, 19], [4, 40, 14, 2, 41, 15],
 	// 9
-	[2, 146, 116],
-	[3, 58, 36, 2, 59, 37],
-	[4, 36, 16, 4, 37, 17],
-	[4, 36, 12, 4, 37, 13],
-	
+	[2, 146, 116], [3, 58, 36, 2, 59, 37], [4, 36, 16, 4, 37, 17], [4, 36, 12, 4, 37, 13],
 	// 10		
-	[2, 86, 68, 2, 87, 69],
-	[4, 69, 43, 1, 70, 44],
-	[6, 43, 19, 2, 44, 20],
-	[6, 43, 15, 2, 44, 16],
-
+	[2, 86, 68, 2, 87, 69], [4, 69, 43, 1, 70, 44], [6, 43, 19, 2, 44, 20], [6, 43, 15, 2, 44, 16],
 	// 11
-	[4, 101, 81],
-	[1, 80, 50, 4, 81, 51],
-	[4, 50, 22, 4, 51, 23],
-	[3, 36, 12, 8, 37, 13],
-
+	[4, 101, 81], [1, 80, 50, 4, 81, 51], [4, 50, 22, 4, 51, 23], [3, 36, 12, 8, 37, 13],
 	// 12
-	[2, 116, 92, 2, 117, 93],
-	[6, 58, 36, 2, 59, 37],
-	[4, 46, 20, 6, 47, 21],
-	[7, 42, 14, 4, 43, 15],
-
+	[2, 116, 92, 2, 117, 93], [6, 58, 36, 2, 59, 37], [4, 46, 20, 6, 47, 21], [7, 42, 14, 4, 43, 15],
 	// 13
-	[4, 133, 107],
-	[8, 59, 37, 1, 60, 38],
-	[8, 44, 20, 4, 45, 21],
-	[12, 33, 11, 4, 34, 12],
-
+	[4, 133, 107], [8, 59, 37, 1, 60, 38], [8, 44, 20, 4, 45, 21], [12, 33, 11, 4, 34, 12],
 	// 14
-	[3, 145, 115, 1, 146, 116],
-	[4, 64, 40, 5, 65, 41],
-	[11, 36, 16, 5, 37, 17],
-	[11, 36, 12, 5, 37, 13],
-
+	[3, 145, 115, 1, 146, 116], [4, 64, 40, 5, 65, 41], [11, 36, 16, 5, 37, 17], [11, 36, 12, 5, 37, 13],
 	// 15
-	[5, 109, 87, 1, 110, 88],
-	[5, 65, 41, 5, 66, 42],
-	[5, 54, 24, 7, 55, 25],
-	[11, 36, 12],
-
+	[5, 109, 87, 1, 110, 88], [5, 65, 41, 5, 66, 42], [5, 54, 24, 7, 55, 25], [11, 36, 12],
 	// 16
-	[5, 122, 98, 1, 123, 99],
-	[7, 73, 45, 3, 74, 46],
-	[15, 43, 19, 2, 44, 20],
-	[3, 45, 15, 13, 46, 16],
-
+	[5, 122, 98, 1, 123, 99], [7, 73, 45, 3, 74, 46], [15, 43, 19, 2, 44, 20], [3, 45, 15, 13, 46, 16],
 	// 17
-	[1, 135, 107, 5, 136, 108],
-	[10, 74, 46, 1, 75, 47],
-	[1, 50, 22, 15, 51, 23],
-	[2, 42, 14, 17, 43, 15],
-
+	[1, 135, 107, 5, 136, 108], [10, 74, 46, 1, 75, 47], [1, 50, 22, 15, 51, 23], [2, 42, 14, 17, 43, 15],
 	// 18
-	[5, 150, 120, 1, 151, 121],
-	[9, 69, 43, 4, 70, 44],
-	[17, 50, 22, 1, 51, 23],
-	[2, 42, 14, 19, 43, 15],
-
+	[5, 150, 120, 1, 151, 121], [9, 69, 43, 4, 70, 44], [17, 50, 22, 1, 51, 23], [2, 42, 14, 19, 43, 15],
 	// 19
-	[3, 141, 113, 4, 142, 114],
-	[3, 70, 44, 11, 71, 45],
-	[17, 47, 21, 4, 48, 22],
-	[9, 39, 13, 16, 40, 14],
-
+	[3, 141, 113, 4, 142, 114], [3, 70, 44, 11, 71, 45], [17, 47, 21, 4, 48, 22], [9, 39, 13, 16, 40, 14],
 	// 20
-	[3, 135, 107, 5, 136, 108],
-	[3, 67, 41, 13, 68, 42],
-	[15, 54, 24, 5, 55, 25],
-	[15, 43, 15, 10, 44, 16],
-
+	[3, 135, 107, 5, 136, 108], [3, 67, 41, 13, 68, 42], [15, 54, 24, 5, 55, 25], [15, 43, 15, 10, 44, 16],
 	// 21
-	[4, 144, 116, 4, 145, 117],
-	[17, 68, 42],
-	[17, 50, 22, 6, 51, 23],
-	[19, 46, 16, 6, 47, 17],
-
+	[4, 144, 116, 4, 145, 117], [17, 68, 42], [17, 50, 22, 6, 51, 23], [19, 46, 16, 6, 47, 17],
 	// 22
-	[2, 139, 111, 7, 140, 112],
-	[17, 74, 46],
-	[7, 54, 24, 16, 55, 25],
-	[34, 37, 13],
-
+	[2, 139, 111, 7, 140, 112], [17, 74, 46], [7, 54, 24, 16, 55, 25], [34, 37, 13],
 	// 23
-	[4, 151, 121, 5, 152, 122],
-	[4, 75, 47, 14, 76, 48],
-	[11, 54, 24, 14, 55, 25],
-	[16, 45, 15, 14, 46, 16],
-
+	[4, 151, 121, 5, 152, 122], [4, 75, 47, 14, 76, 48], [11, 54, 24, 14, 55, 25], [16, 45, 15, 14, 46, 16],
 	// 24
-	[6, 147, 117, 4, 148, 118],
-	[6, 73, 45, 14, 74, 46],
-	[11, 54, 24, 16, 55, 25],
-	[30, 46, 16, 2, 47, 17],
-
+	[6, 147, 117, 4, 148, 118], [6, 73, 45, 14, 74, 46], [11, 54, 24, 16, 55, 25], [30, 46, 16, 2, 47, 17],
 	// 25
-	[8, 132, 106, 4, 133, 107],
-	[8, 75, 47, 13, 76, 48],
-	[7, 54, 24, 22, 55, 25],
-	[22, 45, 15, 13, 46, 16],
-
+	[8, 132, 106, 4, 133, 107], [8, 75, 47, 13, 76, 48], [7, 54, 24, 22, 55, 25], [22, 45, 15, 13, 46, 16],
 	// 26
-	[10, 142, 114, 2, 143, 115],
-	[19, 74, 46, 4, 75, 47],
-	[28, 50, 22, 6, 51, 23],
-	[33, 46, 16, 4, 47, 17],
-
+	[10, 142, 114, 2, 143, 115], [19, 74, 46, 4, 75, 47], [28, 50, 22, 6, 51, 23], [33, 46, 16, 4, 47, 17],
 	// 27
-	[8, 152, 122, 4, 153, 123],
-	[22, 73, 45, 3, 74, 46],
-	[8, 53, 23, 26, 54, 24],
-	[12, 45, 15, 28, 46, 16],
-
+	[8, 152, 122, 4, 153, 123], [22, 73, 45, 3, 74, 46], [8, 53, 23, 26, 54, 24], [12, 45, 15, 28, 46, 16],
 	// 28
-	[3, 147, 117, 10, 148, 118],
-	[3, 73, 45, 23, 74, 46],
-	[4, 54, 24, 31, 55, 25],
-	[11, 45, 15, 31, 46, 16],
-
+	[3, 147, 117, 10, 148, 118], [3, 73, 45, 23, 74, 46], [4, 54, 24, 31, 55, 25], [11, 45, 15, 31, 46, 16],
 	// 29
-	[7, 146, 116, 7, 147, 117],
-	[21, 73, 45, 7, 74, 46],
-	[1, 53, 23, 37, 54, 24],
-	[19, 45, 15, 26, 46, 16],
-
+	[7, 146, 116, 7, 147, 117], [21, 73, 45, 7, 74, 46], [1, 53, 23, 37, 54, 24], [19, 45, 15, 26, 46, 16],
 	// 30
-	[5, 145, 115, 10, 146, 116],
-	[19, 75, 47, 10, 76, 48],
-	[15, 54, 24, 25, 55, 25],
-	[23, 45, 15, 25, 46, 16],
-
+	[5, 145, 115, 10, 146, 116], [19, 75, 47, 10, 76, 48], [15, 54, 24, 25, 55, 25], [23, 45, 15, 25, 46, 16],
 	// 31
-	[13, 145, 115, 3, 146, 116],
-	[2, 74, 46, 29, 75, 47],
-	[42, 54, 24, 1, 55, 25],
-	[23, 45, 15, 28, 46, 16],
-
+	[13, 145, 115, 3, 146, 116], [2, 74, 46, 29, 75, 47], [42, 54, 24, 1, 55, 25], [23, 45, 15, 28, 46, 16],
 	// 32
-	[17, 145, 115],
-	[10, 74, 46, 23, 75, 47],
-	[10, 54, 24, 35, 55, 25],
-	[19, 45, 15, 35, 46, 16],
-
+	[17, 145, 115], [10, 74, 46, 23, 75, 47], [10, 54, 24, 35, 55, 25], [19, 45, 15, 35, 46, 16],
 	// 33
-	[17, 145, 115, 1, 146, 116],
-	[14, 74, 46, 21, 75, 47],
-	[29, 54, 24, 19, 55, 25],
-	[11, 45, 15, 46, 46, 16],
-
+	[17, 145, 115, 1, 146, 116], [14, 74, 46, 21, 75, 47], [29, 54, 24, 19, 55, 25], [11, 45, 15, 46, 46, 16],
 	// 34
-	[13, 145, 115, 6, 146, 116],
-	[14, 74, 46, 23, 75, 47],
-	[44, 54, 24, 7, 55, 25],
-	[59, 46, 16, 1, 47, 17],
-
+	[13, 145, 115, 6, 146, 116], [14, 74, 46, 23, 75, 47], [44, 54, 24, 7, 55, 25], [59, 46, 16, 1, 47, 17],
 	// 35
-	[12, 151, 121, 7, 152, 122],
-	[12, 75, 47, 26, 76, 48],
-	[39, 54, 24, 14, 55, 25],
-	[22, 45, 15, 41, 46, 16],
-
+	[12, 151, 121, 7, 152, 122], [12, 75, 47, 26, 76, 48], [39, 54, 24, 14, 55, 25], [22, 45, 15, 41, 46, 16],
 	// 36
-	[6, 151, 121, 14, 152, 122],
-	[6, 75, 47, 34, 76, 48],
-	[46, 54, 24, 10, 55, 25],
-	[2, 45, 15, 64, 46, 16],
-
+	[6, 151, 121, 14, 152, 122], [6, 75, 47, 34, 76, 48], [46, 54, 24, 10, 55, 25], [2, 45, 15, 64, 46, 16],
 	// 37
-	[17, 152, 122, 4, 153, 123],
-	[29, 74, 46, 14, 75, 47],
-	[49, 54, 24, 10, 55, 25],
-	[24, 45, 15, 46, 46, 16],
-
+	[17, 152, 122, 4, 153, 123], [29, 74, 46, 14, 75, 47], [49, 54, 24, 10, 55, 25], [24, 45, 15, 46, 46, 16],
 	// 38
-	[4, 152, 122, 18, 153, 123],
-	[13, 74, 46, 32, 75, 47],
-	[48, 54, 24, 14, 55, 25],
-	[42, 45, 15, 32, 46, 16],
-
+	[4, 152, 122, 18, 153, 123], [13, 74, 46, 32, 75, 47], [48, 54, 24, 14, 55, 25], [42, 45, 15, 32, 46, 16],
 	// 39
-	[20, 147, 117, 4, 148, 118],
-	[40, 75, 47, 7, 76, 48],
-	[43, 54, 24, 22, 55, 25],
-	[10, 45, 15, 67, 46, 16],
-
+	[20, 147, 117, 4, 148, 118], [40, 75, 47, 7, 76, 48], [43, 54, 24, 22, 55, 25], [10, 45, 15, 67, 46, 16],
 	// 40
-	[19, 148, 118, 6, 149, 119],
-	[18, 75, 47, 31, 76, 48],
-	[34, 54, 24, 34, 55, 25],
-	[20, 45, 15, 61, 46, 16]
+	[19, 148, 118, 6, 149, 119], [18, 75, 47, 31, 76, 48], [34, 54, 24, 34, 55, 25], [20, 45, 15, 61, 46, 16]
 ];
 
 QRRSBlock.getRSBlocks = function(typeNumber, errorCorrectLevel) {
-	
 	var rsBlock = QRRSBlock.getRsBlockTable(typeNumber, errorCorrectLevel);
-	
 	if (rsBlock === undefined) {
 		throw new Error("bad rs block @ typeNumber:" + typeNumber + "/errorCorrectLevel:" + errorCorrectLevel);
 	}
-
 	var length = rsBlock.length / 3;
-	
 	var list = [];
-	
 	for (var i = 0; i < length; i++) {
-
 		var count = rsBlock[i * 3 + 0];
 		var totalCount = rsBlock[i * 3 + 1];
 		var dataCount  = rsBlock[i * 3 + 2];
-
 		for (var j = 0; j < count; j++) {
 			list.push(new QRRSBlock(totalCount, dataCount) );	
 		}
 	}
-	
 	return list;
 };
 
 QRRSBlock.getRsBlockTable = function(typeNumber, errorCorrectLevel) {
-
 	switch(errorCorrectLevel) {
-	case QRErrorCorrectLevel.L :
-		return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 0];
-	case QRErrorCorrectLevel.M :
-		return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 1];
-	case QRErrorCorrectLevel.Q :
-		return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 2];
-	case QRErrorCorrectLevel.H :
-		return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 3];
-	default :
-		return undefined;
+	case QRErrorCorrectLevel.L : return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 0];
+	case QRErrorCorrectLevel.M : return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 1];
+	case QRErrorCorrectLevel.Q : return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 2];
+	case QRErrorCorrectLevel.H : return QRRSBlock.RS_BLOCK_TABLE[(typeNumber - 1) * 4 + 3];
+	default : return undefined;
 	}
 };
 
 // --- QRUtil.js ---
 var QRUtil = {
-
     PATTERN_POSITION_TABLE : [
-        [],
-        [6, 18],
-        [6, 22],
-        [6, 26],
-        [6, 30],
-        [6, 34],
-        [6, 22, 38],
-        [6, 24, 42],
-        [6, 26, 46],
-        [6, 28, 50],
-        [6, 30, 54],        
-        [6, 32, 58],
-        [6, 34, 62],
-        [6, 26, 46, 66],
-        [6, 26, 48, 70],
-        [6, 26, 50, 74],
-        [6, 30, 54, 78],
-        [6, 30, 56, 82],
-        [6, 30, 58, 86],
-        [6, 34, 62, 90],
-        [6, 28, 50, 72, 94],
-        [6, 26, 50, 74, 98],
-        [6, 30, 54, 78, 102],
-        [6, 28, 54, 80, 106],
-        [6, 32, 58, 84, 110],
-        [6, 30, 58, 86, 114],
-        [6, 34, 62, 90, 118],
-        [6, 26, 50, 74, 98, 122],
-        [6, 30, 54, 78, 102, 126],
-        [6, 26, 52, 78, 104, 130],
-        [6, 30, 56, 82, 108, 134],
-        [6, 34, 60, 86, 112, 138],
-        [6, 30, 58, 86, 114, 142],
-        [6, 34, 62, 90, 118, 146],
-        [6, 30, 54, 78, 102, 126, 150],
-        [6, 24, 50, 76, 102, 128, 154],
-        [6, 28, 54, 80, 106, 132, 158],
-        [6, 32, 58, 84, 110, 136, 162],
-        [6, 26, 54, 82, 110, 138, 166],
+        [], [6, 18], [6, 22], [6, 26], [6, 30], [6, 34], [6, 22, 38], [6, 24, 42],
+        [6, 26, 46], [6, 28, 50], [6, 30, 54], [6, 32, 58], [6, 34, 62], [6, 26, 46, 66],
+        [6, 26, 48, 70], [6, 26, 50, 74], [6, 30, 54, 78], [6, 30, 56, 82], [6, 30, 58, 86],
+        [6, 34, 62, 90], [6, 28, 50, 72, 94], [6, 26, 50, 74, 98], [6, 30, 54, 78, 102],
+        [6, 28, 54, 80, 106], [6, 32, 58, 84, 110], [6, 30, 58, 86, 114], [6, 34, 62, 90, 118],
+        [6, 26, 50, 74, 98, 122], [6, 30, 54, 78, 102, 126], [6, 26, 52, 78, 104, 130],
+        [6, 30, 56, 82, 108, 134], [6, 34, 60, 86, 112, 138], [6, 30, 58, 86, 114, 142],
+        [6, 34, 62, 90, 118, 146], [6, 30, 54, 78, 102, 126, 150], [6, 24, 50, 76, 102, 128, 154],
+        [6, 28, 54, 80, 106, 132, 158], [6, 32, 58, 84, 110, 136, 162], [6, 26, 54, 82, 110, 138, 166],
         [6, 30, 58, 86, 114, 142, 170]
     ],
 
@@ -559,14 +347,11 @@ var QRUtil = {
     },
 
     getBCHDigit : function(data) {
-
         var digit = 0;
-
         while (data !== 0) {
             digit++;
             data >>>= 1;
         }
-
         return digit;
     },
 
@@ -575,9 +360,7 @@ var QRUtil = {
     },
 
     getMask : function(maskPattern, i, j) {
-        
         switch (maskPattern) {
-            
         case QRMaskPattern.PATTERN000 : return (i + j) % 2 === 0;
         case QRMaskPattern.PATTERN001 : return i % 2 === 0;
         case QRMaskPattern.PATTERN010 : return j % 3 === 0;
@@ -586,115 +369,71 @@ var QRUtil = {
         case QRMaskPattern.PATTERN101 : return (i * j) % 2 + (i * j) % 3 === 0;
         case QRMaskPattern.PATTERN110 : return ( (i * j) % 2 + (i * j) % 3) % 2 === 0;
         case QRMaskPattern.PATTERN111 : return ( (i * j) % 3 + (i + j) % 2) % 2 === 0;
-
-        default :
-            throw new Error("bad maskPattern:" + maskPattern);
+        default : throw new Error("bad maskPattern:" + maskPattern);
         }
     },
 
     getErrorCorrectPolynomial : function(errorCorrectLength) {
-
         var a = new QRPolynomial([1], 0);
-
         for (var i = 0; i < errorCorrectLength; i++) {
             a = a.multiply(new QRPolynomial([1, QRMath.gexp(i)], 0) );
         }
-
         return a;
     },
 
     getLengthInBits : function(mode, type) {
-
         if (1 <= type && type < 10) {
-
-            // 1 - 9
-
             switch(mode) {
             case QRMode.MODE_NUMBER     : return 10;
             case QRMode.MODE_ALPHA_NUM  : return 9;
             case QRMode.MODE_8BIT_BYTE  : return 8;
             case QRMode.MODE_KANJI      : return 8;
-            default :
-                throw new Error("mode:" + mode);
+            default : throw new Error("mode:" + mode);
             }
-
         } else if (type < 27) {
-
-            // 10 - 26
-
             switch(mode) {
             case QRMode.MODE_NUMBER     : return 12;
             case QRMode.MODE_ALPHA_NUM  : return 11;
             case QRMode.MODE_8BIT_BYTE  : return 16;
             case QRMode.MODE_KANJI      : return 10;
-            default :
-                throw new Error("mode:" + mode);
+            default : throw new Error("mode:" + mode);
             }
-
         } else if (type < 41) {
-
-            // 27 - 40
-
             switch(mode) {
             case QRMode.MODE_NUMBER     : return 14;
             case QRMode.MODE_ALPHA_NUM  : return 13;
             case QRMode.MODE_8BIT_BYTE  : return 16;
             case QRMode.MODE_KANJI      : return 12;
-            default :
-                throw new Error("mode:" + mode);
+            default : throw new Error("mode:" + mode);
             }
-
         } else {
             throw new Error("type:" + type);
         }
     },
 
     getLostPoint : function(qrCode) {
-        
         var moduleCount = qrCode.getModuleCount();
         var lostPoint = 0;
         var row = 0; 
         var col = 0;
 
-        
-        // LEVEL1
-        
         for (row = 0; row < moduleCount; row++) {
-
             for (col = 0; col < moduleCount; col++) {
-
                 var sameCount = 0;
                 var dark = qrCode.isDark(row, col);
-
                 for (var r = -1; r <= 1; r++) {
-
-                    if (row + r < 0 || moduleCount <= row + r) {
-                        continue;
-                    }
-
+                    if (row + r < 0 || moduleCount <= row + r) continue;
                     for (var c = -1; c <= 1; c++) {
-
-                        if (col + c < 0 || moduleCount <= col + c) {
-                            continue;
-                        }
-
-                        if (r === 0 && c === 0) {
-                            continue;
-                        }
-
-                        if (dark === qrCode.isDark(row + r, col + c) ) {
-                            sameCount++;
-                        }
+                        if (col + c < 0 || moduleCount <= col + c) continue;
+                        if (r === 0 && c === 0) continue;
+                        if (dark === qrCode.isDark(row + r, col + c) ) sameCount++;
                     }
                 }
-
                 if (sameCount > 5) {
                     lostPoint += (3 + sameCount - 5);
                 }
             }
         }
-
-        // LEVEL2
 
         for (row = 0; row < moduleCount - 1; row++) {
             for (col = 0; col < moduleCount - 1; col++) {
@@ -708,8 +447,6 @@ var QRUtil = {
                 }
             }
         }
-
-        // LEVEL3
 
         for (row = 0; row < moduleCount; row++) {
             for (col = 0; col < moduleCount - 6; col++) {
@@ -738,51 +475,18 @@ var QRUtil = {
                 }
             }
         }
-
-        // LEVEL4
         
         var darkCount = 0;
-
         for (col = 0; col < moduleCount; col++) {
             for (row = 0; row < moduleCount; row++) {
-                if (qrCode.isDark(row, col) ) {
-                    darkCount++;
-                }
+                if (qrCode.isDark(row, col) ) darkCount++;
             }
         }
-        
         var ratio = Math.abs(100 * darkCount / moduleCount / moduleCount - 50) / 5;
         lostPoint += ratio * 10;
-
         return lostPoint;       
     }
-
 };
-
-// --- index.js ---
-//---------------------------------------------------------------------
-// QRCode for JavaScript
-//
-// Copyright (c) 2009 Kazuhiko Arase
-//
-// URL: http://www.d-project.com/
-//
-// Licensed under the MIT license:
-//   http://www.opensource.org/licenses/mit-license.php
-//
-// The word "QR Code" is registered trademark of 
-// DENSO WAVE INCORPORATED
-//   http://www.denso-wave.com/qrcode/faqpatent-e.html
-//
-//---------------------------------------------------------------------
-// Modified to work in node for this project (and some refactoring)
-//---------------------------------------------------------------------
-
-
-
-
-
-
 
 function QRCode(typeNumber, errorCorrectLevel) {
 	this.typeNumber = typeNumber;
@@ -794,7 +498,6 @@ function QRCode(typeNumber, errorCorrectLevel) {
 }
 
 QRCode.prototype = {
-	
 	addData : function(data) {
 		var newData = new QR8bitByte(data);
 		this.dataList.push(newData);
@@ -814,9 +517,10 @@ QRCode.prototype = {
 	
 	make : function() {
 		// Calculate automatically typeNumber if provided is < 1
+		// [BUG FIX] typeNumber loop bounds check: changed `< 40` to `<= 40`
 		if (this.typeNumber < 1 ){
 			var typeNumber = 1;
-			for (typeNumber = 1; typeNumber < 40; typeNumber++) {
+			for (typeNumber = 1; typeNumber <= 40; typeNumber++) {
 				var rsBlocks = QRRSBlock.getRSBlocks(typeNumber, this.errorCorrectLevel);
 
 				var buffer = new QRBitBuffer();
@@ -834,22 +538,19 @@ QRCode.prototype = {
 				if (buffer.getLengthInBits() <= totalDataCount * 8)
 					break;
 			}
-			this.typeNumber = typeNumber;
+			this.typeNumber = Math.min(40, typeNumber);
 		}
 		this.makeImpl(false, this.getBestMaskPattern() );
 	},
 	
 	makeImpl : function(test, maskPattern) {
-		
 		this.moduleCount = this.typeNumber * 4 + 17;
 		this.modules = new Array(this.moduleCount);
 		
 		for (var row = 0; row < this.moduleCount; row++) {
-			
 			this.modules[row] = new Array(this.moduleCount);
-			
 			for (var col = 0; col < this.moduleCount; col++) {
-				this.modules[row][col] = null;//(col + row) % 3;
+				this.modules[row][col] = null;
 			}
 		}
 	
@@ -872,15 +573,10 @@ QRCode.prototype = {
 	},
 
 	setupPositionProbePattern : function(row, col)  {
-		
 		for (var r = -1; r <= 7; r++) {
-			
 			if (row + r <= -1 || this.moduleCount <= row + r) continue;
-			
 			for (var c = -1; c <= 7; c++) {
-				
 				if (col + c <= -1 || this.moduleCount <= col + c) continue;
-				
 				if ( (0 <= r && r <= 6 && (c === 0 || c === 6) ) || 
                      (0 <= c && c <= 6 && (r === 0 || r === 6) ) || 
                      (2 <= r && r <= 4 && 2 <= c && c <= 4) ) {
@@ -893,94 +589,40 @@ QRCode.prototype = {
 	},
 	
 	getBestMaskPattern : function() {
-	
 		var minLostPoint = 0;
 		var pattern = 0;
-	
 		for (var i = 0; i < 8; i++) {
-			
 			this.makeImpl(true, i);
-	
 			var lostPoint = QRUtil.getLostPoint(this);
-	
-			if (i === 0 || minLostPoint >  lostPoint) {
+			if (i === 0 || minLostPoint > lostPoint) {
 				minLostPoint = lostPoint;
 				pattern = i;
 			}
 		}
-	
 		return pattern;
-	},
-	
-	createMovieClip : function(target_mc, instance_name, depth) {
-	
-		var qr_mc = target_mc.createEmptyMovieClip(instance_name, depth);
-		var cs = 1;
-	
-		this.make();
-
-		for (var row = 0; row < this.modules.length; row++) {
-			
-			var y = row * cs;
-			
-			for (var col = 0; col < this.modules[row].length; col++) {
-	
-				var x = col * cs;
-				var dark = this.modules[row][col];
-			
-				if (dark) {
-					qr_mc.beginFill(0, 100);
-					qr_mc.moveTo(x, y);
-					qr_mc.lineTo(x + cs, y);
-					qr_mc.lineTo(x + cs, y + cs);
-					qr_mc.lineTo(x, y + cs);
-					qr_mc.endFill();
-				}
-			}
-		}
-		
-		return qr_mc;
 	},
 
 	setupTimingPattern : function() {
-		
 		for (var r = 8; r < this.moduleCount - 8; r++) {
-			if (this.modules[r][6] !== null) {
-				continue;
-			}
+			if (this.modules[r][6] !== null) continue;
 			this.modules[r][6] = (r % 2 === 0);
 		}
-	
 		for (var c = 8; c < this.moduleCount - 8; c++) {
-			if (this.modules[6][c] !== null) {
-				continue;
-			}
+			if (this.modules[6][c] !== null) continue;
 			this.modules[6][c] = (c % 2 === 0);
 		}
 	},
 	
 	setupPositionAdjustPattern : function() {
-	
 		var pos = QRUtil.getPatternPosition(this.typeNumber);
-		
 		for (var i = 0; i < pos.length; i++) {
-		
 			for (var j = 0; j < pos.length; j++) {
-			
 				var row = pos[i];
 				var col = pos[j];
-				
-				if (this.modules[row][col] !== null) {
-					continue;
-				}
-				
+				if (this.modules[row][col] !== null) continue;
 				for (var r = -2; r <= 2; r++) {
-				
 					for (var c = -2; c <= 2; c++) {
-					
-						if (Math.abs(r) === 2 || 
-                            Math.abs(c) === 2 ||
-                            (r === 0 && c === 0) ) {
+						if (Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0) ) {
 							this.modules[row + r][col + c] = true;
 						} else {
 							this.modules[row + r][col + c] = false;
@@ -992,15 +634,12 @@ QRCode.prototype = {
 	},
 	
 	setupTypeNumber : function(test) {
-	
 		var bits = QRUtil.getBCHTypeNumber(this.typeNumber);
         var mod;
-	
 		for (var i = 0; i < 18; i++) {
 			mod = (!test && ( (bits >> i) & 1) === 1);
 			this.modules[Math.floor(i / 3)][i % 3 + this.moduleCount - 8 - 3] = mod;
 		}
-	
 		for (var x = 0; x < 18; x++) {
 			mod = (!test && ( (bits >> x) & 1) === 1);
 			this.modules[x % 3 + this.moduleCount - 8 - 3][Math.floor(x / 3)] = mod;
@@ -1008,16 +647,11 @@ QRCode.prototype = {
 	},
 	
 	setupTypeInfo : function(test, maskPattern) {
-	
 		var data = (this.errorCorrectLevel << 3) | maskPattern;
 		var bits = QRUtil.getBCHTypeInfo(data);
         var mod;
-	
-		// vertical		
 		for (var v = 0; v < 15; v++) {
-	
 			mod = (!test && ( (bits >> v) & 1) === 1);
-	
 			if (v < 6) {
 				this.modules[v][8] = mod;
 			} else if (v < 8) {
@@ -1026,12 +660,8 @@ QRCode.prototype = {
 				this.modules[this.moduleCount - 15 + v][8] = mod;
 			}
 		}
-	
-		// horizontal
 		for (var h = 0; h < 15; h++) {
-	
 			mod = (!test && ( (bits >> h) & 1) === 1);
-			
 			if (h < 8) {
 				this.modules[8][this.moduleCount - h - 1] = mod;
 			} else if (h < 9) {
@@ -1040,53 +670,37 @@ QRCode.prototype = {
 				this.modules[8][15 - h - 1] = mod;
 			}
 		}
-	
-		// fixed module
 		this.modules[this.moduleCount - 8][8] = (!test);
-	
 	},
 	
 	mapData : function(data, maskPattern) {
-		
 		var inc = -1;
 		var row = this.moduleCount - 1;
 		var bitIndex = 7;
 		var byteIndex = 0;
 		
 		for (var col = this.moduleCount - 1; col > 0; col -= 2) {
-	
 			if (col === 6) col--;
-	
 			while (true) {
-	
 				for (var c = 0; c < 2; c++) {
-					
 					if (this.modules[row][col - c] === null) {
-						
 						var dark = false;
-	
 						if (byteIndex < data.length) {
 							dark = ( ( (data[byteIndex] >>> bitIndex) & 1) === 1);
 						}
-	
 						var mask = QRUtil.getMask(maskPattern, row, col - c);
-	
 						if (mask) {
 							dark = !dark;
 						}
-						
 						this.modules[row][col - c] = dark;
 						bitIndex--;
-	
 						if (bitIndex === -1) {
 							byteIndex++;
 							bitIndex = 7;
 						}
 					}
 				}
-								
 				row += inc;
-	
 				if (row < 0 || this.moduleCount <= row) {
 					row -= inc;
 					inc = -inc;
@@ -1094,18 +708,14 @@ QRCode.prototype = {
 				}
 			}
 		}
-		
 	}
-
 };
 
 QRCode.PAD0 = 0xEC;
 QRCode.PAD1 = 0x11;
 
 QRCode.createData = function(typeNumber, errorCorrectLevel, dataList) {
-	
 	var rsBlocks = QRRSBlock.getRSBlocks(typeNumber, errorCorrectLevel);
-	
 	var buffer = new QRBitBuffer();
 	
 	for (var i = 0; i < dataList.length; i++) {
@@ -1115,41 +725,27 @@ QRCode.createData = function(typeNumber, errorCorrectLevel, dataList) {
 		data.write(buffer);
 	}
 
-	// calc num max data.
 	var totalDataCount = 0;
 	for (var x = 0; x < rsBlocks.length; x++) {
 		totalDataCount += rsBlocks[x].dataCount;
 	}
 
 	if (buffer.getLengthInBits() > totalDataCount * 8) {
-		throw new Error("code length overflow. (" + 
-            buffer.getLengthInBits() + 
-            ">" +  
-            totalDataCount * 8 + 
-            ")");
+		throw new Error("code length overflow. (" + buffer.getLengthInBits() + ">" + totalDataCount * 8 + ")");
 	}
 
-	// end code
 	if (buffer.getLengthInBits() + 4 <= totalDataCount * 8) {
 		buffer.put(0, 4);
 	}
 
-	// padding
 	while (buffer.getLengthInBits() % 8 !== 0) {
 		buffer.putBit(false);
 	}
 
-	// padding
 	while (true) {
-		
-		if (buffer.getLengthInBits() >= totalDataCount * 8) {
-			break;
-		}
+		if (buffer.getLengthInBits() >= totalDataCount * 8) break;
 		buffer.put(QRCode.PAD0, 8);
-		
-		if (buffer.getLengthInBits() >= totalDataCount * 8) {
-			break;
-		}
+		if (buffer.getLengthInBits() >= totalDataCount * 8) break;
 		buffer.put(QRCode.PAD1, 8);
 	}
 
@@ -1157,25 +753,18 @@ QRCode.createData = function(typeNumber, errorCorrectLevel, dataList) {
 };
 
 QRCode.createBytes = function(buffer, rsBlocks) {
-
 	var offset = 0;
-	
 	var maxDcCount = 0;
 	var maxEcCount = 0;
-	
 	var dcdata = new Array(rsBlocks.length);
 	var ecdata = new Array(rsBlocks.length);
 	
 	for (var r = 0; r < rsBlocks.length; r++) {
-
 		var dcCount = rsBlocks[r].dataCount;
 		var ecCount = rsBlocks[r].totalCount - dcCount;
-
 		maxDcCount = Math.max(maxDcCount, dcCount);
 		maxEcCount = Math.max(maxEcCount, ecCount);
-		
 		dcdata[r] = new Array(dcCount);
-		
 		for (var i = 0; i < dcdata[r].length; i++) {
 			dcdata[r][i] = 0xff & buffer.buffer[i + offset];
 		}
@@ -1183,14 +772,12 @@ QRCode.createBytes = function(buffer, rsBlocks) {
 		
 		var rsPoly = QRUtil.getErrorCorrectPolynomial(ecCount);
 		var rawPoly = new QRPolynomial(dcdata[r], rsPoly.getLength() - 1);
-
 		var modPoly = rawPoly.mod(rsPoly);
 		ecdata[r] = new Array(rsPoly.getLength() - 1);
 		for (var x = 0; x < ecdata[r].length; x++) {
             var modIndex = x + modPoly.getLength() - ecdata[r].length;
 			ecdata[r][x] = (modIndex >= 0)? modPoly.get(modIndex) : 0;
 		}
-
 	}
 	
 	var totalCodeCount = 0;
@@ -1218,19 +805,17 @@ QRCode.createBytes = function(buffer, rsBlocks) {
 	}
 
 	return data;
-
 };
 
-  QRCode.QRErrorCorrectLevel = QRErrorCorrectLevel;
+QRCode.QRErrorCorrectLevel = QRErrorCorrectLevel;
 
-  QRCode.renderCanvas = function(canvas, text, options) {
+QRCode.renderCanvas = function(canvas, text, options) {
     options = options || {};
     var size = options.size || 240;
     var margin = options.margin !== undefined ? options.margin : 2;
     var darkColor = options.dark || '#1F2328';
     var lightColor = options.light || '#FFFFFF';
 
-    // Auto-detect typeNumber with error correction level L
     var qr = new QRCode(0, QRErrorCorrectLevel.L);
     qr.addData(text);
     qr.make();
@@ -1259,23 +844,30 @@ QRCode.createBytes = function(buffer, rsBlocks) {
         }
       }
     }
-  };
+};
 
-  global.QRCode = QRCode;
+global.QRCode = QRCode;
 })(typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : this));
 
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.2.1 (Production Hardened)
+ * Version: 2.5.0 (Bilingual Transcriber UI Grid & Audit Enhanced)
  * 
- * Major Fixes & Enhancements:
- * 1. Differential Save Protocol (lastSavedIndex tracking prevents duplicate doc entries)
- * 2. In-place DOM Card Rendering (preserves scroll, eliminates lag on large feeds)
- * 3. Sequential FIFO Translation Queue (guarantees temporal ordering, eliminates race conditions)
- * 4. Automatic 10-minute Gemini Live Session Resumption (continuous meetings)
- * 5. Biquad Anti-Aliasing Lowpass Filter (7.5kHz cutoff for 16kHz speech recognition)
- * 6. GAS Secret Token Authentication support
+ * Features:
+ * 1. 2-Column Body Grid (原文 / 訳文) with responsive single-column layout.
+ * 2. Role rotation tags: Auditor (監査員), Yard Rep (ヤード担当者), Facility (施設側), Other (その他).
+ * 3. In-place card actions: Edit (✏️), Retry (🔄), Delete (🗑️), Copy (📋).
+ * 4. Dedicated Live Transcription Banner with audio meter.
+ * 5. Full Markdown table copy for meeting minutes.
+ * 6. Hardened Gemini Live 10-min Resumption, Cascade Translation, and Differential Docs Sync.
  */
+
+const ROLES = [
+  'Auditor (監査員)',
+  'Yard Rep (ヤード担当者)',
+  'Facility (施設側)',
+  'Other (その他)'
+];
 
 // ==========================================
 // 1. Config Manager (localStorage)
@@ -1286,6 +878,7 @@ class ConfigManager {
     GAS_URL: 'glt_gas_web_app_url',
     GAS_TOKEN: 'glt_gas_token',
     DIRECTION: 'glt_translation_direction',
+    CATEGORY: 'glt_category',
     AUTO_SAVE: 'glt_auto_save_enabled',
     DOC_MODE: 'glt_doc_mode',
     LAST_DOC_ID: 'glt_last_doc_id',
@@ -1365,7 +958,7 @@ class AudioCaptureService {
       });
     } catch (err) {
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        throw new Error('マイクへのアクセスが拒否されました。ブラウザの鍵アイコンからマイクの許可を設定してください。');
+        throw new Error('マイクへのアクセスが拒否されました。ブラウザのアドレスバーからマイク使用を許可してください。');
       } else if (err.name === 'NotFoundError') {
         throw new Error('利用可能なマイク機器が見つかりませんでした。');
       } else {
@@ -1375,26 +968,26 @@ class AudioCaptureService {
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // Biquad Anti-Aliasing Lowpass Filter (7.5kHz cutoff for 16kHz target)
     this.filterNode = this.audioContext.createBiquadFilter();
     this.filterNode.type = 'lowpass';
     this.filterNode.frequency.value = 7500;
     this.sourceNode.connect(this.filterNode);
 
-    // Analyser for volume metering
     this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 256;
     this.filterNode.connect(this.analyserNode);
 
-    // Processor (buffer: 2048 samples = ~128ms chunks)
     const bufferSize = 2048;
     this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
+    
+    if (typeof window !== 'undefined') {
+      window._activeAudioProcessorNode = this.processorNode;
+    }
 
     const inputSampleRate = this.audioContext.sampleRate;
     const targetSampleRate = 16000;
 
     this.processorNode.onaudioprocess = (e) => {
-      // Mute output to prevent speaker feedback
       const outputBuffer = e.outputBuffer.getChannelData(0);
       outputBuffer.fill(0);
 
@@ -1438,24 +1031,30 @@ class AudioCaptureService {
     this.isRecording = false;
     this.isPaused = false;
 
+    if (typeof window !== 'undefined') {
+      window._activeAudioProcessorNode = null;
+    }
+
     if (this.processorNode) {
-      this.processorNode.disconnect();
+      try { this.processorNode.disconnect(); } catch (e) {}
       this.processorNode = null;
     }
     if (this.analyserNode) {
-      this.analyserNode.disconnect();
+      try { this.analyserNode.disconnect(); } catch (e) {}
       this.analyserNode = null;
     }
     if (this.filterNode) {
-      this.filterNode.disconnect();
+      try { this.filterNode.disconnect(); } catch (e) {}
       this.filterNode = null;
     }
     if (this.sourceNode) {
-      this.sourceNode.disconnect();
+      try { this.sourceNode.disconnect(); } catch (e) {}
       this.sourceNode = null;
     }
     if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((track) => track.stop());
+      try {
+        this.mediaStream.getTracks().forEach((track) => track.stop());
+      } catch (e) {}
       this.mediaStream = null;
     }
     if (this.audioContext) {
@@ -1516,6 +1115,7 @@ class WebSpeechService {
   constructor() {
     this.recognition = null;
     this.isListening = false;
+    this.isPaused = false;
     this.onInterimCallback = null;
     this.onFinalCallback = null;
     this.onErrorCallback = null;
@@ -1524,6 +1124,19 @@ class WebSpeechService {
 
   isSupported() {
     return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  }
+
+  setDirection(direction) {
+    this.direction = direction;
+    if (this.recognition && this.isListening) {
+      const targetLang = this.direction === 'en-to-ja' ? 'en-US' : 'ja-JP';
+      if (this.recognition.lang !== targetLang) {
+        this.recognition.lang = targetLang;
+        try {
+          this.recognition.stop();
+        } catch (e) {}
+      }
+    }
   }
 
   start(direction, onInterim, onFinal, onError) {
@@ -1536,6 +1149,7 @@ class WebSpeechService {
     this.onInterimCallback = onInterim;
     this.onFinalCallback = onFinal;
     this.onErrorCallback = onError;
+    this.isPaused = false;
 
     this.recognition = new SpeechRecognition();
     this.recognition.continuous = true;
@@ -1549,13 +1163,17 @@ class WebSpeechService {
     }
 
     this.recognition.onresult = (event) => {
+      if (this.isPaused) return;
+
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         const item = event.results[i];
         if (item.isFinal) {
           const finalTranscript = item[0].transcript.trim();
           if (finalTranscript.length > 0 && this.onFinalCallback) {
-            this.onFinalCallback(finalTranscript, this.recognition.lang.startsWith('ja') ? 'ja' : 'en');
+            const hasJa = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(finalTranscript);
+            const detectedLang = hasJa ? 'ja' : (this.recognition.lang.startsWith('ja') ? 'ja' : 'en');
+            this.onFinalCallback(finalTranscript, detectedLang);
           }
         } else {
           interim += item[0].transcript;
@@ -1574,7 +1192,7 @@ class WebSpeechService {
     };
 
     this.recognition.onend = () => {
-      if (this.isListening) {
+      if (this.isListening && !this.isPaused) {
         try {
           this.recognition.start();
         } catch (e) {}
@@ -1585,8 +1203,23 @@ class WebSpeechService {
     this.isListening = true;
   }
 
+  pause() {
+    this.isPaused = true;
+    if (this.recognition) {
+      try { this.recognition.stop(); } catch (e) {}
+    }
+  }
+
+  resume() {
+    this.isPaused = false;
+    if (this.isListening && this.recognition) {
+      try { this.recognition.start(); } catch (e) {}
+    }
+  }
+
   stop() {
     this.isListening = false;
+    this.isPaused = false;
     if (this.recognition) {
       try {
         this.recognition.stop();
@@ -1601,7 +1234,6 @@ class WebSpeechService {
 // ==========================================
 class GeminiLiveClient {
   static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-  // Gemini Live continuous session limit is 10 min; reconnect at 9m30s
   static SESSION_RECONNECT_INTERVAL = 570000;
 
   constructor() {
@@ -1611,6 +1243,7 @@ class GeminiLiveClient {
     this.modelName = 'models/gemini-3.5-transcribe-live';
     this.isConnected = false;
     this.isSetupComplete = false;
+    this.isReconnecting = false;
     this.chunkQueue = [];
 
     this._connectResolve = null;
@@ -1633,11 +1266,21 @@ class GeminiLiveClient {
     }
   }
 
+  setDirection(direction) {
+    this.direction = direction;
+    this.log('info', `Gemini Live 認識言語設定を更新: ${direction}`);
+  }
+
+  _normalizeModelName(model) {
+    if (!model) return 'models/gemini-3.5-transcribe-live';
+    return model.startsWith('models/') ? model : `models/${model}`;
+  }
+
   connect(apiKey, direction, modelName) {
     return new Promise((resolve, reject) => {
       this.apiKey = apiKey;
       this.direction = direction;
-      this.modelName = modelName || 'models/gemini-3.5-transcribe-live';
+      this.modelName = this._normalizeModelName(modelName);
       this.isSetupComplete = false;
       this.isConnected = false;
       this.chunkQueue = [];
@@ -1708,7 +1351,7 @@ class GeminiLiveClient {
           }
           this._connectReject(new Error(errorMsg));
           this._connectReject = null;
-        } else if (wasConnected && this.onDisconnectCallback) {
+        } else if (wasConnected && !this.isReconnecting && this.onDisconnectCallback) {
           this.onDisconnectCallback(event.code, event.reason);
         }
       };
@@ -1735,7 +1378,7 @@ class GeminiLiveClient {
       this.log('info', 'Gemini Live 10分セッション制限に伴う自動シームレス再接続を実行します...');
       try {
         await this._seamlessReconnect();
-        this.log('success', 'シームレス再接続完了。セッションが更新されました。');
+        this.log('success', 'シームレス再接続完了。セッションが継続更新されました。');
       } catch (err) {
         this.log('warn', `セッション更新失敗: ${err.message}`);
       }
@@ -1744,17 +1387,25 @@ class GeminiLiveClient {
 
   async _seamlessReconnect() {
     if (!this.isConnected || !this.ws) return;
+    this.isReconnecting = true;
     try {
       this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
       this.ws.close();
     } catch (e) {}
 
-    await this.connect(this.apiKey, this.direction, this.modelName);
+    try {
+      await this.connect(this.apiKey, this.direction, this.modelName);
+      this.isReconnecting = false;
+    } catch (err) {
+      this.isReconnecting = false;
+      throw err;
+    }
   }
 
   disconnect() {
     this._cleanupTimeout();
     this._clearSessionTimer();
+    this.isReconnecting = false;
     if (this.ws) {
       if (this.ws.readyState === WebSocket.OPEN) {
         try {
@@ -1857,16 +1508,17 @@ class GeminiLiveClient {
 
       if (data.serverContent) {
         const sc = data.serverContent;
-
-        if (sc.interimInputTranscription && sc.interimInputTranscription.text) {
+        const interimObj = sc.interimInputTranscription || sc.interim_input_transcription;
+        if (interimObj && interimObj.text) {
           if (this.onInterimCallback) {
-            this.onInterimCallback(sc.interimInputTranscription.text);
+            this.onInterimCallback(interimObj.text);
           }
         }
 
-        if (sc.inputTranscription && sc.inputTranscription.text) {
-          const finalText = sc.inputTranscription.text.trim();
-          const langCode = sc.inputTranscription.languageCode || null;
+        const finalObj = sc.inputTranscription || sc.input_transcription;
+        if (finalObj && finalObj.text) {
+          const finalText = finalObj.text.trim();
+          const langCode = finalObj.languageCode || null;
           this.log('info', `確定音声認識: "${finalText}"`);
           if (finalText.length > 0 && this.onFinalCallback) {
             this.onFinalCallback(finalText, langCode);
@@ -1895,8 +1547,8 @@ class TranslationService {
     }
   }
 
-  enqueue(text, direction, apiKey, gasUrl, gasToken, recordId, onComplete) {
-    this.queue.push({ text, direction, apiKey, gasUrl, gasToken, recordId, onComplete });
+  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete) {
+    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete });
     this._processNext();
   }
 
@@ -1913,7 +1565,7 @@ class TranslationService {
     } catch (err) {
       this.log('error', `翻訳ジョブ致命的エラー: ${err.message}`);
       if (job.onComplete) {
-        job.onComplete(job.recordId, { translated: '(翻訳失敗)', speakerLang: 'auto' });
+        job.onComplete(job.recordId, { translated: '【翻訳エラー / 再試行可能】', speakerLang: 'auto' });
       }
     } finally {
       this.isProcessing = false;
@@ -1921,7 +1573,7 @@ class TranslationService {
     }
   }
 
-  async _executeTranslation({ text, direction, apiKey, gasUrl, gasToken }) {
+  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken }) {
     if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
 
     let srcLang = 'ja';
@@ -1939,15 +1591,22 @@ class TranslationService {
       targetLang = hasJapanese ? 'en' : 'ja';
     }
 
-    const prompt = `You are a professional simultaneous interpreter. Translate the following text from ${srcLang === 'ja' ? 'Japanese' : 'English'} into fluent, natural ${targetLang === 'ja' ? 'Japanese' : 'English'}.\n`
+    const domainHint = category ? ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate technical terminology.` : '';
+    const prompt = `You are a professional simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n`
+                 + `Translate the following text from ${srcLang === 'ja' ? 'Japanese' : 'English'} into fluent, accurate ${targetLang === 'ja' ? 'Japanese' : 'English'}.\n`
                  + `Strict requirements:\n`
                  + `1. Return ONLY the direct translation.\n`
                  + `2. Do not include quotes, explanations, prefixes, or notes.\n\n`
                  + `Text:\n${text}`;
 
-    // Layer 1: Gemini REST API
+    // Layer 1: Gemini REST API (Cascade Fallback)
     if (apiKey && apiKey.trim() !== '') {
-      const modelsToTry = ['gemini-3.5-flash-lite'];
+      const modelsToTry = [
+        'gemini-3.5-flash-lite',
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash'
+      ];
 
       for (const modelName of modelsToTry) {
         const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
@@ -1984,7 +1643,7 @@ class TranslationService {
         }
       }
     } else {
-      this.log('warn', 'Gemini APIキーが未入力のため、フォールバック翻訳を使用します。');
+      this.log('warn', 'Gemini APIキーが未入力のため、GASバックアップ翻訳を試行します。');
     }
 
     // Layer 2: GAS Web App (LanguageApp) Fallback
@@ -2024,30 +1683,8 @@ class TranslationService {
       }
     }
 
-    // Layer 3: Web Google Translate Endpoint Fallback
-    this.log('info', 'Web翻訳エンジンによるフォールバックを実行中...');
-    try {
-      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${srcLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-      const gtxRes = await fetch(gtxUrl);
-      if (gtxRes.ok) {
-        const gtxData = await gtxRes.json();
-        if (gtxData && gtxData[0]) {
-          const transText = gtxData[0].map(item => item[0]).join('').trim();
-          if (transText) {
-            this.log('success', `Web翻訳完了: "${transText}"`);
-            return {
-              translated: transText,
-              speakerLang: srcLang
-            };
-          }
-        }
-      }
-    } catch (gtxErr) {
-      this.log('warn', `Web翻訳接続失敗: ${gtxErr.message}`);
-    }
-
     return {
-      translated: '(翻訳取得失敗)',
+      translated: '【翻訳取得失敗: APIキーまたはGAS設定を確認してください】',
       speakerLang: srcLang
     };
   }
@@ -2057,29 +1694,52 @@ class TranslationService {
 // 6. GAS Storage Client (Google Docs Integration)
 // ==========================================
 class GasStorageClient {
+  static extractDocId(input) {
+    if (!input) return '';
+    const match = String(input).trim().match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) return match[1];
+    return String(input).trim();
+  }
+
   static async ping(gasUrl, token) {
     if (!gasUrl) throw new Error('GAS Web App URLが設定されていません。');
     
-    const res = await fetch(gasUrl, {
+    try {
+      const res = await fetch(gasUrl, {
+        method: 'POST',
+        mode: 'cors',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'ping', token: token || '' })
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (e) {}
+
+    const getRes = await fetch(gasUrl, {
       method: 'GET',
       mode: 'cors',
       redirect: 'follow'
     });
-    if (!res.ok) throw new Error(`HTTPステータス: ${res.status}`);
-    return await res.json();
+    if (!getRes.ok) throw new Error(`HTTPステータス: ${getRes.status}`);
+    return await getRes.json();
   }
 
-  static async saveTranscript(gasUrl, { documentId, title, records, direction, model, token }) {
+  static async saveTranscript(gasUrl, { documentId, title, records, direction, category, model, token }) {
     if (!gasUrl) throw new Error('GAS Web App URLが未設定です。');
     if (!records || records.length === 0) throw new Error('保存対象の差分レコードがありません。');
+
+    const sanitizedDocId = GasStorageClient.extractDocId(documentId);
 
     const payload = {
       action: 'save',
       token: token || '',
-      documentId: documentId || '',
+      documentId: sanitizedDocId,
       title: title || '',
       model: model || 'models/gemini-3.5-transcribe-live',
       direction: direction || 'AUTO',
+      category: category || 'HKC',
       records: records
     };
 
@@ -2088,7 +1748,7 @@ class GasStorageClient {
       mode: 'cors',
       redirect: 'follow',
       headers: {
-        'Content-Type': 'text/plain' // Bypass CORS preflight
+        'Content-Type': 'text/plain'
       },
       body: JSON.stringify(payload)
     });
@@ -2118,7 +1778,7 @@ class App {
 
     this.activeEngine = 'none';
     this.records = [];
-    this.lastSavedIndex = 0; // Tracks saved slice for differential doc sync
+    this.lastSavedIndex = 0;
     this.isRecording = false;
     this.isPaused = false;
 
@@ -2128,7 +1788,7 @@ class App {
     this._checkHashConfig();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.2.1)。差分同期・インプレースUIが有効です。');
+    this.log('info', '初期化完了 (v2.5.0)。2カラム対面監査UI・インライン編集機能が有効です。');
   }
 
   log(type, message) {
@@ -2142,12 +1802,14 @@ class App {
 
   _initElements() {
     this.elStatusBadge = document.getElementById('connection-status');
+    this.elStatusText = document.getElementById('status-text');
     this.elEngineBadge = document.getElementById('active-engine-badge');
     this.elBtnSettings = document.getElementById('btn-open-settings');
 
     this.elBtnToggleRecord = document.getElementById('btn-toggle-record');
     this.elBtnPauseRecord = document.getElementById('btn-pause-record');
     this.elSelectDirection = document.getElementById('select-direction');
+    this.elSelectCategory = document.getElementById('select-category');
     this.elBtnClearFeed = document.getElementById('btn-clear-feed');
     this.elBtnSaveDocs = document.getElementById('btn-save-docs');
     this.elSaveDocsText = document.getElementById('btn-save-docs-text');
@@ -2159,8 +1821,11 @@ class App {
     this.elSavedDocBanner = document.getElementById('saved-doc-banner');
     this.elSavedDocLink = document.getElementById('saved-doc-link');
 
+    // Live Preview elements (matching b9abbcfb.html)
+    this.elLivePreview = document.getElementById('livePreview');
+    this.elLiveText = document.getElementById('liveText');
+    this.elLiveEngineTag = document.getElementById('liveEngineTag');
     this.elMeterBar = document.querySelector('.meter-bar');
-    this.elInterimText = document.getElementById('interim-text');
 
     this.elToggleDiag = document.getElementById('toggle-diag');
     this.elDiagLogContainer = document.getElementById('diag-log-container');
@@ -2202,6 +1867,7 @@ class App {
     this.gasUrl = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_URL, '');
     this.gasToken = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_TOKEN, '');
     this.direction = ConfigManager.get(ConfigManager.STORAGE_KEYS.DIRECTION, 'auto');
+    this.category = ConfigManager.get(ConfigManager.STORAGE_KEYS.CATEGORY, 'HKC');
     this.engineMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(ConfigManager.STORAGE_KEYS.LIVE_MODEL, 'models/gemini-3.5-transcribe-live');
     this.autoSave = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUTO_SAVE, 'false') === 'true';
@@ -2212,6 +1878,7 @@ class App {
     this.elInputGasUrl.value = this.gasUrl;
     this.elInputGasToken.value = this.gasToken;
     this.elSelectDirection.value = this.direction;
+    if (this.elSelectCategory) this.elSelectCategory.value = this.category;
     this.elSelectEngineMode.value = this.engineMode;
     this.elSelectLiveModel.value = this.liveModel;
     this.elCheckAutoSave.checked = this.autoSave;
@@ -2233,22 +1900,32 @@ class App {
     this.elSelectDirection.addEventListener('change', (e) => {
       this.direction = e.target.value;
       ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, this.direction);
+      this.geminiClient.setDirection(this.direction);
+      this.webSpeechService.setDirection(this.direction);
       this.log('info', `翻訳方向変更: ${this.direction}`);
       if (this.isRecording) {
         this.showToast('翻訳方向が変更されました。次回発話から適用されます。', 'info');
       }
     });
 
+    if (this.elSelectCategory) {
+      this.elSelectCategory.addEventListener('change', (e) => {
+        this.category = e.target.value;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, this.category);
+        this.log('info', `監査分野変更: ${this.category}`);
+      });
+    }
+
     this.elBtnClearFeed.addEventListener('click', () => {
       if (this.records.length === 0) return;
-      if (confirm('タイムラインの翻訳履歴をクリアしますか？')) {
+      if (confirm('タイムラインの翻訳履歴を全消去しますか？')) {
         this.records = [];
         this.lastSavedIndex = 0;
         this.elTranscriptList.innerHTML = '';
         this.elEmptyState.style.display = 'block';
         this.elRecordCount.textContent = '0 件の発話';
         this._updateUIState();
-        this.showToast('タイムラインをクリアしました。', 'info');
+        this.showToast('全履歴をクリアしました。', 'info');
       }
     });
 
@@ -2261,6 +1938,13 @@ class App {
         this._syncDocModeUI();
       });
     }
+
+    this.elInputDocId.addEventListener('input', (e) => {
+      const sanitized = GasStorageClient.extractDocId(e.target.value);
+      if (sanitized !== e.target.value) {
+        e.target.value = sanitized;
+      }
+    });
 
     this.elBtnCopyAll.addEventListener('click', () => this.copyAllTranscripts());
 
@@ -2327,12 +2011,13 @@ class App {
       this.elGasTestResult.className = 'test-result-text';
       try {
         const res = await GasStorageClient.ping(url, this.elInputGasToken.value.trim());
-        if (res.status === 'ok') {
-          this.elGasTestResult.textContent = `接続成功 (v${res.version || '2.0'})`;
+        if (res.status === 'ok' || res.status === 'success') {
+          const authNote = res.authRequired ? ' (認証保護あり)' : '';
+          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.5.0'})${authNote}`;
           this.elGasTestResult.className = 'test-result-text success';
           this.log('success', `GAS Web App 疎通確認完了: ${url}`);
         } else {
-          this.elGasTestResult.textContent = '応答受信 (エラーあり)';
+          this.elGasTestResult.textContent = res.message || '応答受信 (エラーあり)';
           this.elGasTestResult.className = 'test-result-text error';
         }
       } catch (err) {
@@ -2437,11 +2122,15 @@ class App {
           );
 
           this.activeEngine = 'gemini-live';
-          this.elEngineBadge.textContent = this.liveModel;
+          this.elEngineBadge.textContent = 'Gemini Live';
+          this.elLiveEngineTag.textContent = 'Gemini Live';
           liveConnected = true;
           this.log('success', 'Gemini Live WebSocket 音声認識がアクティブになりました。');
         } catch (liveErr) {
           this.log('warn', `Gemini Live 接続失敗: ${liveErr.message}`);
+          try { this.audioService.stop(); } catch (e) {}
+          try { this.geminiClient.disconnect(); } catch (e) {}
+
           if (this.engineMode === 'gemini-live') {
             throw liveErr;
           }
@@ -2465,23 +2154,29 @@ class App {
         );
 
         this.activeEngine = 'web-speech';
-        this.elEngineBadge.textContent = 'WebSpeech + GeminiFlash';
+        this.elEngineBadge.textContent = 'Web Speech';
+        this.elLiveEngineTag.textContent = 'Web Speech';
         this.log('success', 'ブラウザ標準音声認識 + Gemini翻訳パイプラインが起動しました。');
       }
 
       this.isRecording = true;
       this.isPaused = false;
+      this.elLivePreview.style.display = 'flex';
+      this._renderInterim('話しかけてください...');
       this._updateStatus('recording');
       this._updateUIState();
       this.showToast('音声認識と自動翻訳を開始しました。マイクに向かって話してください。', 'success');
     } catch (err) {
       console.error('Failed to start session:', err);
       this.log('error', `起動処理失敗: ${err.message}`);
-      this.audioService.stop();
-      this.geminiClient.disconnect();
-      this.webSpeechService.stop();
+      try { this.audioService.stop(); } catch (e) {}
+      try { this.geminiClient.disconnect(); } catch (e) {}
+      try { this.webSpeechService.stop(); } catch (e) {}
       this.isRecording = false;
+      this.isPaused = false;
       this.activeEngine = 'none';
+      this.elLivePreview.style.display = 'none';
+      this._updateMeter(0);
       this._updateStatus('idle');
       this._updateUIState();
       this.showToast('開始エラー: ' + err.message, 'error');
@@ -2491,17 +2186,17 @@ class App {
   async stopRecording() {
     this.log('info', '翻訳セッションを停止中...');
     if (this.activeEngine === 'gemini-live') {
-      this.audioService.stop();
-      this.geminiClient.disconnect();
+      try { this.audioService.stop(); } catch (e) {}
+      try { this.geminiClient.disconnect(); } catch (e) {}
     } else if (this.activeEngine === 'web-speech') {
-      this.webSpeechService.stop();
+      try { this.webSpeechService.stop(); } catch (e) {}
     }
 
     this.isRecording = false;
     this.isPaused = false;
     this.activeEngine = 'none';
+    this.elLivePreview.style.display = 'none';
     this._updateMeter(0);
-    this._renderInterim('');
     this._updateStatus('idle');
     this._updateUIState();
     this.log('info', 'セッション停止完了。');
@@ -2516,13 +2211,24 @@ class App {
   togglePause() {
     if (!this.isRecording) return;
     if (this.isPaused) {
-      if (this.activeEngine === 'gemini-live') this.audioService.resume();
+      if (this.activeEngine === 'gemini-live') {
+        this.audioService.resume();
+      } else if (this.activeEngine === 'web-speech') {
+        this.webSpeechService.resume();
+      }
       this.isPaused = false;
+      this.elLivePreview.style.display = 'flex';
+      this._renderInterim('翻訳を再開しました。話しかけてください...');
       this._updateStatus('recording');
       this.showToast('翻訳を再開しました。', 'info');
     } else {
-      if (this.activeEngine === 'gemini-live') this.audioService.pause();
+      if (this.activeEngine === 'gemini-live') {
+        this.audioService.pause();
+      } else if (this.activeEngine === 'web-speech') {
+        this.webSpeechService.pause();
+      }
       this.isPaused = true;
+      this._renderInterim('一時停止中 (音声を認識しません)');
       this._updateStatus('paused');
       this.showToast('翻訳を一時停止しました。', 'warning');
     }
@@ -2531,50 +2237,63 @@ class App {
 
   _updateMeter(volume) {
     const pct = Math.min(100, Math.round(volume * 400));
-    this.elMeterBar.style.width = `${pct}%`;
+    if (this.elMeterBar) {
+      this.elMeterBar.style.width = `${pct}%`;
+    }
   }
 
   _renderInterim(text) {
+    if (!this.elLiveText) return;
     if (!text || text.trim() === '') {
-      this.elInterimText.className = 'interim-placeholder';
-      this.elInterimText.textContent = this.isRecording
-        ? '音声を認識中...'
-        : 'マイクを開始すると、リアルタイムの発話と翻訳プレビューがここに表示されます...';
+      this.elLiveText.className = 'live-text live-placeholder';
+      this.elLiveText.textContent = this.isRecording
+        ? '話しかけてください...'
+        : 'マイクを開始すると、リアルタイムの音声認識プレビューが表示されます...';
     } else {
-      this.elInterimText.className = 'interim-active';
-      this.elInterimText.textContent = `認識中: ${text}`;
+      this.elLiveText.className = 'live-text';
+      this.elLiveText.textContent = text;
     }
   }
 
   /**
-   * 音声確定時: インプレースにカードをDOMに追加し、直列FIFOキューへ投入
+   * 音声確定時: b9abbcfb.html のカード構造（2カラム原文/訳文・話者タグ・アクション完備）を生成
    */
   _handleFinalSpeech(finalText, langCode) {
     if (!finalText || finalText.trim() === '') return;
 
-    this._renderInterim('');
+    this._renderInterim('話しかけてください...');
 
-    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    const recordId = 'rec_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5);
+    const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+    // 日本語判定に基づくデフォルト話者ロール（日本語はAuditor、英語はYard Rep）
+    const hasJa = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(finalText);
+    const initialSpeaker = hasJa ? ROLES[0] : ROLES[1];
+    const engineLabel = this.activeEngine === 'gemini-live' ? 'Gemini Live' : 'Web Speech';
 
     const record = {
       id: recordId,
-      timestamp: timestamp,
-      speakerLang: langCode || (this.direction === 'ja-to-en' ? 'ja' : this.direction === 'en-to-ja' ? 'en' : 'auto'),
-      original: finalText,
-      translated: '翻訳中...'
+      time: timestamp,
+      speaker: initialSpeaker,
+      speakerLang: langCode || (hasJa ? 'ja' : 'en'),
+      originalText: finalText,
+      translatedText: '',
+      engine: engineLabel,
+      direction: this.direction,
+      category: this.category,
+      isTranslating: true
     };
 
     this.records.push(record);
     this._appendSingleCard(record);
     this._updateUIState();
 
-    this.log('info', `FIFOキューに投入: "${finalText}"`);
+    this.log('info', `確定発話をFIFOキューに投入: "${finalText}"`);
 
-    // Sequential queue execution (eliminates race conditions)
     this.translationService.enqueue(
       finalText,
       this.direction,
+      this.category,
       this.apiKey,
       this.gasUrl,
       this.gasToken,
@@ -2584,68 +2303,159 @@ class App {
   }
 
   /**
-   * インプレースなカードDOM要素の単一追加 (全DOM再描画を廃止)
+   * b9abbcfb.html の card テンプレートと完全に同一の要素を構築
    */
-  _appendSingleCard(record) {
+  _appendSingleCard(item) {
     this.elEmptyState.style.display = 'none';
     this.elRecordCount.textContent = `${this.records.length} 件の発話`;
 
     const card = document.createElement('div');
-    card.className = 'transcript-card';
-    card.id = `card-${record.id}`;
+    card.className = 'card transcript-item';
+    card.id = item.id;
 
-    const isJa = record.speakerLang === 'ja';
-    const langClass = isJa ? 'tag-ja' : 'tag-en';
-    const langLabel = (record.speakerLang || 'AUTO').toUpperCase();
+    const speakerClass = item.speaker?.includes('Auditor')
+      ? 'auditor'
+      : item.speaker?.includes('Yard')
+      ? 'yard'
+      : '';
 
     card.innerHTML = `
-      <div class="card-header">
-        <div class="card-meta">
-          <span class="time-stamp">${this._escapeHTML(record.timestamp)}</span>
-          <span class="lang-tag ${langClass}">${this._escapeHTML(langLabel)}</span>
+      <div class="meta">
+        <div class="meta-left">
+          <span>🕒 ${this._escapeHTML(item.time)}</span>
+          <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="クリックで話者を変更">${this._escapeHTML(item.speaker || '発話')}</span>
+          <span class="tag engine">${this._escapeHTML(item.engine || 'Gemini')}</span>
         </div>
-        <button class="btn-card-copy" title="カード内容をコピー">📋 コピー</button>
+        <div class="card-actions">
+          <button class="small-btn" data-a="copy" title="このカード内容をコピー">📋</button>
+          <button class="small-btn" data-a="edit" title="原文・訳文を修正">✏️</button>
+          <button class="small-btn" data-a="retry" title="再翻訳を実行">🔄</button>
+          <button class="small-btn" data-a="delete" title="この発話を削除">🗑️</button>
+        </div>
       </div>
-      <div class="card-body">
-        <p class="orig-text">${this._escapeHTML(record.original)}</p>
-        <p class="trans-text is-translating">翻訳中...</p>
+      <div id="${item.id}_view" class="body-grid">
+        <div class="column">
+          <span class="label">原文</span>
+          <div id="${item.id}_orig" class="original">${this._escapeHTML(item.originalText)}</div>
+        </div>
+        <div class="column">
+          <span class="label">訳文</span>
+          <div id="${item.id}_trans" class="translation">${item.isTranslating ? '⏳ 翻訳中...' : this._escapeHTML(item.translatedText)}</div>
+        </div>
+      </div>
+      <div id="${item.id}_edit" class="edit">
+        <div class="edit-grid">
+          <textarea id="${item.id}_edit_orig" placeholder="原文">${this._escapeHTML(item.originalText)}</textarea>
+          <textarea id="${item.id}_edit_trans" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
+        </div>
+        <div class="edit-actions">
+          <button class="btn btn-sm btn-outline" data-a="cancel">キャンセル</button>
+          <button class="btn btn-sm btn-primary" data-a="save">保存</button>
+        </div>
       </div>
     `;
 
-    card.querySelector('.btn-card-copy').addEventListener('click', () => {
-      const textToCopy = `[${record.timestamp}] (${langLabel})\n原文: ${record.original}\n訳文: ${record.translated}`;
-      navigator.clipboard.writeText(textToCopy).then(() => {
-        this.showToast('カードの内容をコピーしました。', 'info');
-      });
+    // Event delegation for in-place actions
+    card.addEventListener('click', (e) => {
+      const a = e.target.dataset?.a;
+
+      // Copy Single Card
+      if (a === 'copy') {
+        const textToCopy = `[${item.time}] (${item.speaker})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
+        navigator.clipboard.writeText(textToCopy).then(() => {
+          this.showToast('カード内容をコピーしました。', 'info');
+        });
+        return;
+      }
+
+      // Open Inline Edit
+      if (a === 'edit') {
+        document.getElementById(`${item.id}_view`).style.display = 'none';
+        document.getElementById(`${item.id}_edit`).classList.add('open');
+        return;
+      }
+
+      // Cancel Inline Edit
+      if (a === 'cancel') {
+        document.getElementById(`${item.id}_edit`).classList.remove('open');
+        document.getElementById(`${item.id}_view`).style.display = 'grid';
+        return;
+      }
+
+      // Save Inline Edit
+      if (a === 'save') {
+        const editOrig = document.getElementById(`${item.id}_edit_orig`).value.trim();
+        const editTrans = document.getElementById(`${item.id}_edit_trans`).value.trim();
+        item.originalText = editOrig;
+        item.translatedText = editTrans;
+        document.getElementById(`${item.id}_orig`).textContent = editOrig;
+        document.getElementById(`${item.id}_trans`).textContent = editTrans;
+        document.getElementById(`${item.id}_edit`).classList.remove('open');
+        document.getElementById(`${item.id}_view`).style.display = 'grid';
+        this.showToast('修正内容を保存しました。', 'success');
+        return;
+      }
+
+      // Retry Translation
+      if (a === 'retry') {
+        item.isTranslating = true;
+        document.getElementById(`${item.id}_trans`).textContent = '⏳ 再翻訳中...';
+        this.translationService.enqueue(
+          item.originalText,
+          this.direction,
+          this.category,
+          this.apiKey,
+          this.gasUrl,
+          this.gasToken,
+          item.id,
+          (id, transResult) => this._onTranslationComplete(id, transResult)
+        );
+        this.showToast('再翻訳を開始しました。', 'info');
+        return;
+      }
+
+      // Delete Record
+      if (a === 'delete') {
+        if (confirm('この発話をタイムラインから削除しますか？')) {
+          this.records = this.records.filter((x) => x.id !== item.id);
+          card.remove();
+          this.elRecordCount.textContent = `${this.records.length} 件の発話`;
+          if (this.records.length === 0) {
+            this.elEmptyState.style.display = 'block';
+          }
+          this._updateUIState();
+          this.showToast('発話を削除しました。', 'info');
+        }
+        return;
+      }
+
+      // Speaker Tag Click (Cycle Roles)
+      if (e.target.id === `${item.id}_spk`) {
+        let currIdx = ROLES.indexOf(item.speaker);
+        item.speaker = ROLES[(currIdx + 1 + ROLES.length) % ROLES.length];
+        e.target.textContent = item.speaker;
+
+        e.target.className = 'tag speaker';
+        if (item.speaker.includes('Auditor')) e.target.classList.add('auditor');
+        else if (item.speaker.includes('Yard')) e.target.classList.add('yard');
+      }
     });
 
     this.elTranscriptList.appendChild(card);
     card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
-  /**
-   * 翻訳完了時のインプレースDOM更新 (テキスト選択・スクロール位置を保持)
-   */
   _onTranslationComplete(recordId, transResult) {
     const record = this.records.find((r) => r.id === recordId);
     if (record) {
-      record.translated = transResult.translated;
+      record.translatedText = transResult.translated;
       record.speakerLang = transResult.speakerLang;
+      record.isTranslating = false;
     }
 
-    const card = document.getElementById(`card-${recordId}`);
-    if (card) {
-      const transEl = card.querySelector('.trans-text');
-      if (transEl) {
-        transEl.classList.remove('is-translating');
-        transEl.textContent = transResult.translated;
-      }
-      const langEl = card.querySelector('.lang-tag');
-      if (langEl) {
-        const isJa = transResult.speakerLang === 'ja';
-        langEl.className = `lang-tag ${isJa ? 'tag-ja' : 'tag-en'}`;
-        langEl.textContent = (transResult.speakerLang || 'AUTO').toUpperCase();
-      }
+    const transEl = document.getElementById(`${recordId}_trans`);
+    if (transEl) {
+      transEl.textContent = transResult.translated;
     }
 
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
@@ -2657,27 +2467,53 @@ class App {
     }
   }
 
-  /**
-   * Google ドキュメント保存: 差分レコードのみを抽出して送信 (重複を完全防止)
-   */
   async saveToDocs(isAuto = false) {
-    const unsavedRecords = this.records.slice(this.lastSavedIndex);
-
-    if (unsavedRecords.length === 0) {
+    if (!this.gasUrl) {
       if (!isAuto) {
-        this.showToast('新しく追加された未保存の差分はありません。', 'info');
+        this.showToast('GAS Web App URLが未設定です。設定画面から登録してください。', 'warning');
+        this.elModal.style.display = 'flex';
       }
       return;
     }
 
-    if (!this.gasUrl) {
-      this.showToast('GAS Web App URLが未設定です。設定画面から登録してください。', 'warning');
-      this.elModal.style.display = 'flex';
+    // Wait for in-flight translations to finish (up to 5 seconds)
+    if (this.translationService.isProcessing || this.translationService.queue.length > 0) {
+      this.log('info', '未完了の翻訳ジョブの終了を待機しています...');
+      let waitLimit = 0;
+      while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 25) {
+        await new Promise((r) => setTimeout(r, 200));
+        waitLimit++;
+      }
+    }
+
+    let eligibleCount = 0;
+    for (let i = this.lastSavedIndex; i < this.records.length; i++) {
+      if (this.records[i].isTranslating || !this.records[i].translatedText) {
+        break;
+      }
+      eligibleCount++;
+    }
+
+    if (eligibleCount === 0) {
+      if (!isAuto) {
+        const hasPending = this.records.slice(this.lastSavedIndex).some(r => r.isTranslating);
+        this.showToast(hasPending ? '現在翻訳処理中のため、完了後に保存してください。' : '新しく追加された未保存の差分はありません。', 'info');
+      }
       return;
     }
 
+    const unsavedRecords = this.records.slice(this.lastSavedIndex, this.lastSavedIndex + eligibleCount).map(r => ({
+      timestamp: r.time,
+      speaker: r.speaker,
+      speakerLang: r.speakerLang,
+      original: r.originalText,
+      translated: r.translatedText,
+      engine: r.engine
+    }));
+
     const isExisting = this.docMode === 'existing';
-    const docId = isExisting ? this.elInputDocId.value.trim() : '';
+    const rawDocId = isExisting ? this.elInputDocId.value.trim() : '';
+    const docId = GasStorageClient.extractDocId(rawDocId);
     const title = this.elInputDocTitle.value.trim();
 
     if (isExisting && !docId) {
@@ -2688,20 +2524,20 @@ class App {
 
     this.elBtnSaveDocs.disabled = true;
     this.elSaveDocsText.textContent = '差分保存中...';
-    this.log('info', `Google ドキュメント差分同期開始 (未保存件数: ${unsavedRecords.length}件)...`);
+    this.log('info', `Google ドキュメント差分同期開始 (保存対象: ${unsavedRecords.length}件)...`);
 
     try {
       const result = await GasStorageClient.saveTranscript(this.gasUrl, {
         token: this.gasToken,
         documentId: docId,
         title: title,
-        records: unsavedRecords, // ← 差分レコードのみ送信
+        records: unsavedRecords,
         direction: this.direction,
+        category: this.category,
         model: this.liveModel
       });
 
-      // Advance save cursor to current total records
-      this.lastSavedIndex += unsavedRecords.length;
+      this.lastSavedIndex += eligibleCount;
       this._updateUIState();
 
       this.elSavedDocBanner.style.display = 'flex';
@@ -2709,13 +2545,11 @@ class App {
       this.elSavedDocLink.textContent = `${result.documentTitle || 'ドキュメント'} を開く ↗`;
       this.log('success', `Google ドキュメント差分追記完了 (保存後累計: ${this.lastSavedIndex}件): ${result.documentUrl}`);
 
-      // If document was newly created, switch mode to existing and save ID
       if (result.documentId) {
         this.lastDocId = result.documentId;
         ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, this.lastDocId);
         this.elInputDocId.value = this.lastDocId;
         
-        // Auto-switch to existing document mode for subsequent incremental updates
         this.docMode = 'existing';
         ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, 'existing');
         for (const radio of this.elRadioDocModes) {
@@ -2734,54 +2568,56 @@ class App {
       this.showToast('保存に失敗しました: ' + err.message, 'error');
     } finally {
       this.elBtnSaveDocs.disabled = false;
-      this.elSaveDocsText.textContent = 'ドキュメントに保存';
+      this.elSaveDocsText.textContent = 'Google ドキュメントに保存';
       this._updateUIState();
     }
   }
 
+  /**
+   * b9abbcfb.html 仕様: 議事録Markdownテーブル形式で全コピー
+   */
   copyAllTranscripts() {
     if (this.records.length === 0) {
       this.showToast('コピーする履歴がありません。', 'warning');
       return;
     }
 
-    let allText = `=== Gemini Live 日英・英日翻訳ログ ===\n日時: ${new Date().toLocaleString('ja-JP')}\n\n`;
-    this.records.forEach((r) => {
-      allText += `[${r.timestamp}] (${(r.speakerLang || 'AUTO').toUpperCase()})\n`;
-      allText += `原文: ${r.original}\n`;
-      allText += `訳文: ${r.translated}\n\n`;
-    });
+    const clean = (s) => String(s || '').replace(/\n/g, '<br>').replace(/\|/g, '\\|');
+    let md = `# 現地監査 議事録 (${this.category})\n\n`;
+    md += `| 時刻 | 話者 | 原文 | 訳文 |\n|---|---|---|---|\n`;
+    for (const t of this.records) {
+      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
+    }
 
-    navigator.clipboard.writeText(allText).then(() => {
-      this.showToast('全履歴をクリップボードにコピーしました。', 'info');
+    navigator.clipboard.writeText(md).then(() => {
+      this.showToast('全履歴をMarkdown表形式でコピーしました。', 'info');
     });
   }
 
   _updateStatus(state) {
     this.elStatusBadge.className = 'status-badge';
-    const label = this.elStatusBadge.querySelector('.status-label');
 
     switch (state) {
       case 'recording':
         this.elStatusBadge.classList.add('status-recording');
-        label.textContent = '録音・翻訳中';
+        this.elStatusText.textContent = '録音中 (REC)';
         break;
       case 'connecting':
         this.elStatusBadge.classList.add('status-connecting');
-        label.textContent = '接続中...';
+        this.elStatusText.textContent = 'WS接続中...';
         break;
       case 'paused':
         this.elStatusBadge.classList.add('status-connecting');
-        label.textContent = '一時停止中';
+        this.elStatusText.textContent = '一時停止中';
         break;
       case 'error':
         this.elStatusBadge.classList.add('status-error');
-        label.textContent = 'エラー';
+        this.elStatusText.textContent = 'エラー';
         break;
       case 'idle':
       default:
         this.elStatusBadge.classList.add('status-idle');
-        label.textContent = '待機中';
+        this.elStatusText.textContent = '待機中';
         break;
     }
   }
@@ -2790,12 +2626,12 @@ class App {
     if (this.isRecording) {
       this.elBtnToggleRecord.classList.add('is-recording');
       this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '⏹️';
-      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '翻訳を終了';
+      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '録音停止';
       this.elBtnPauseRecord.disabled = false;
     } else {
       this.elBtnToggleRecord.classList.remove('is-recording');
-      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '🎙️';
-      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '翻訳を開始';
+      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '🎤';
+      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '録音開始';
       this.elBtnPauseRecord.disabled = true;
       this.elBtnPauseRecord.querySelector('.btn-text').textContent = '一時停止';
     }
@@ -2817,9 +2653,6 @@ class App {
     }
   }
 
-  /**
-   * PCで設定された情報をURLフラグメント(#setup=...)としてQRコード化
-   */
   _openQrModal() {
     if (!this.apiKey && !this.gasUrl) {
       this.showToast('先に「⚙️ 設定」でGemini APIキーまたはGAS設定を入力してください。', 'warning');
@@ -2832,6 +2665,7 @@ class App {
       gasUrl: this.gasUrl || '',
       gasToken: this.gasToken || '',
       direction: this.direction || 'auto',
+      category: this.category || 'HKC',
       engineMode: this.engineMode || 'auto',
       liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
       autoSave: this.autoSave,
@@ -2841,7 +2675,6 @@ class App {
 
     try {
       const jsonStr = JSON.stringify(config);
-      // Safe UTF-8 to Base64
       const b64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g, (match, p1) => String.fromCharCode('0x' + p1)));
       
       const baseUrl = window.location.origin + window.location.pathname;
@@ -2849,12 +2682,11 @@ class App {
 
       this.elInputShareUrl.value = shareUrl;
 
-      // Render QR Code onto canvas
       if (window.QRCode && QRCode.renderCanvas && this.elQrCanvas) {
         QRCode.renderCanvas(this.elQrCanvas, shareUrl, {
           size: 240,
           margin: 2,
-          dark: '#1F2328',
+          dark: '#1b365d',
           light: '#FFFFFF'
         });
       }
@@ -2867,9 +2699,6 @@ class App {
     }
   }
 
-  /**
-   * スマホでの読み取り時: URLフラグメント(#setup=...)から設定をインポート
-   */
   _checkHashConfig() {
     const hash = window.location.hash;
     if (hash && hash.startsWith('#setup=')) {
@@ -2882,29 +2711,26 @@ class App {
         if (config.gasUrl) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_URL, config.gasUrl);
         if (config.gasToken) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, config.gasToken);
         if (config.direction) ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, config.direction);
+        if (config.category) ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, config.category);
         if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
         if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
         if (config.autoSave !== undefined) ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(config.autoSave));
         if (config.docMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, config.docMode);
         if (config.lastDocId) ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, config.lastDocId);
 
-        // Security: Remove hash from URL so secrets don't persist in address bar
         if (window.history && window.history.replaceState) {
           window.history.replaceState(null, '', window.location.pathname + window.location.search);
         }
 
-        setTimeout(() => {
-          this._loadSettings();
-          this.log('success', 'スマホ連携: PCで設定された情報（APIキー・GAS設定）をインポートしました！');
-          this.showToast('📱 PCからの設定をインポートしました！', 'success');
-        }, 150);
+        this._loadSettings();
+        this.log('success', 'スマホ連携: PC設定情報（APIキー・GAS設定）を即座にインポートしました！');
+        this.showToast('📱 PCからの設定をインポートしました！', 'success');
       } catch (err) {
         console.warn('Failed to parse setup hash:', err);
         this.log('error', `設定インポート失敗: ${err.message}`);
       }
     }
   }
-
 
   showToast(message, type = 'info') {
     if (!this.elToastContainer) return;
@@ -2938,7 +2764,8 @@ class App {
   }
 }
 
-// Instantiate on load
-document.addEventListener('DOMContentLoaded', () => {
-  window.app = new App();
-});
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    window.app = new App();
+  });
+}
