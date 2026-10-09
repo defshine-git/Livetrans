@@ -849,7 +849,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.6.0 (Unified Google Document Sync & Stability Release)
+ * Version: 2.8.0 (4-Language Recognition [JA, EN, BN, HI] & Full Mobile/iPad Compatibility)
  * 
  * Features:
  * 1. 2-Column Body Grid (原文 / 訳文) with responsive single-column layout.
@@ -860,6 +860,78 @@ global.QRCode = QRCode;
  * 6. Single Document Sync: 確定した全翻訳をひとつのGoogleドキュメントとして確実に同期・保存。
  */
 
+
+/**
+ * iPadOS / iOS 環境判定
+ */
+function isIPadOrIOS() {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+/**
+ * 4言語（日本語・英語・ベンガル語・ヒンディー語）の高精度自動判別
+ * 韓国語やスワヒリ語等の誤認識・ハルシネーションを厳密に排除
+ * @param {string} text 認識されたテキスト
+ * @param {string|null} hintedLangCode Gemini Live から返却された言語コード
+ * @returns {'ja'|'en'|'bn'|'hi'}
+ */
+function detectLanguage4(text, hintedLangCode = null) {
+  if (hintedLangCode) {
+    const code = String(hintedLangCode).toLowerCase();
+    if (code.startsWith('ja')) return 'ja';
+    if (code.startsWith('bn')) return 'bn';
+    if (code.startsWith('hi')) return 'hi';
+    if (code.startsWith('en')) return 'en';
+  }
+
+  if (!text) return 'en';
+
+  // 1. 日本語: ひらがな、カタカナ
+  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
+    return 'ja';
+  }
+
+  // 2. ベンガル語 (Bengali Script: \u0980-\u09FF)
+  if (/[\u0980-\u09FF]/.test(text)) {
+    return 'bn';
+  }
+
+  // 3. ヒンディー語 (Devanagari Script: \u0900-\u097F)
+  if (/[\u0900-\u097F]/.test(text)) {
+    return 'hi';
+  }
+
+  // 4. 漢字（日本語監査用語など）
+  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) {
+    return 'ja';
+  }
+
+  // 5. その他（ラテン文字等）は英語として判定
+  return 'en';
+}
+
+function getLanguageDisplayName(langCode) {
+  switch (langCode) {
+    case 'ja': return '日本語';
+    case 'en': return '英語';
+    case 'bn': return 'ベンガル語';
+    case 'hi': return 'ヒンディー語';
+    default: return String(langCode || '英語').toUpperCase();
+  }
+}
+
+function getLanguageBadge(langCode) {
+  switch (langCode) {
+    case 'ja': return '🇯🇵 日本語';
+    case 'en': return '🇺🇸 英語';
+    case 'bn': return '🇧🇩 ベンガル語';
+    case 'hi': return '🇮🇳 ヒンディー語';
+    default: return '🌐 ' + (langCode || '自動');
+  }
+}
+
 const ROLES = [
   'Auditor (監査員)',
   'Yard Rep (ヤード担当者)',
@@ -868,6 +940,13 @@ const ROLES = [
 ];
 
 // ==========================================
+const DEFAULT_SYSTEM_INSTRUCTION =
+  'You are a speech transcription engine for maritime and safety audits. ' +
+  'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
+  'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
+  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
+  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
+
 // 1. Config Manager (localStorage)
 // ==========================================
 class ConfigManager {
@@ -884,7 +963,8 @@ class ConfigManager {
     LAST_DOC_ID: 'glt_last_doc_id',
     ENGINE_MODE: 'glt_engine_mode',
     LIVE_MODEL: 'glt_live_model',
-    AUDIO_SOURCE: 'glt_audio_source'
+    AUDIO_SOURCE: 'glt_audio_source',
+    SYSTEM_INSTRUCTION: 'glt_system_instruction'
   };
 
   static get(key, defaultValue = '') {
@@ -907,7 +987,7 @@ class ConfigManager {
 }
 
 // ==========================================
-// 2. Audio Capture Service (Anti-Aliased 16kHz PCM)
+// 2. Audio Capture Service (Anti-Aliased 16kHz PCM - iPad/iOS Optimized)
 // ==========================================
 class AudioCaptureService {
   constructor() {
@@ -922,11 +1002,9 @@ class AudioCaptureService {
     this.processorNode = null;
     this.isRecording = false;
     this.isPaused = false;
-    this.gainValue = 2.5; // 遠距離集音ブースト初期値 (推奨 2.5x)
+    this.gainValue = 2.5;
     this.onChunkCallback = null;
     this.onVolumeCallback = null;
-
-    // Buffer pooling to eliminate garbage collection latency spikes
     this._cachedBuffer = null;
   }
 
@@ -941,6 +1019,33 @@ class AudioCaptureService {
           this.gainNode.gain.value = this.gainValue;
         }
       }
+    }
+  }
+
+  /**
+   * iPadOS / iOS 向け同期アンロック処理
+   * ユーザーのタップ・クリック操作内で同期実行し、AudioContext を即時アクティブ化
+   */
+  unlockContext() {
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return null;
+      if (!this.audioContext || this.audioContext.state === 'closed') {
+        this.audioContext = new AudioContextClass();
+      }
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+      // iOS WebKit向け無音バッファ再生 (オーディオハードウェアセッション起動)
+      const buffer = this.audioContext.createBuffer(1, 1, 22050);
+      const source = this.audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.audioContext.destination);
+      source.start(0);
+      return this.audioContext;
+    } catch (e) {
+      console.warn('[AudioCapture] unlockContext failed:', e);
+      return null;
     }
   }
 
@@ -963,10 +1068,15 @@ class AudioCaptureService {
     this.onChunkCallback = onChunk;
     this.onVolumeCallback = onVolume;
 
+    this.unlockContext();
     await this.ensureContext();
 
+    const isIOS = isIPadOrIOS();
+
     if (sourceType === 'display') {
-      // タブ・PC・システム音声キャプチャ (getDisplayMedia)
+      if (isIOS) {
+        throw new Error('iPad / iPhone ではOSの仕様によりタブ音声キャプチャはサポートされていません。「マイク (対面会話)」をご利用ください。');
+      }
       if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
         throw new Error('お使いのブラウザはタブ・PC音声のキャプチャに対応していません。Chrome または Edge をご利用ください。');
       }
@@ -990,44 +1100,59 @@ class AudioCaptureService {
         throw new Error('音声が共有されていません。共有ウィンドウで「タブの音声も共有」または「音声を共有」のチェックボックスに必ずチェックを入れてください。');
       }
 
-      // 不要なビデオトラックを停止して負荷を低減
       displayStream.getVideoTracks().forEach((t) => t.stop());
-
       this.mediaStream = new MediaStream([audioTracks[0]]);
 
-      // ユーザーがブラウザの共有停止ボタンを押した時のハンドラ
       if (onEnded) {
         audioTracks[0].onended = () => {
           onEnded();
         };
       }
     } else {
-      // 通常のマイク入力 (getUserMedia)
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
       }
 
-      try {
-        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+      // iOS Safari でエラーの原因となる非標準 goog* 制約を完全排除し、安全にフォールバック
+      const constraintCandidates = [
+        {
           audio: {
-            channelCount: 1,
             echoCancellation: true,
-            noiseSuppression: false,
-            autoGainControl: true,
-            googAutoGainControl: true,
-            googNoiseSuppression: false,
-            googHighpassFilter: false
+            noiseSuppression: !isIOS,
+            autoGainControl: true
           }
-        });
-      } catch (err) {
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          throw new Error('マイクへのアクセスが拒否されました。ブラウザのアドレスバーからマイク使用を許可してください。');
-        } else if (err.name === 'NotFoundError') {
-          throw new Error('利用可能なマイク機器が見つかりませんでした。');
-        } else {
-          throw new Error(`マイクの取得に失敗しました: ${err.message}`);
+        },
+        {
+          audio: {
+            echoCancellation: true
+          }
+        },
+        {
+          audio: true
+        }
+      ];
+
+      let stream = null;
+      let lastError = null;
+
+      for (const constraints of constraintCandidates) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          if (stream) break;
+        } catch (err) {
+          lastError = err;
+          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            throw new Error('マイクへのアクセスが拒否されました。iPad/ブラウザの設定からマイク使用を許可してください。');
+          }
+          console.warn('[AudioCapture] getUserMedia attempt failed with:', constraints, err);
         }
       }
+
+      if (!stream) {
+        throw new Error(`マイクの取得に失敗しました: ${lastError ? lastError.message : '利用可能なマイクが見つかりませんでした'}`);
+      }
+
+      this.mediaStream = stream;
     }
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
@@ -1067,7 +1192,19 @@ class AudioCaptureService {
     const bufferSize = 2048;
     this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
     
+    // WebKit (iOS/iPadOS) のガベージコレクション切断バグを完全防止
     if (typeof window !== 'undefined') {
+      window._activeAudioSession = {
+        context: this.audioContext,
+        source: this.sourceNode,
+        highpass: this.highpassNode,
+        gain: this.gainNode,
+        compressor: this.compressorNode,
+        filter: this.filterNode,
+        analyser: this.analyserNode,
+        processor: this.processorNode,
+        stream: this.mediaStream
+      };
       window._activeAudioProcessorNode = this.processorNode;
     }
 
@@ -1079,6 +1216,11 @@ class AudioCaptureService {
       outputBuffer.fill(0);
 
       if (!this.isRecording || this.isPaused) return;
+
+      // iPadバックグラウンド復帰時の自動リカバリー
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
 
       const inputBuffer = e.inputBuffer.getChannelData(0);
 
@@ -1113,7 +1255,10 @@ class AudioCaptureService {
   stop() {
     this.isRecording = false;
     this.isPaused = false;
-    if (typeof window !== 'undefined') window._activeAudioProcessorNode = null;
+    if (typeof window !== 'undefined') {
+      window._activeAudioProcessorNode = null;
+      window._activeAudioSession = null;
+    }
     if (this.processorNode) { try { this.processorNode.disconnect(); } catch (e) {} this.processorNode = null; }
     if (this.analyserNode) { try { this.analyserNode.disconnect(); } catch (e) {} this.analyserNode = null; }
     if (this.filterNode) { try { this.filterNode.disconnect(); } catch (e) {} this.filterNode = null; }
@@ -1176,9 +1321,7 @@ class AudioCaptureService {
     return btoa(binary);
   }
 }
-
-// ==========================================
-// 3. Web Speech API Service (Native Fallback)
+// 3. Web Speech API Service (Native Fallback - 4-Language & iPad Optimized)
 // ==========================================
 class WebSpeechService {
   constructor() {
@@ -1189,6 +1332,7 @@ class WebSpeechService {
     this.onFinalCallback = null;
     this.onErrorCallback = null;
     this.direction = 'auto';
+    this.restartTimer = null;
   }
 
   isSupported() {
@@ -1198,40 +1342,38 @@ class WebSpeechService {
   setDirection(direction) {
     this.direction = direction;
     if (this.recognition && this.isListening) {
-      const targetLang = this.direction === 'en-to-ja' ? 'en-US' : 'ja-JP';
+      let targetLang = 'ja-JP';
+      if (this.direction === 'en-to-ja') targetLang = 'en-US';
+      else if (this.direction === 'bn-to-ja') targetLang = 'bn-BD';
+      else if (this.direction === 'hi-to-ja') targetLang = 'hi-IN';
+      else if (this.direction === 'ja-to-en') targetLang = 'ja-JP';
       if (this.recognition.lang !== targetLang) {
         this.recognition.lang = targetLang;
-        try {
-          this.recognition.stop();
-        } catch (e) {}
+        try { this.recognition.stop(); } catch (e) {}
       }
     }
   }
 
-  start(direction, onInterim, onFinal, onError) {
+  _initRecognition() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      throw new Error('ブラウザの音声認識 (Web Speech API) が利用できません。');
-    }
+    if (!SpeechRecognition) return null;
 
-    this.direction = direction;
-    this.onInterimCallback = onInterim;
-    this.onFinalCallback = onFinal;
-    this.onErrorCallback = onError;
-    this.isPaused = false;
-
-    this.recognition = new SpeechRecognition();
-    this.recognition.continuous = true;
-    this.recognition.interimResults = true;
-    this.recognition.maxAlternatives = 1;
+    const rec = new SpeechRecognition();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
 
     if (this.direction === 'en-to-ja') {
-      this.recognition.lang = 'en-US';
+      rec.lang = 'en-US';
+    } else if (this.direction === 'bn-to-ja') {
+      rec.lang = 'bn-BD';
+    } else if (this.direction === 'hi-to-ja') {
+      rec.lang = 'hi-IN';
     } else {
-      this.recognition.lang = 'ja-JP';
+      rec.lang = 'ja-JP';
     }
 
-    this.recognition.onresult = (event) => {
+    rec.onresult = (event) => {
       if (this.isPaused) return;
 
       let interim = '';
@@ -1240,8 +1382,7 @@ class WebSpeechService {
         if (item.isFinal) {
           const finalTranscript = item[0].transcript.trim();
           if (finalTranscript.length > 0 && this.onFinalCallback) {
-            const hasJa = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(finalTranscript);
-            const detectedLang = hasJa ? 'ja' : (this.recognition.lang.startsWith('ja') ? 'ja' : 'en');
+            const detectedLang = detectLanguage4(finalTranscript, rec.lang);
             this.onFinalCallback(finalTranscript, detectedLang);
           }
         } else {
@@ -1253,27 +1394,74 @@ class WebSpeechService {
       }
     };
 
-    this.recognition.onerror = (event) => {
+    rec.onerror = (event) => {
       console.warn('[WebSpeech] Error:', event.error);
-      if (event.error === 'not-allowed') {
-        if (this.onErrorCallback) this.onErrorCallback(new Error('マイクの使用が許可されていません。'));
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        if (this.onErrorCallback) {
+          const msg = isIPadOrIOS()
+            ? 'マイクまたは音声認識の使用が許可されていません。iPadの「設定」→「Safari」および「Siriと検索」の音声入力を有効にしてください。'
+            : 'マイクの使用が許可されていません。';
+          this.onErrorCallback(new Error(msg));
+        }
       }
     };
 
-    this.recognition.onend = () => {
+    rec.onend = () => {
       if (this.isListening && !this.isPaused) {
-        try {
-          this.recognition.start();
-        } catch (e) {}
+        clearTimeout(this.restartTimer);
+        // iOS Safari では onend 直後の start() 呼び出しが InvalidStateError になるため、200msの遅延制御を実施
+        this.restartTimer = setTimeout(() => {
+          if (this.isListening && !this.isPaused) {
+            try {
+              if (this.recognition) {
+                this.recognition.start();
+              }
+            } catch (e) {
+              console.warn('[WebSpeech] Restart failed, re-initializing instance:', e);
+              try {
+                this.recognition = this._initRecognition();
+                if (this.recognition) this.recognition.start();
+              } catch (e2) {
+                console.error('[WebSpeech] Re-init start failed:', e2);
+              }
+            }
+          }
+        }, 200);
       }
     };
 
-    this.recognition.start();
+    return rec;
+  }
+
+  start(direction, onInterim, onFinal, onError) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      if (isIPadOrIOS()) {
+        throw new Error('お使いのブラウザでは音声認識APIが利用できません。iPad/iPhoneでは「Safari」をご利用いただくか、Gemini Liveモードをご利用ください。');
+      }
+      throw new Error('ブラウザの音声認識 (Web Speech API) が利用できません。Google Chrome または Microsoft Edge をご利用ください。');
+    }
+
+    this.direction = direction;
+    this.onInterimCallback = onInterim;
+    this.onFinalCallback = onFinal;
+    this.onErrorCallback = onError;
+    this.isPaused = false;
     this.isListening = true;
+
+    clearTimeout(this.restartTimer);
+    if (this.recognition) {
+      try { this.recognition.abort(); } catch (e) {}
+    }
+    this.recognition = this._initRecognition();
+    if (this.recognition) {
+      this.recognition.start();
+    }
   }
 
   pause() {
     this.isPaused = true;
+    clearTimeout(this.restartTimer);
     if (this.recognition) {
       try { this.recognition.stop(); } catch (e) {}
     }
@@ -1289,6 +1477,7 @@ class WebSpeechService {
   stop() {
     this.isListening = false;
     this.isPaused = false;
+    clearTimeout(this.restartTimer);
     if (this.recognition) {
       try {
         this.recognition.stop();
@@ -1297,8 +1486,6 @@ class WebSpeechService {
     }
   }
 }
-
-// ==========================================
 // 4. Gemini Live WebSocket Client
 // ==========================================
 class GeminiLiveClient {
@@ -1314,6 +1501,7 @@ class GeminiLiveClient {
     this.isSetupComplete = false;
     this.isReconnecting = false;
     this.chunkQueue = [];
+    this.systemInstruction = null;
 
     this._connectResolve = null;
     this._connectReject = null;
@@ -1344,11 +1532,12 @@ class GeminiLiveClient {
     return model.startsWith('models/') ? model : `models/${model}`;
   }
 
-  connect(apiKey, direction, modelName) {
+  connect(apiKey, direction, modelName, systemInstruction = null) {
     return new Promise((resolve, reject) => {
       this.apiKey = apiKey;
       this.direction = direction;
       this.modelName = this._normalizeModelName(modelName);
+      this.systemInstruction = systemInstruction || DEFAULT_SYSTEM_INSTRUCTION;
       this.isSetupComplete = false;
       this.isConnected = false;
       this.chunkQueue = [];
@@ -1462,7 +1651,7 @@ class GeminiLiveClient {
     } catch (e) {}
 
     try {
-      await this.connect(this.apiKey, this.direction, this.modelName);
+      await this.connect(this.apiKey, this.direction, this.modelName, this.systemInstruction);
       this.isReconnecting = false;
     } catch (err) {
       this.isReconnecting = false;
@@ -1511,6 +1700,12 @@ class GeminiLiveClient {
   _dispatchChunk(base64Data) {
     const payload = {
       realtimeInput: {
+        mediaChunks: [
+          {
+            mimeType: 'audio/pcm;rate=16000',
+            data: base64Data
+          }
+        ],
         audio: {
           data: base64Data,
           mimeType: 'audio/pcm;rate=16000'
@@ -1530,9 +1725,18 @@ class GeminiLiveClient {
       languageCodes = ['ja-JP'];
     } else if (this.direction === 'en-to-ja') {
       languageCodes = ['en-US'];
+    } else if (this.direction === 'bn-to-ja') {
+      // ベンガル語話者は英語を混じえて話すため英語もバインド
+      languageCodes = ['bn-BD', 'bn-IN', 'en-US'];
+    } else if (this.direction === 'hi-to-ja') {
+      // ヒンディー語話者は英語を混じえて話すため英語もバインド
+      languageCodes = ['hi-IN', 'en-US'];
     } else {
-      languageCodes = [];
+      // 自動切替 (日本語、英語、ベンガル語、ヒンディー語の4言語同時自動認識)
+      languageCodes = ['ja-JP', 'en-US', 'bn-BD', 'bn-IN', 'hi-IN'];
     }
+
+    const customInstruction = this.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION;
 
     const setupPayload = {
       setup: {
@@ -1540,13 +1744,20 @@ class GeminiLiveClient {
         generationConfig: {
           responseModalities: ['TEXT']
         },
+        systemInstruction: {
+          parts: [
+            {
+              text: customInstruction
+            }
+          ]
+        },
         inputAudioTranscription: {
           languageCodes: languageCodes
         }
       }
     };
 
-    this.log('info', `Setup送信: ${JSON.stringify(setupPayload)}`);
+    this.log('info', `Setup送信 (言語指定: ${languageCodes.join(', ')} | customInstruction適用): ${JSON.stringify(setupPayload)}`);
     this.ws.send(JSON.stringify(setupPayload));
   }
 
@@ -1667,18 +1878,40 @@ class TranslationService {
     } else if (direction === 'en-to-ja') {
       srcLang = 'en';
       targetLang = 'ja';
+    } else if (direction === 'bn-to-ja') {
+      srcLang = 'bn';
+      targetLang = 'ja'; // ベンガル語 ➔ 日本語の一方向翻訳
+    } else if (direction === 'hi-to-ja') {
+      srcLang = 'hi';
+      targetLang = 'ja'; // ヒンディー語 ➔ 日本語の一方向翻訳
     } else {
-      const hasJapanese = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text);
-      srcLang = hasJapanese ? 'ja' : 'en';
-      targetLang = hasJapanese ? 'en' : 'ja';
+      // 4言語自動切替 (日 ➔ 英 / 英・ベンガル・ヒンディー ➔ 日)
+      srcLang = detectLanguage4(text);
+      if (srcLang === 'ja') {
+        targetLang = 'en'; // 日本語発話は国際監査共通語の英語へ翻訳
+      } else {
+        targetLang = 'ja'; // 英語・ベンガル語・ヒンディー語発話（混在含む）は日本語へ一方向翻訳
+      }
     }
+
+    const langNames = {
+      ja: 'Japanese',
+      en: 'English',
+      bn: 'Bengali (বাংলা)',
+      hi: 'Hindi (हिन्दी)'
+    };
+    const srcName = langNames[srcLang] || 'the source language';
+    const targetName = langNames[targetLang] || 'Japanese';
 
     const domainHint = category ? ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate technical terminology.` : '';
     const prompt = `You are a professional simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n`
-                 + `Translate the following text from ${srcLang === 'ja' ? 'Japanese' : 'English'} into fluent, accurate ${targetLang === 'ja' ? 'Japanese' : 'English'}.\n`
-                 + `Strict requirements:\n`
+                 + `Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n`
+                 + `Translate the following text from ${srcName} into fluent, natural, and accurate ${targetName}.\n`
+                 + `STRICT CONSTRAINTS:\n`
                  + `1. Return ONLY the direct translation.\n`
-                 + `2. Do not include quotes, explanations, prefixes, or notes.\n\n`
+                 + `2. Do not include quotes, explanations, language labels, prefixes, or notes.\n`
+                 + `3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n`
+                 + `4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n\n`
                  + `Text:\n${text}`;
 
     // Layer 1: Gemini REST API (Cascade Fallback)
@@ -1959,7 +2192,7 @@ class StreamSentenceSplitter {
 
     while (true) {
       // 1. 文末記号 ([.?!。！？]) ＋ スペース ＋ 次の文の開始文字 を検出
-      const m = remaining.match(/^([\s\S]*?[.?!。！？])(?:\s+([A-Z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff][\s\S]*)|$)/);
+      const m = remaining.match(/^([\s\S]*?[.?!。！？\u0964\u0965])(?:\s+([A-Z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u0900-\u097f\u0980-\u09ff][\s\S]*)|$)/);
       if (m) {
         const sentence = m[1].trim();
         const nextPart = m[2];
@@ -2074,7 +2307,17 @@ class App {
     this._checkHashConfig();
     this._updateUIState();
 
-    this.log('info', '初期化完了 (v2.6.0)。確定翻訳の一元Googleドキュメント同期機能が有効です。');
+    if (isIPadOrIOS()) {
+      this.log('info', '📱 iPadOS / iOS 環境を検出しました。Web Audio 即時アンロック＆最適化マイク設定を適用しました。');
+      if (this.elSelectAudioSource) {
+        const displayOption = this.elSelectAudioSource.querySelector('option[value="display"]');
+        if (displayOption) {
+          displayOption.disabled = true;
+          displayOption.textContent = 'タブ・PC音声 (PCのみ・iPad非対応)';
+        }
+      }
+    }
+    this.log('info', '初期化完了 (v2.8.0)。SRF言語自動認識 ＆ iPad対応が有効です。');
   }
 
   log(type, message) {
@@ -2135,6 +2378,8 @@ class App {
     this.elBtnToggleKeyVis = document.getElementById('btn-toggle-key-vis');
     this.elSelectEngineMode = document.getElementById('select-engine-mode');
     this.elSelectLiveModel = document.getElementById('select-live-model');
+    this.elInputSystemInstruction = document.getElementById('input-system-instruction');
+    this.elBtnResetInstruction = document.getElementById('btn-reset-instruction');
     this.elInputGasUrl = document.getElementById('input-gas-url');
     this.elInputGasToken = document.getElementById('input-gas-token');
     this.elBtnTestGas = document.getElementById('btn-test-gas');
@@ -2164,6 +2409,8 @@ class App {
     this.gain = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAIN, '2.5');
     this.engineMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(ConfigManager.STORAGE_KEYS.LIVE_MODEL, 'models/gemini-3.5-transcribe-live');
+    this.systemInstruction = ConfigManager.get(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
+    if (this.elInputSystemInstruction) this.elInputSystemInstruction.value = this.systemInstruction;
     this.autoSave = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUTO_SAVE, 'false') === 'true';
     this.docMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.DOC_MODE, 'new');
     this.folderId = ConfigManager.get(ConfigManager.STORAGE_KEYS.FOLDER_ID, '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f');
@@ -2174,6 +2421,10 @@ class App {
     this.elInputApiKey.value = this.apiKey;
     this.elInputGasUrl.value = this.gasUrl;
     this.elInputGasToken.value = this.gasToken;
+    if (isIPadOrIOS() && this.audioSource === 'display') {
+      this.audioSource = 'mic';
+      ConfigManager.set(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, 'mic');
+    }
     if (this.elSelectAudioSource) this.elSelectAudioSource.value = this.audioSource;
     this.elSelectDirection.value = this.direction;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
@@ -2195,7 +2446,23 @@ class App {
   }
 
   _bindEvents() {
-    this.elBtnToggleRecord.addEventListener('click', () => this.toggleRecording());
+    this.elBtnToggleRecord.addEventListener('click', () => {
+      // iPad/iOS Web Audio 即時同期アンロック
+      this.audioService.unlockContext();
+      this.toggleRecording();
+    });
+
+    // 画面初回タッチでAudioContext先行アンロック
+    const unlockAudioHandler = () => {
+      try {
+        this.audioService.unlockContext();
+      } catch (e) {}
+    };
+    document.addEventListener('touchstart', unlockAudioHandler, { once: true, passive: true });
+    document.addEventListener('click', unlockAudioHandler, { once: true, passive: true });
+
+    // QRスキャン後ハッシュ変更時の自動リロード
+    window.addEventListener('hashchange', () => this._checkHashConfig());
     this.elBtnPauseRecord.addEventListener('click', () => this.togglePause());
 
     if (this.elSelectAudioSource) {
@@ -2280,7 +2547,7 @@ class App {
       this.elDiagLogContainer.style.display = isHidden ? 'block' : 'none';
     });
 
-    // Modal Handlers (with body scroll lock for mobile/smartphones)
+    // Modal Handlers (スマホ・iPadスクロール対応)
     this.elBtnSettings.addEventListener('click', () => this._openSettingsModal());
     this.elBtnCloseModal.addEventListener('click', () => this._closeSettingsModal());
     this.elModal.addEventListener('click', (e) => {
@@ -2302,6 +2569,15 @@ class App {
       }
     });
 
+    if (this.elBtnResetInstruction) {
+      this.elBtnResetInstruction.addEventListener('click', () => {
+        if (this.elInputSystemInstruction) {
+          this.elInputSystemInstruction.value = DEFAULT_SYSTEM_INSTRUCTION;
+          this.showToast('systemInstruction を初期値にリセットしました。', 'info');
+        }
+      });
+    }
+
     this.elBtnSaveSettings.addEventListener('click', () => {
       this.apiKey = this.elInputApiKey.value.trim();
       this.gasUrl = this.elInputGasUrl.value.trim();
@@ -2314,6 +2590,10 @@ class App {
         this.audioService.setGain(this.gain);
       }
       this.liveModel = this.elSelectLiveModel.value;
+      if (this.elInputSystemInstruction) {
+        this.systemInstruction = this.elInputSystemInstruction.value.trim() || DEFAULT_SYSTEM_INSTRUCTION;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, this.systemInstruction);
+      }
       if (this.elInputDefaultFolderId) {
         this.folderId = GasStorageClient.extractFolderId(this.elInputDefaultFolderId.value.trim()) || '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f';
         ConfigManager.set(ConfigManager.STORAGE_KEYS.FOLDER_ID, this.folderId);
@@ -2346,7 +2626,7 @@ class App {
         const res = await GasStorageClient.ping(url, this.elInputGasToken.value.trim());
         if (res.status === 'ok' || res.status === 'success') {
           const authNote = res.authRequired ? ' (認証保護あり)' : '';
-          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.6.0'})${authNote}`;
+          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.8.0'})${authNote}`;
           this.elGasTestResult.className = 'test-result-text success';
           this.log('success', `GAS Web App 疎通確認完了: ${url}`);
         } else {
@@ -2454,7 +2734,7 @@ class App {
       if (this.engineMode === 'auto' || this.engineMode === 'gemini-live') {
         try {
           this.log('info', 'Gemini Live WebSocket へ接続試行中...');
-          await this.geminiClient.connect(this.apiKey, this.direction, this.liveModel);
+          await this.geminiClient.connect(this.apiKey, this.direction, this.liveModel, this.systemInstruction);
 
           const isDisplay = this.audioSource === 'display';
           this.log('info', isDisplay ? '🖥️ タブ・PC音声キャプチャ開始 (16kHz PCM)...' : '🎤 マイク音声取得開始 (Anti-Aliased 16kHz)...');
@@ -2635,15 +2915,22 @@ class App {
     const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
     const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    const hasJa = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(finalText);
-    const initialSpeaker = hasJa ? ROLES[0] : ROLES[1];
+    // 4言語（日本語・英語・ベンガル語・ヒンディー語）の自動検出
+    const detectedLang = detectLanguage4(finalText, langCode);
+
+    // 話者初期自動割り当て: 日本語は監査員(Auditor)、英語・ベンガル語・ヒンディー語はヤード担当者(Yard Rep)
+    let initialSpeaker = ROLES[1]; // Yard Rep
+    if (detectedLang === 'ja') {
+      initialSpeaker = ROLES[0]; // Auditor
+    }
+
     const engineLabel = this.activeEngine === 'gemini-live' ? 'Gemini Live' : 'Web Speech';
 
     const record = {
       id: recordId,
       time: timestamp,
       speaker: initialSpeaker,
-      speakerLang: langCode || (hasJa ? 'ja' : 'en'),
+      speakerLang: detectedLang,
       originalText: finalText,
       translatedText: '',
       engine: engineLabel,
@@ -2690,6 +2977,7 @@ class App {
         <div class="meta-left">
           <span>🕒 ${this._escapeHTML(item.time)}</span>
           <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="クリックで話者を変更">${this._escapeHTML(item.speaker || '発話')}</span>
+          <span class="tag lang-badge lang-${item.speakerLang}">${getLanguageBadge(item.speakerLang)}</span>
           <span class="tag engine">${this._escapeHTML(item.engine || 'Gemini')}</span>
         </div>
         <div class="card-actions">
@@ -2722,13 +3010,16 @@ class App {
     `;
 
     card.addEventListener('click', (e) => {
-      const a = e.target.dataset?.a;
+      const btn = e.target.closest('[data-a]');
+      const a = btn ? btn.dataset.a : null;
 
       // Copy Single Card
       if (a === 'copy') {
         const textToCopy = `[${item.time}] (${item.speaker})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
-        navigator.clipboard.writeText(textToCopy).then(() => {
+        this.copyToClipboard(textToCopy).then(() => {
           this.showToast('カード内容をコピーしました。', 'info');
+        }).catch((err) => {
+          this.showToast('コピーに失敗しました: ' + err.message, 'error');
         });
         return;
       }
@@ -2800,7 +3091,8 @@ class App {
       }
 
       // Speaker Tag Click (Cycle Roles)
-      if (e.target.id === `${item.id}_spk`) {
+      const spkTarget = e.target.closest('.tag.speaker');
+      if (spkTarget && spkTarget.id === `${item.id}_spk`) {
         let currIdx = ROLES.indexOf(item.speaker);
         item.speaker = ROLES[(currIdx + 1 + ROLES.length) % ROLES.length];
         e.target.textContent = item.speaker;
@@ -2982,6 +3274,62 @@ class App {
     }
   }
 
+  _openSettingsModal() {
+    this.elModal.style.display = 'flex';
+    document.body.classList.add('modal-open');
+    setTimeout(() => {
+      if (this.elInputApiKey) this.elInputApiKey.focus();
+    }, 50);
+  }
+
+  _closeSettingsModal() {
+    this.elModal.style.display = 'none';
+    document.body.classList.remove('modal-open');
+  }
+
+  _closeQrModal() {
+    this.elQrModal.style.display = 'none';
+    document.body.classList.remove('modal-open');
+  }
+
+  copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(() => {
+        return this._fallbackCopyText(text);
+      });
+    }
+    return this._fallbackCopyText(text);
+  }
+
+  _fallbackCopyText(text) {
+    return new Promise((resolve, reject) => {
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.top = '0';
+        textArea.style.left = '0';
+        textArea.style.width = '2em';
+        textArea.style.height = '2em';
+        textArea.style.padding = '0';
+        textArea.style.border = 'none';
+        textArea.style.outline = 'none';
+        textArea.style.boxShadow = 'none';
+        textArea.style.background = 'transparent';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        textArea.setSelectionRange(0, 99999);
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (successful) resolve();
+        else reject(new Error('execCommand copy failed'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   copyAllTranscripts() {
     if (this.records.length === 0) {
       this.showToast('コピーする履歴がありません。', 'warning');
@@ -2990,13 +3338,16 @@ class App {
 
     const clean = (s) => String(s || '').replace(/\n/g, '<br>').replace(/\|/g, '\\|');
     let md = `# 現地監査 議事録 (${this.category})\n\n`;
-    md += `| 時刻 | 話者 | 原文 | 訳文 |\n|---|---|---|---|\n`;
+    md += `| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n`;
     for (const t of this.records) {
-      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
+      const langName = getLanguageDisplayName(t.speakerLang);
+      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(langName)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
     }
 
-    navigator.clipboard.writeText(md).then(() => {
+    this.copyToClipboard(md).then(() => {
       this.showToast('全履歴をMarkdown表形式でコピーしました。', 'info');
+    }).catch((err) => {
+      this.showToast('コピーに失敗しました: ' + err.message, 'error');
     });
   }
 
@@ -3063,24 +3414,6 @@ class App {
     }
   }
 
-  _openSettingsModal() {
-    this.elModal.style.display = 'flex';
-    document.body.classList.add('modal-open');
-    setTimeout(() => {
-      if (this.elInputApiKey) this.elInputApiKey.focus();
-    }, 50);
-  }
-
-  _closeSettingsModal() {
-    this.elModal.style.display = 'none';
-    document.body.classList.remove('modal-open');
-  }
-
-  _closeQrModal() {
-    this.elQrModal.style.display = 'none';
-    document.body.classList.remove('modal-open');
-  }
-
   _openQrModal() {
     if (!this.apiKey && !this.gasUrl) {
       this.showToast('先に「⚙️ 設定」でGemini APIキーまたはGAS設定を入力してください。', 'warning');
@@ -3097,6 +3430,7 @@ class App {
       gain: this.gain || '2.5',
       engineMode: this.engineMode || 'auto',
       liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
+      systemInstruction: this.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
       autoSave: this.autoSave,
       docMode: this.docMode || 'new',
       lastDocId: this.lastDocId || ''
@@ -3145,6 +3479,7 @@ class App {
         if (config.gain) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, config.gain);
         if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
         if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
+        if (config.systemInstruction) ConfigManager.set(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, config.systemInstruction);
         if (config.autoSave !== undefined) ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(config.autoSave));
         if (config.docMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, config.docMode);
         if (config.lastDocId) ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, config.lastDocId);
