@@ -1,4 +1,4 @@
-/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.5.0) */
+/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.9.0 - 4-Language & Mobile/iPad Optimized) */
 
 :root {
   --primary: #1b365d;
@@ -24,6 +24,12 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+}
+
+
+button, select, input, textarea, .tag.speaker, .small-btn {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 * {
@@ -570,6 +576,37 @@ body {
   border: 1px solid rgba(42, 82, 190, 0.2);
 }
 
+.tag.lang-badge {
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  user-select: none;
+  background: #fdf2e9;
+  color: #b9770e;
+  border: 1px solid #f5cba7;
+}
+.tag.lang-badge.lang-ja {
+  background: #eaf2f8;
+  color: #2471a3;
+  border-color: #aed6f1;
+}
+.tag.lang-badge.lang-en {
+  background: #ebf5fb;
+  color: #2e86c1;
+  border-color: #aed6f1;
+}
+.tag.lang-badge.lang-bn {
+  background: #e8f8f5;
+  color: #117a65;
+  border-color: #a3e4d7;
+}
+.tag.lang-badge.lang-hi {
+  background: #fef5e7;
+  color: #ba4a00;
+  border-color: #f5cba7;
+}
+
 .card-actions {
   display: flex;
   align-items: center;
@@ -775,6 +812,19 @@ body {
   overscroll-behavior: contain;
 }
 
+.label-with-action {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.textarea-instruction {
+  resize: vertical;
+  min-height: 85px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .form-group {
   display: flex;
   flex-direction: column;
@@ -869,33 +919,9 @@ body.modal-open {
   .app-wrapper {
     padding: 10px 12px 30px;
   }
-  .app-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
+  .select-input, .text-input, .edit textarea {
+    font-size: 16px; /* iOS auto-zoom prevention */
   }
-  .header-left .logo-badge {
-    justify-content: space-between;
-  }
-  .control-row.main-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .action-spacer {
-    display: none;
-  }
-  .control-group.direction-group {
-    justify-content: space-between;
-  }
-  .doc-settings-row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .body-grid, .edit-grid {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-  /* Mobile Modal Enhancements */
   .modal-overlay {
     padding: 8px 8px 16px;
     align-items: flex-end;
@@ -926,6 +952,32 @@ body.modal-open {
     max-height: calc(100dvh - 30px);
   }
 
+  .app-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .header-left .logo-badge {
+    justify-content: space-between;
+  }
+  .control-row.main-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .action-spacer {
+    display: none;
+  }
+  .control-group.direction-group {
+    justify-content: space-between;
+  }
+  .doc-settings-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .body-grid, .edit-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
 }
 
 /* QR Code Modal Styles */
