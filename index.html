@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Bilingual Transcriber - 現地監査音声認識・翻訳システム</title>
-  <meta name="description" content="Gemini Live API および Web Speech API に対応した現地監査音声認識・リアルタイム日英英日双方向翻訳Webアプリ">
-  <link rel="stylesheet" href="style.css?v=2.8.0">
+  <meta name="description" content="Gemini Live API SRF言語自動認識) および Web Speech API に対応した現地監査音声認識・リアルタイム双方向翻訳Webアプリ">
+  <link rel="stylesheet" href="style.css?v=2.9.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
@@ -55,10 +55,12 @@
           </div>
           <div class="control-group direction-group">
             <label for="select-direction" class="control-label">翻訳:</label>
-            <select id="select-direction" class="select-input">
-              <option value="auto" selected>自動切替 (英 ⇄ 日)</option>
+            <select id="select-direction" class="select-input" title="翻訳方向 (自動切替時は4言語を自動判別)">
+              <option value="auto" selected>自動切替 (日 ⇄ 英・ベンガル・ヒンディー ➔ 日)</option>
               <option value="ja-to-en">固定: 日本語 ➔ 英語</option>
               <option value="en-to-ja">固定: 英語 ➔ 日本語</option>
+              <option value="bn-to-ja">固定: ベンガル語 ➔ 日本語</option>
+              <option value="hi-to-ja">固定: ヒンディー語 ➔ 日本語</option>
             </select>
           </div>
 
@@ -169,7 +171,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v2.8.0 - iPad対応)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v2.9.0 - 4言語自動認識対応)。</div>
           </div>
         </div>
       </section>
@@ -213,6 +215,19 @@
             <select id="select-live-model" class="select-input">
               <option value="models/gemini-3.5-transcribe-live" selected>models/gemini-3.5-transcribe-live</option>
             </select>
+          </div>
+
+          <div class="form-group">
+            <div class="label-with-action">
+              <label for="input-system-instruction">
+                Gemini Live systemInstruction (プロンプト指示文)
+              </label>
+              <button type="button" id="btn-reset-instruction" class="btn btn-sm btn-ghost" title="初期設定のプロンプトに戻す">初期値に戻す</button>
+            </div>
+            <textarea id="input-system-instruction" class="text-input textarea-instruction" rows="4" placeholder="Gemini Live 音声認識エンジンへのシステム指示文..."></textarea>
+            <small class="form-help">
+              Gemini Live API の文字起こしエンジンへ直接適用されるシステム指示文です。認識対象言語の優先度や専門用語の表記ルールなどを任意にカスタマイズできます。
+            </small>
           </div>
 
           <div class="form-group">
@@ -306,7 +321,7 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=2.8.0"></script>
+  <script src="app.js?v=2.9.0"></script>
 </body>
 </html>
 
