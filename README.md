@@ -1,4 +1,4 @@
-# Bilingual Transcriber - 現地監査音声認識・翻訳システム (v2.9.0)
+# Bilingual Transcriber - 現地監査音声認識・翻訳システム (v2.8.0)
 
 Google Gemini Live API (`models/gemini-3.5-transcribe-live`) およびブラウザ標準音声認識（Web Speech API）に対応した、低遅延ストリーミング双方向音声翻訳・Googleドキュメント一元同期保存Webアプリケーションです。
 
@@ -6,7 +6,7 @@ Google Gemini Live API (`models/gemini-3.5-transcribe-live`) およびブラウ�
 
 ---
 
-## 🚀 主な機能・特徴 (v2.9.0)
+## 🚀 主な機能・特徴 (v2.8.0)
 
 ### 1. 4言語（日・英・ベンガル・ヒンディー）同時自動認識・翻訳
 - **韓国語・スワヒリ語等の誤認識・ハルシネーション防止**:
