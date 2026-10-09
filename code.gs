@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Bilingual Translator
- * Version: 2.6.0 (Unified Google Document Sync & Production Hardened)
+ * Version: 2.8.0 (4-Language Recognition & Translation Support: JA, EN, BN, HI)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および バックアップ翻訳 (action: 'translate')
@@ -78,12 +78,23 @@ function doPost(e) {
         return createJsonResponse({ status: 'error', message: '翻訳対象テキストが空です。' });
       }
 
-      var hasJapanese = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text);
       var srcLang = payload.srcLang ? String(payload.srcLang).trim().toLowerCase() : '';
       var targetLang = payload.targetLang ? String(payload.targetLang).trim().toLowerCase() : '';
 
-      if (!srcLang || srcLang === 'auto') srcLang = hasJapanese ? 'ja' : 'en';
-      if (!targetLang || targetLang === 'auto') targetLang = (srcLang === 'ja') ? 'en' : 'ja';
+      if (!srcLang || srcLang === 'auto') {
+        if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text)) {
+          srcLang = 'ja';
+        } else if (/[\u0980-\u09FF]/.test(text)) {
+          srcLang = 'bn';
+        } else if (/[\u0900-\u097F]/.test(text)) {
+          srcLang = 'hi';
+        } else {
+          srcLang = 'en';
+        }
+      }
+      if (!targetLang || targetLang === 'auto') {
+        targetLang = (srcLang === 'ja') ? 'en' : 'ja';
+      }
 
       try {
         var translated = LanguageApp.translate(text, srcLang, targetLang);
@@ -239,9 +250,15 @@ function handleSaveTranscript(payload, config) {
   body.setMarginTop(40);
   body.setMarginBottom(40);
 
-  var dirLabel = (direction === 'AUTO' || direction === 'auto')
-    ? '自動切替 (英⇄日)'
-    : ((direction === 'ja-to-en' || direction === 'JA_TO_EN') ? '日本語 ➔ 英語' : '英語 ➔ 日本語');
+  var dirMap = {
+    'auto': '自動切替 (日⇄英・ベンガル・ヒンディー➔日)',
+    'ja-to-en': '日本語 ➔ 英語',
+    'en-to-ja': '英語 ➔ 日本語',
+    'bn-to-ja': 'ベンガル語 ➔ 日本語',
+    'hi-to-ja': 'ヒンディー語 ➔ 日本語'
+  };
+  var dirKey = String(direction || 'auto').toLowerCase();
+  var dirLabel = dirMap[dirKey] || '自動切替 (4言語対応)';
 
   if (isNew || saveMode === 'sync') {
     // 【ひとつのGoogleドキュメント同期保存】: 既存内容をクリアし、最新の確定翻訳全件で完全同期
