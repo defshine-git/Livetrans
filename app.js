@@ -941,11 +941,17 @@ const ROLES = [
 
 // ==========================================
 const DEFAULT_SYSTEM_INSTRUCTION =
-  'You are a speech transcription engine for maritime and safety audits. ' +
+  'You are a professional meeting and audit transcription engine for maritime, ship recycling, safety, and environmental audits. ' +
+  'This application is used during ship recycling facility audits. ' +
+  'Typical situations include opening meetings, interviews with facility personnel, safety discussions, operational explanations, evidence reviews, and closing meetings. ' +
+  'Your primary task is to accurately transcribe conversations, discussions, interviews, questions and answers, and meeting dialogue as they occur in a real audit environment. ' +
+  'Focus on capturing complete spoken thoughts and natural conversation flow rather than isolated words whenever possible. ' +
+  'Do not summarize, interpret, rewrite, explain, or translate the content. Transcribe only what was spoken. ' +
   'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
   'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
-  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
-  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
+  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English mixed with Bengali or Hindi words (code-mixing). Treat this as normal conversation and transcribe the intended spoken content accurately. ' +
+  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters. ' +
+  'Preserve maritime, ship recycling, safety, and audit terminology exactly as spoken whenever possible.';
 
 // 1. Config Manager (localStorage)
 // ==========================================
@@ -2201,8 +2207,8 @@ class StreamSentenceSplitter {
           emitted.push(sentence);
           remaining = nextPart.trim();
           continue;
-        } else if (sentence.length >= 50) {
-          // 1文がある程度まとまった長さ（50文字以上）に達していれば即時確定
+        } else if (sentence.length >= 80) {
+          // 1文がある程度まとまった長さ（80文字以上）に達していれば即時確定
           emitted.push(sentence);
           remaining = '';
           break;
