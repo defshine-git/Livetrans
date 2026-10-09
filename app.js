@@ -2248,7 +2248,7 @@ class StreamSentenceSplitter {
           this.confirmedText = currentFullText;
           if (onChunk) onChunk(chunk);
         }
-      }, 900);
+      }, 1500);
     }
 
     return remaining;
