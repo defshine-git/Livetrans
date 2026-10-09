@@ -2280,20 +2280,15 @@ class App {
       this.elDiagLogContainer.style.display = isHidden ? 'block' : 'none';
     });
 
-    // Modal
-    this.elBtnSettings.addEventListener('click', () => {
-      this.elModal.style.display = 'flex';
-      this.elInputApiKey.focus();
-    });
-    this.elBtnCloseModal.addEventListener('click', () => {
-      this.elModal.style.display = 'none';
-    });
+    // Modal Handlers (with body scroll lock for mobile/smartphones)
+    this.elBtnSettings.addEventListener('click', () => this._openSettingsModal());
+    this.elBtnCloseModal.addEventListener('click', () => this._closeSettingsModal());
     this.elModal.addEventListener('click', (e) => {
-      if (e.target === this.elModal) this.elModal.style.display = 'none';
+      if (e.target === this.elModal) this._closeSettingsModal();
     });
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.elModal.style.display === 'flex') {
-        this.elModal.style.display = 'none';
+        this._closeSettingsModal();
       }
     });
 
@@ -2333,7 +2328,7 @@ class App {
       ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, this.liveModel);
       ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(this.autoSave));
 
-      this.elModal.style.display = 'none';
+      this._closeSettingsModal();
       this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}`);
       this.showToast('設定を保存しました。', 'success');
     });
@@ -2391,23 +2386,19 @@ class App {
       this.elBtnOpenQr.addEventListener('click', () => this._openQrModal());
     }
     if (this.elBtnCloseQrModal) {
-      this.elBtnCloseQrModal.addEventListener('click', () => {
-        this.elQrModal.style.display = 'none';
-      });
+      this.elBtnCloseQrModal.addEventListener('click', () => this._closeQrModal());
     }
     if (this.elBtnDoneQrModal) {
-      this.elBtnDoneQrModal.addEventListener('click', () => {
-        this.elQrModal.style.display = 'none';
-      });
+      this.elBtnDoneQrModal.addEventListener('click', () => this._closeQrModal());
     }
     if (this.elQrModal) {
       this.elQrModal.addEventListener('click', (e) => {
-        if (e.target === this.elQrModal) this.elQrModal.style.display = 'none';
+        if (e.target === this.elQrModal) this._closeQrModal();
       });
     }
     window.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.elQrModal && this.elQrModal.style.display === 'flex') {
-        this.elQrModal.style.display = 'none';
+        this._closeQrModal();
       }
     });
     if (this.elBtnCopyShareUrl) {
@@ -2450,7 +2441,7 @@ class App {
 
     if (!this.apiKey) {
       this.showToast('Gemini API キーを設定してください。', 'warning');
-      this.elModal.style.display = 'flex';
+      this._openSettingsModal();
       return;
     }
 
@@ -2857,7 +2848,7 @@ class App {
     if (!this.gasUrl) {
       if (!isAuto) {
         this.showToast('GAS Web App URLが未設定です。設定画面から登録してください。', 'warning');
-        this.elModal.style.display = 'flex';
+        this._openSettingsModal();
       }
       return;
     }
@@ -3072,10 +3063,28 @@ class App {
     }
   }
 
+  _openSettingsModal() {
+    this.elModal.style.display = 'flex';
+    document.body.classList.add('modal-open');
+    setTimeout(() => {
+      if (this.elInputApiKey) this.elInputApiKey.focus();
+    }, 50);
+  }
+
+  _closeSettingsModal() {
+    this.elModal.style.display = 'none';
+    document.body.classList.remove('modal-open');
+  }
+
+  _closeQrModal() {
+    this.elQrModal.style.display = 'none';
+    document.body.classList.remove('modal-open');
+  }
+
   _openQrModal() {
     if (!this.apiKey && !this.gasUrl) {
       this.showToast('先に「⚙️ 設定」でGemini APIキーまたはGAS設定を入力してください。', 'warning');
-      this.elModal.style.display = 'flex';
+      this._openSettingsModal();
       return;
     }
 
@@ -3112,6 +3121,7 @@ class App {
       }
 
       this.elQrModal.style.display = 'flex';
+      document.body.classList.add('modal-open');
       this.log('info', 'スマホ連携用QRコードを表示しました。');
     } catch (err) {
       console.error('Failed to generate QR code:', err);
