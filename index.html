@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Bilingual Transcriber - 現地監査音声認識・翻訳システム</title>
   <meta name="description" content="Gemini Live API (日本語・英語・ベンガル語・ヒンディー語 4言語同時自動認識) および Web Speech API に対応した現地監査音声認識・長文文脈翻訳・任意範囲サマリーWebアプリ">
-  <link rel="stylesheet" href="style.css?v=3.0.0">
+  <link rel="stylesheet" href="style.css?v=3.0.2">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
@@ -271,7 +271,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.0.0 - メジャーリリース・最適化監査済版)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.0.2 - メジャーリリース・最適化監査済版)。</div>
           </div>
         </div>
       </section>
@@ -398,11 +398,16 @@
         </div>
         <div class="modal-body qr-modal-body">
           <p class="qr-instruction">
-            スマホのカメラまたはQRリーダーでスキャンすると、PCで設定した<strong>Gemini APIキー</strong>、<strong>GAS設定</strong>、<strong>翻訳モード</strong>が自動的にスマホへ同期されます。
+            スマホのカメラでスキャンすると、PCの<strong>Gemini APIキー</strong>、<strong>GAS設定</strong>、<strong>各種モード設定</strong>を軽量圧縮フォーマットで素早く同期します。
           </p>
           <div class="qr-canvas-wrapper">
             <canvas id="qr-canvas"></canvas>
           </div>
+          <div id="qr-density-meta" class="qr-density-meta"></div>
+          <label class="checkbox-label qr-option-label">
+            <input type="checkbox" id="check-qr-include-prompts">
+            自由記述プロンプト（systemInstruction / 追記文）もQRに含める（※QRが細かくなります）
+          </label>
           <div class="qr-warning-note">
             🔒 <strong>安全設計</strong>: 設定値はURLフラグメント（#）経由で渡されるため、APIキー情報が外部サーバーへ送信されることはありません。
           </div>
@@ -421,6 +426,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=3.0.0"></script>
+  <script src="app.js?v=3.0.2"></script>
 </body>
 </html>

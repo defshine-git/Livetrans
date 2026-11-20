@@ -809,9 +809,9 @@ QRCode.QRErrorCorrectLevel = QRErrorCorrectLevel;
 
 QRCode.renderCanvas = function(canvas, text, options) {
     options = options || {};
-    var size = options.size || 240;
-    var margin = options.margin !== undefined ? options.margin : 2;
-    var darkColor = options.dark || '#1F2328';
+    var targetSize = options.size || 280;
+    var margin = options.margin !== undefined ? options.margin : 4;
+    var darkColor = options.dark || '#000000';
     var lightColor = options.light || '#FFFFFF';
 
     var qr = new QRCode(0, QRErrorCorrectLevel.L);
@@ -819,29 +819,34 @@ QRCode.renderCanvas = function(canvas, text, options) {
     qr.make();
 
     var count = qr.getModuleCount();
-    var ctx = canvas.getContext('2d');
-    canvas.width = size;
-    canvas.height = size;
-
     var totalModules = count + margin * 2;
-    var cellSize = size / totalModules;
+    // 整数ピクセル単位で描画し、隣接ドットのにじみ・潰れを完全に防止
+    var cellSize = Math.max(4, Math.ceil(targetSize / totalModules));
+    var actualSize = totalModules * cellSize;
+
+    var ctx = canvas.getContext('2d');
+    canvas.width = actualSize;
+    canvas.height = actualSize;
+    ctx.imageSmoothingEnabled = false;
 
     ctx.fillStyle = lightColor;
-    ctx.fillRect(0, 0, size, size);
+    ctx.fillRect(0, 0, actualSize, actualSize);
 
     ctx.fillStyle = darkColor;
     for (var r = 0; r < count; r++) {
       for (var c = 0; c < count; c++) {
         if (qr.isDark(r, c)) {
-          ctx.fillRect(
-            Math.round((c + margin) * cellSize),
-            Math.round((r + margin) * cellSize),
-            Math.ceil(cellSize),
-            Math.ceil(cellSize)
-          );
+          ctx.fillRect((c + margin) * cellSize, (r + margin) * cellSize, cellSize, cellSize);
         }
       }
     }
+
+    return {
+      version: qr.typeNumber,
+      moduleCount: count,
+      length: text.length,
+      canvasSize: actualSize
+    };
 };
 
 global.QRCode = QRCode;
@@ -849,7 +854,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Bilingual Transcriber
- * Version: 3.0.0 (Refactored, Deduplicated & Audited Release)
+ * Version: 3.0.2 (Refactored, Deduplicated & Audited Release)
  *
  * Modules:
  *  1. Constants & Shared Utilities (Language detection, Base64 UTF-8, Timeout fetch)
@@ -868,7 +873,7 @@ global.QRCode = QRCode;
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.0.2';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -883,10 +888,10 @@ const DEFAULT_SETTINGS = Object.freeze({
 });
 
 const LANGUAGE_META = Object.freeze({
-  ja: { name: '日本語', englishName: 'Japanese', badge: '🇯🇵 日本語' },
-  en: { name: '英語', englishName: 'English', badge: '🇺🇸 英語' },
-  bn: { name: 'ベンガル語', englishName: 'Bengali (বাংলা)', badge: '🇧🇩 ベンガル語' },
-  hi: { name: 'ヒンディー語', englishName: 'Hindi (हिन्दी)', badge: '🇮🇳 ヒンディー語' }
+  ja: { name: '日本語', englishName: 'Japanese', badge: '🇯🇵' },
+  en: { name: '英語', englishName: 'English', badge: '🇺🇸' },
+  bn: { name: 'ベンガル語', englishName: 'Bengali (বাংলা)', badge: '🇧🇩' },
+  hi: { name: 'ヒンディー語', englishName: 'Hindi (हिन्दी)', badge: '🇮🇳' }
 });
 
 const DIRECTION_LANGUAGE_CODES = Object.freeze({
@@ -903,6 +908,13 @@ const ROLES = Object.freeze([
   'Facility (施設側)',
   'Other (その他)'
 ]);
+
+const ROLE_SHORT_LABELS = Object.freeze({
+  'Auditor (監査員)': 'Auditor',
+  'Yard Rep (ヤード担当者)': 'Yard',
+  'Facility (施設側)': 'Facility',
+  'Other (その他)': 'Other'
+});
 
 const DEFAULT_SYSTEM_INSTRUCTION =
   'You are a speech transcription engine for maritime and safety audits. ' +
@@ -956,7 +968,24 @@ function getLanguageDisplayName(langCode) {
 }
 
 function getLanguageBadge(langCode) {
-  return LANGUAGE_META[langCode]?.badge || ('🌐 ' + (langCode || '自動'));
+  return LANGUAGE_META[langCode]?.badge || '🌐';
+}
+
+function getSpeakerShortLabel(speaker) {
+  if (!speaker) return '発話';
+  if (ROLE_SHORT_LABELS[speaker]) return ROLE_SHORT_LABELS[speaker];
+  if (speaker.includes('Yard')) return 'Yard';
+  if (speaker.includes('Auditor')) return 'Auditor';
+  if (speaker.includes('Facility')) return 'Facility';
+  if (speaker.includes('Other')) return 'Other';
+  return speaker;
+}
+
+function getEngineShortLabel(engine) {
+  if (!engine) return 'Live';
+  if (engine.includes('Gemini')) return 'Live';
+  if (engine.includes('Web')) return 'Web';
+  return engine;
 }
 
 function encodeBase64Utf8(str) {
@@ -971,6 +1000,16 @@ function decodeBase64Utf8(b64) {
     .call(binary, (c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
     .join('');
   return decodeURIComponent(percentEncoded);
+}
+
+function encodeBase64UrlUtf8(str) {
+  return encodeBase64Utf8(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decodeBase64UrlUtf8(b64url) {
+  let b64 = String(b64url || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4 !== 0) b64 += '=';
+  return decodeBase64Utf8(b64);
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
@@ -3050,6 +3089,8 @@ class App {
     this.elBtnCloseQrModal = byId('btn-close-qr-modal');
     this.elBtnDoneQrModal = byId('btn-done-qr-modal');
     this.elQrCanvas = byId('qr-canvas');
+    this.elQrDensityMeta = byId('qr-density-meta');
+    this.elCheckQrIncludePrompts = byId('check-qr-include-prompts');
     this.elInputShareUrl = byId('input-share-url');
     this.elBtnCopyShareUrl = byId('btn-copy-share-url');
   }
@@ -3462,6 +3503,7 @@ class App {
 
     // QR Code Modal
     this.elBtnOpenQr?.addEventListener('click', () => this._openQrModal());
+    this.elCheckQrIncludePrompts?.addEventListener('change', () => this._renderQrCode());
     this.elBtnCloseQrModal?.addEventListener('click', () => this._closeQrModal());
     this.elBtnDoneQrModal?.addEventListener('click', () => this._closeQrModal());
     this.elQrModal?.addEventListener('click', (e) => {
@@ -3475,11 +3517,19 @@ class App {
         .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
     });
 
-    // Consolidated Escape key handler for all modals
+    // Close open card action dropdowns when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.card-menu')) {
+        this._closeAllCardMenus();
+      }
+    });
+
+    // Consolidated Escape key handler for all modals & card menus
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       if (this.elModal?.style.display === 'flex') this._closeSettingsModal();
       if (this.elQrModal?.style.display === 'flex') this._closeQrModal();
+      this._closeAllCardMenus();
     });
   }
 
@@ -4072,6 +4122,17 @@ class App {
     );
   }
 
+  _closeAllCardMenus(exceptCard = null) {
+    if (!this.elTranscriptList) return;
+    const openCards = this.elTranscriptList.querySelectorAll('.card.transcript-item.menu-open');
+    openCards.forEach((openCard) => {
+      if (openCard === exceptCard) return;
+      openCard.classList.remove('menu-open');
+      const trigger = openCard.querySelector('.card-menu-btn');
+      if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    });
+  }
+
   _appendSingleCard(item) {
     this.elEmptyState.style.display = 'none';
     this.elRecordCount.textContent = `${this.records.length} 件の発話`;
@@ -4085,20 +4146,27 @@ class App {
       : item.speaker?.includes('Yard')
       ? 'yard'
       : '';
+    const speakerShort = getSpeakerShortLabel(item.speaker);
+    const langFullName = getLanguageDisplayName(item.speakerLang);
+    const engineFull = item.engine || 'Gemini Live';
+    const engineShort = getEngineShortLabel(engineFull);
 
     card.innerHTML = `
       <div class="meta">
         <div class="meta-left">
-          <span>🕒 ${this._escapeHTML(item.time)}</span>
-          <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="クリックで話者を変更">${this._escapeHTML(item.speaker || '発話')}</span>
-          <span id="${item.id}_lang" class="tag lang-badge lang-${item.speakerLang}">${getLanguageBadge(item.speakerLang)}</span>
-          <span class="tag engine">${this._escapeHTML(item.engine || 'Gemini')}</span>
+          <span class="card-time"><span class="time-icon">🕒 </span>${this._escapeHTML(item.time)}</span>
+          <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="${this._escapeHTML(item.speaker || '発話')}（クリックで話者切替）">${this._escapeHTML(speakerShort)}</span>
+          <span id="${item.id}_lang" class="tag lang-badge lang-${item.speakerLang}" title="${this._escapeHTML(langFullName)}">${getLanguageBadge(item.speakerLang)}</span>
+          <span class="tag engine" title="${this._escapeHTML(engineFull)}"><span class="engine-full">${this._escapeHTML(engineFull)}</span><span class="engine-short">${this._escapeHTML(engineShort)}</span></span>
         </div>
-        <div class="card-actions">
-          <button type="button" class="small-btn" data-a="copy" title="このカード内容をコピー">📋</button>
-          <button type="button" class="small-btn" data-a="edit" title="原文・訳文を修正">✏️</button>
-          <button type="button" class="small-btn" data-a="retry" title="再翻訳を実行">🔄</button>
-          <button type="button" class="small-btn" data-a="delete" title="この発話を削除">🗑️</button>
+        <div class="card-actions card-menu">
+          <button type="button" class="small-btn card-menu-btn" data-a="toggle-menu" aria-haspopup="true" aria-expanded="false" title="操作メニュー (コピー・修正・再翻訳・削除)">⋯ ▾</button>
+          <div class="card-menu-dropdown" role="menu">
+            <button type="button" class="card-menu-item" data-a="copy" role="menuitem">📋 コピー</button>
+            <button type="button" class="card-menu-item" data-a="edit" role="menuitem">✏️ 修正</button>
+            <button type="button" class="card-menu-item" data-a="retry" role="menuitem">🔄 再翻訳</button>
+            <button type="button" class="card-menu-item card-menu-item-danger" data-a="delete" role="menuitem">🗑️ 削除</button>
+          </div>
         </div>
       </div>
       <div id="${item.id}_view" class="body-grid">
@@ -4127,7 +4195,17 @@ class App {
       const btn = e.target.closest('[data-a]');
       const action = btn ? btn.dataset.a : null;
 
+      if (action === 'toggle-menu') {
+        e.stopPropagation();
+        const willOpen = !card.classList.contains('menu-open');
+        this._closeAllCardMenus(willOpen ? card : null);
+        card.classList.toggle('menu-open', willOpen);
+        btn.setAttribute('aria-expanded', String(willOpen));
+        return;
+      }
+
       if (action === 'copy') {
+        this._closeAllCardMenus();
         const textToCopy = `[${item.time}] (${item.speaker})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
         this.copyToClipboard(textToCopy)
           .then(() => this.showToast('カード内容をコピーしました。', 'info'))
@@ -4136,6 +4214,7 @@ class App {
       }
 
       if (action === 'edit') {
+        this._closeAllCardMenus();
         // 常に最新の原文・訳文を編集欄へ同期してから開く（翻訳完了後の空欄バグ防止）
         const editOrigEl = document.getElementById(`${item.id}_edit_orig`);
         const editTransEl = document.getElementById(`${item.id}_edit_trans`);
@@ -4169,6 +4248,7 @@ class App {
       }
 
       if (action === 'retry') {
+        this._closeAllCardMenus();
         item.isTranslating = true;
         document.getElementById(`${item.id}_trans`).textContent = '⏳ 再翻訳中...';
         this.hasUnsavedChanges = true;
@@ -4190,6 +4270,7 @@ class App {
       }
 
       if (action === 'delete') {
+        this._closeAllCardMenus();
         if (!confirm('この発話をタイムラインから削除しますか？')) return;
         this.records = this.records.filter((x) => x.id !== item.id);
         card.remove();
@@ -4208,7 +4289,8 @@ class App {
       if (spkTarget && spkTarget.id === `${item.id}_spk`) {
         const currIdx = ROLES.indexOf(item.speaker);
         item.speaker = ROLES[(currIdx + 1 + ROLES.length) % ROLES.length];
-        spkTarget.textContent = item.speaker;
+        spkTarget.textContent = getSpeakerShortLabel(item.speaker);
+        spkTarget.title = `${item.speaker}（クリックで話者切替）`;
         spkTarget.className = 'tag speaker';
         if (item.speaker.includes('Auditor')) spkTarget.classList.add('auditor');
         else if (item.speaker.includes('Yard')) spkTarget.classList.add('yard');
@@ -4244,6 +4326,7 @@ class App {
     if (langEl && record.speakerLang) {
       langEl.className = `tag lang-badge lang-${record.speakerLang}`;
       langEl.textContent = getLanguageBadge(record.speakerLang);
+      langEl.title = getLanguageDisplayName(record.speakerLang);
     }
 
     this.hasUnsavedChanges = true;
@@ -4511,6 +4594,88 @@ class App {
     }
   }
 
+  _buildCompactSharePayload(includeFreePrompts = false) {
+    const compact = {};
+    if (this.apiKey) compact.k = this.apiKey;
+
+    // GAS標準URLはデプロイIDのみ抽出して40文字以上削減
+    if (this.gasUrl) {
+      const m = this.gasUrl.trim().match(/^https:\/\/script\.google\.com\/macros\/s\/([^/]+)\/exec$/);
+      if (m) compact.gd = m[1];
+      else compact.gu = this.gasUrl.trim();
+    }
+    if (this.gasToken) compact.t = this.gasToken;
+
+    // 既定値と異なる設定のみを短縮キーで格納
+    if (this.direction && this.direction !== 'auto') compact.d = this.direction;
+    if (this.category && this.category !== 'HKC') compact.c = this.category;
+    if (this.chunkMode && this.chunkMode !== 'long') compact.cm = this.chunkMode;
+    if (this.contextWindow !== undefined && Number(this.contextWindow) !== 6) compact.cw = Number(this.contextWindow);
+    if (this.summaryRange && this.summaryRange !== '5') compact.sr = this.summaryRange;
+    if (this.summaryRange === 'custom' && this.summaryCustomMin && Number(this.summaryCustomMin) !== 5) {
+      compact.sm = Number(this.summaryCustomMin);
+    }
+    if (this.gain && this.gain !== '2.5') compact.g = this.gain;
+    if (this.engineMode && this.engineMode !== 'auto') compact.em = this.engineMode;
+    if (this.liveModel && this.liveModel !== DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL) compact.lm = this.liveModel;
+    if (this.autoSave) compact.as = 1;
+    if (this.docMode && this.docMode !== 'new') compact.dm = this.docMode;
+    if (this.folderId && this.folderId !== DEFAULT_SETTINGS.DEFAULT_FOLDER_ID) compact.f = this.folderId;
+    if (this.lastDocId && this.docMode === 'existing') compact.ld = this.lastDocId;
+
+    // 翻訳プロンプト追記：プリセット一致時はIDのみ('@audit'等)で超軽量同期
+    const trimmedCustomPrompt = (this.translationCustomPrompt || '').trim();
+    if (trimmedCustomPrompt) {
+      const matchedPreset = Object.entries(TRANSLATION_PROMPT_PRESETS).find(([, val]) => val.trim() === trimmedCustomPrompt);
+      if (matchedPreset) {
+        compact.tp = `@${matchedPreset[0]}`;
+      } else if (includeFreePrompts) {
+        compact.tp = trimmedCustomPrompt;
+      }
+    }
+
+    // systemInstruction：既定値から変更され、かつ明示チェック時のみ格納
+    const trimmedSys = (this.systemInstruction || '').trim();
+    if (includeFreePrompts && trimmedSys && trimmedSys !== DEFAULT_SYSTEM_INSTRUCTION.trim()) {
+      compact.si = trimmedSys;
+    }
+
+    return compact;
+  }
+
+  _renderQrCode() {
+    const includePrompts = !!this.elCheckQrIncludePrompts?.checked;
+    const compact = this._buildCompactSharePayload(includePrompts);
+    const baseUrl = window.location.origin + window.location.pathname;
+    const buildUrl = (obj) => `${baseUrl}#s=${encodeBase64UrlUtf8(JSON.stringify(obj))}`;
+
+    let shareUrl = buildUrl(compact);
+    this.elInputShareUrl.value = shareUrl;
+
+    if (window.QRCode && QRCode.renderCanvas && this.elQrCanvas) {
+      const renderOpts = { size: 280, margin: 4, dark: '#000000', light: '#FFFFFF' };
+      let meta;
+      try {
+        meta = QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
+      } catch (qrOverflowErr) {
+        delete compact.si;
+        delete compact.tp;
+        shareUrl = buildUrl(compact);
+        this.elInputShareUrl.value = shareUrl;
+        meta = QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
+        this.showToast('プロンプトが長すぎるため、QRコードからは自由記述プロンプトを省略しました。', 'warning');
+      }
+
+      if (this.elQrDensityMeta && meta) {
+        const isDense = meta.version >= 15;
+        this.elQrDensityMeta.className = isDense ? 'qr-density-meta is-dense' : 'qr-density-meta';
+        this.elQrDensityMeta.textContent = isDense
+          ? `⚠️ QR v${meta.version} (${meta.moduleCount}×${meta.moduleCount} / ${meta.length}文字) — やや高密度です（プロンプト除外で軽量化できます）`
+          : `✅ QR v${meta.version} (${meta.moduleCount}×${meta.moduleCount} / ${meta.length}文字) — 高速スキャン対応（軽量最適化済）`;
+      }
+    }
+  }
+
   _openQrModal() {
     if (!this.apiKey && !this.gasUrl) {
       this.showToast('先に「⚙️ 設定」でGemini APIキーまたはGAS設定を入力してください。', 'warning');
@@ -4518,49 +4683,14 @@ class App {
       return;
     }
 
-    const config = {
-      apiKey: this.apiKey || '',
-      gasUrl: this.gasUrl || '',
-      gasToken: this.gasToken || '',
-      direction: this.direction || 'auto',
-      category: this.category || 'HKC',
-      chunkMode: this.chunkMode || 'long',
-      contextWindow: String(this.contextWindow !== undefined ? this.contextWindow : 6),
-      summaryRange: this.summaryRange || '5',
-      summaryCustomMin: String(this.summaryCustomMin || 5),
-      gain: this.gain || '2.5',
-      engineMode: this.engineMode || 'auto',
-      liveModel: this.liveModel || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL,
-      systemInstruction: this.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
-      translationCustomPrompt: this.translationCustomPrompt || '',
-      autoSave: this.autoSave,
-      docMode: this.docMode || 'new',
-      folderId: this.folderId || '',
-      lastDocId: this.lastDocId || ''
-    };
-
     try {
-      const baseUrl = window.location.origin + window.location.pathname;
-      const buildShareUrl = (cfg) => `${baseUrl}#setup=${encodeURIComponent(encodeBase64Utf8(JSON.stringify(cfg)))}`;
-      let shareUrl = buildShareUrl(config);
-      this.elInputShareUrl.value = shareUrl;
-
-      if (window.QRCode && QRCode.renderCanvas && this.elQrCanvas) {
-        const renderOpts = { size: 240, margin: 2, dark: '#1b365d', light: '#FFFFFF' };
-        try {
-          QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
-        } catch (qrOverflowErr) {
-          delete config.translationCustomPrompt;
-          shareUrl = buildShareUrl(config);
-          this.elInputShareUrl.value = shareUrl;
-          QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
-          this.showToast('追記プロンプトが長いため、QRコードからは追記プロンプトのみ省略しました。', 'warning');
-        }
+      if (this.elCheckQrIncludePrompts) {
+        this.elCheckQrIncludePrompts.checked = false;
       }
-
+      this._renderQrCode();
       this.elQrModal.style.display = 'flex';
       document.body.classList.add('modal-open');
-      this.log('info', 'スマホ連携用QRコードを表示しました。');
+      this.log('info', `スマホ連携用QRコードを表示しました (URL長: ${this.elInputShareUrl.value.length}文字)。`);
     } catch (err) {
       console.error('Failed to generate QR code:', err);
       this.showToast('QRコードの生成に失敗しました: ' + err.message, 'error');
@@ -4569,35 +4699,72 @@ class App {
 
   _checkHashConfig() {
     const hash = window.location.hash;
-    if (!hash || !hash.startsWith('#setup=')) return;
+    if (!hash || (!hash.startsWith('#s=') && !hash.startsWith('#setup='))) return;
 
     try {
-      const config = JSON.parse(decodeBase64Utf8(decodeURIComponent(hash.substring(7))));
       const K = ConfigManager.STORAGE_KEYS;
 
-      const stringKeys = [
-        ['apiKey', K.API_KEY],
-        ['gasUrl', K.GAS_URL],
-        ['gasToken', K.GAS_TOKEN],
-        ['direction', K.DIRECTION],
-        ['category', K.CATEGORY],
-        ['chunkMode', K.CHUNK_MODE],
-        ['summaryRange', K.SUMMARY_RANGE],
-        ['gain', K.GAIN],
-        ['engineMode', K.ENGINE_MODE],
-        ['liveModel', K.LIVE_MODEL],
-        ['systemInstruction', K.SYSTEM_INSTRUCTION],
-        ['docMode', K.DOC_MODE],
-        ['lastDocId', K.LAST_DOC_ID],
-        ['folderId', K.FOLDER_ID]
-      ];
-      for (const [field, storageKey] of stringKeys) {
-        if (config[field]) ConfigManager.set(storageKey, String(config[field]));
+      if (hash.startsWith('#s=')) {
+        // v3.0.2 超軽量コンパクト形式 (#s=<base64url>)
+        const c = JSON.parse(decodeBase64UrlUtf8(hash.substring(3)));
+
+        if (c.k) ConfigManager.set(K.API_KEY, String(c.k));
+        if (c.gd) ConfigManager.set(K.GAS_URL, `https://script.google.com/macros/s/${c.gd}/exec`);
+        else if (c.gu) ConfigManager.set(K.GAS_URL, String(c.gu));
+        if (c.t !== undefined) ConfigManager.set(K.GAS_TOKEN, String(c.t));
+
+        ConfigManager.set(K.DIRECTION, c.d || 'auto');
+        ConfigManager.set(K.CATEGORY, c.c || 'HKC');
+        ConfigManager.set(K.CHUNK_MODE, c.cm || 'long');
+        ConfigManager.set(K.CONTEXT_WINDOW, String(c.cw !== undefined ? c.cw : 6));
+        ConfigManager.set(K.SUMMARY_RANGE, c.sr || '5');
+        ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(c.sm !== undefined ? c.sm : 5));
+        ConfigManager.set(K.GAIN, c.g || '2.5');
+        ConfigManager.set(K.ENGINE_MODE, c.em || 'auto');
+        ConfigManager.set(K.LIVE_MODEL, c.lm || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
+        ConfigManager.set(K.AUTO_SAVE, String(Boolean(c.as)));
+        ConfigManager.set(K.DOC_MODE, c.dm || 'new');
+        ConfigManager.set(K.FOLDER_ID, c.f || DEFAULT_SETTINGS.DEFAULT_FOLDER_ID);
+        if (c.ld !== undefined) ConfigManager.set(K.LAST_DOC_ID, String(c.ld));
+
+        if (c.tp !== undefined) {
+          const tpStr = String(c.tp);
+          if (tpStr.startsWith('@') && TRANSLATION_PROMPT_PRESETS[tpStr.slice(1)]) {
+            ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, TRANSLATION_PROMPT_PRESETS[tpStr.slice(1)]);
+          } else {
+            ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, tpStr);
+          }
+        }
+        if (c.si !== undefined) {
+          ConfigManager.set(K.SYSTEM_INSTRUCTION, String(c.si));
+        }
+      } else {
+        // 旧形式 (#setup=...) 後方互換サポート
+        const config = JSON.parse(decodeBase64Utf8(decodeURIComponent(hash.substring(7))));
+        const legacyMap = [
+          ['apiKey', K.API_KEY],
+          ['gasUrl', K.GAS_URL],
+          ['gasToken', K.GAS_TOKEN],
+          ['direction', K.DIRECTION],
+          ['category', K.CATEGORY],
+          ['chunkMode', K.CHUNK_MODE],
+          ['summaryRange', K.SUMMARY_RANGE],
+          ['gain', K.GAIN],
+          ['engineMode', K.ENGINE_MODE],
+          ['liveModel', K.LIVE_MODEL],
+          ['systemInstruction', K.SYSTEM_INSTRUCTION],
+          ['docMode', K.DOC_MODE],
+          ['lastDocId', K.LAST_DOC_ID],
+          ['folderId', K.FOLDER_ID]
+        ];
+        for (const [field, storageKey] of legacyMap) {
+          if (config[field]) ConfigManager.set(storageKey, String(config[field]));
+        }
+        if (config.contextWindow !== undefined) ConfigManager.set(K.CONTEXT_WINDOW, String(config.contextWindow));
+        if (config.summaryCustomMin !== undefined) ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(config.summaryCustomMin));
+        if (config.translationCustomPrompt !== undefined) ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, String(config.translationCustomPrompt));
+        if (config.autoSave !== undefined) ConfigManager.set(K.AUTO_SAVE, String(config.autoSave));
       }
-      if (config.contextWindow !== undefined) ConfigManager.set(K.CONTEXT_WINDOW, String(config.contextWindow));
-      if (config.summaryCustomMin !== undefined) ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(config.summaryCustomMin));
-      if (config.translationCustomPrompt !== undefined) ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, String(config.translationCustomPrompt));
-      if (config.autoSave !== undefined) ConfigManager.set(K.AUTO_SAVE, String(config.autoSave));
 
       if (window.history && window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname + window.location.search);
