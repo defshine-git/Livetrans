@@ -1,4 +1,4 @@
-/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.9.0 - 4-Language & Mobile/iPad Optimized) */
+/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.10.0 - 4-Language & Mobile/iPad Optimized) */
 
 :root {
   --primary: #1b365d;
@@ -1030,4 +1030,66 @@ body.modal-open {
   flex-grow: 1;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* ====================================================
+   v2.10.0: Real-time Original Display & Long-Form Buffer UI
+   ==================================================== */
+.live-head {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.live-head-left,
+.live-head-right {
+  flex-wrap: wrap;
+}
+
+.tag.buffer-status {
+  background: #fef9e7;
+  color: #9a7d0a;
+  border: 1px solid #f9e79f;
+  font-weight: 600;
+}
+
+.tag.buffer-status.is-buffering {
+  background: #eaf2f8;
+  color: var(--blue);
+  border-color: #aed6f1;
+}
+
+.live-flush-btn {
+  padding: 3px 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.live-text {
+  font-size: 1.02rem;
+  line-height: 1.65;
+  color: var(--text-primary);
+  font-style: normal;
+  min-height: 32px;
+  max-height: 180px;
+  overflow-y: auto;
+  word-break: break-word;
+  padding-right: 4px;
+}
+
+.live-text.live-placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.live-committed {
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.live-interim {
+  color: var(--blue);
+  font-style: italic;
+  background: rgba(42, 82, 190, 0.08);
+  border-radius: 3px;
+  padding: 0 3px;
 }

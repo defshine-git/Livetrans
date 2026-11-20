@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Bilingual Translator
- * Version: 2.8.0 (4-Language Recognition & Translation Support: JA, EN, BN, HI)
+ * Version: 2.9.0 (4-Language Recognition & Translation Support: JA, EN, BN, HI)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および バックアップ翻訳 (action: 'translate')

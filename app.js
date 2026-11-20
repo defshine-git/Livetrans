@@ -849,7 +849,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.8.0 (4-Language Recognition [JA, EN, BN, HI] & Full Mobile/iPad Compatibility)
+ * Version: 2.10.0 (Real-time Original Display + Long-Form Context-Aware Japanese Translation)
  * 
  * Features:
  * 1. 2-Column Body Grid (原文 / 訳文) with responsive single-column layout.
@@ -941,17 +941,11 @@ const ROLES = [
 
 // ==========================================
 const DEFAULT_SYSTEM_INSTRUCTION =
-  'You are a professional meeting and audit transcription engine for maritime, ship recycling, safety, and environmental audits. ' +
-  'This application is used during ship recycling facility audits. ' +
-  'Typical situations include opening meetings, interviews with facility personnel, safety discussions, operational explanations, evidence reviews, and closing meetings. ' +
-  'Your primary task is to accurately transcribe conversations, discussions, interviews, questions and answers, and meeting dialogue as they occur in a real audit environment. ' +
-  'Focus on capturing complete spoken thoughts and natural conversation flow rather than isolated words whenever possible. ' +
-  'Do not summarize, interpret, rewrite, explain, or translate the content. Transcribe only what was spoken. ' +
+  'You are a speech transcription engine for maritime and safety audits. ' +
   'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
   'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
-  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English mixed with Bengali or Hindi words (code-mixing). Treat this as normal conversation and transcribe the intended spoken content accurately. ' +
-  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters. ' +
-  'Preserve maritime, ship recycling, safety, and audit terminology exactly as spoken whenever possible.';
+  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
+  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
 
 // 1. Config Manager (localStorage)
 // ==========================================
@@ -970,7 +964,8 @@ class ConfigManager {
     ENGINE_MODE: 'glt_engine_mode',
     LIVE_MODEL: 'glt_live_model',
     AUDIO_SOURCE: 'glt_audio_source',
-    SYSTEM_INSTRUCTION: 'glt_system_instruction'
+    SYSTEM_INSTRUCTION: 'glt_system_instruction',
+    CHUNK_MODE: 'glt_chunk_mode'
   };
 
   static get(key, defaultValue = '') {
@@ -1516,6 +1511,7 @@ class GeminiLiveClient {
 
     this.onInterimCallback = null;
     this.onFinalCallback = null;
+    this.onTurnCompleteCallback = null;
     this.onStatusChangeCallback = null;
     this.onErrorCallback = null;
     this.onDisconnectCallback = null;
@@ -1794,19 +1790,28 @@ class GeminiLiveClient {
       if (data.serverContent) {
         const sc = data.serverContent;
         const interimObj = sc.interimInputTranscription || sc.interim_input_transcription;
-        if (interimObj && interimObj.text) {
+        if (interimObj && typeof interimObj.text === 'string' && interimObj.text.length > 0) {
           if (this.onInterimCallback) {
             this.onInterimCallback(interimObj.text);
           }
         }
 
         const finalObj = sc.inputTranscription || sc.input_transcription;
-        if (finalObj && finalObj.text) {
-          const finalText = finalObj.text.trim();
+        if (finalObj && typeof finalObj.text === 'string' && finalObj.text.length > 0) {
+          // 単語境界の空白を保持するため trim() せずそのままバッファへ渡す
+          const rawFinalText = finalObj.text;
           const langCode = finalObj.languageCode || null;
-          this.log('info', `確定音声認識: "${finalText}"`);
-          if (finalText.length > 0 && this.onFinalCallback) {
-            this.onFinalCallback(finalText, langCode);
+          if (rawFinalText.trim().length > 0) {
+            this.log('info', `認識断片受信: "${rawFinalText.trim()}"`);
+          }
+          if (this.onFinalCallback) {
+            this.onFinalCallback(rawFinalText, langCode);
+          }
+        }
+
+        if (sc.turnComplete || sc.turn_complete) {
+          if (this.onTurnCompleteCallback) {
+            this.onTurnCompleteCallback();
           }
         }
       }
@@ -1830,7 +1835,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 }
 
 // ==========================================
-// 5. Translation Service & Resilient Queue
+// 5. Translation Service & Resilient Queue (Context-Aware Long-Form)
 // ==========================================
 class TranslationService {
   constructor() {
@@ -1846,8 +1851,8 @@ class TranslationService {
     }
   }
 
-  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete) {
-    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete });
+  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextRecords = []) {
+    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextRecords });
     this._processNext();
   }
 
@@ -1872,7 +1877,7 @@ class TranslationService {
     }
   }
 
-  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken }) {
+  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken, contextRecords = [] }) {
     if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
 
     let srcLang = 'ja';
@@ -1886,18 +1891,14 @@ class TranslationService {
       targetLang = 'ja';
     } else if (direction === 'bn-to-ja') {
       srcLang = 'bn';
-      targetLang = 'ja'; // ベンガル語 ➔ 日本語の一方向翻訳
+      targetLang = 'ja';
     } else if (direction === 'hi-to-ja') {
       srcLang = 'hi';
-      targetLang = 'ja'; // ヒンディー語 ➔ 日本語の一方向翻訳
+      targetLang = 'ja';
     } else {
       // 4言語自動切替 (日 ➔ 英 / 英・ベンガル・ヒンディー ➔ 日)
       srcLang = detectLanguage4(text);
-      if (srcLang === 'ja') {
-        targetLang = 'en'; // 日本語発話は国際監査共通語の英語へ翻訳
-      } else {
-        targetLang = 'ja'; // 英語・ベンガル語・ヒンディー語発話（混在含む）は日本語へ一方向翻訳
-      }
+      targetLang = srcLang === 'ja' ? 'en' : 'ja';
     }
 
     const langNames = {
@@ -1909,16 +1910,54 @@ class TranslationService {
     const srcName = langNames[srcLang] || 'the source language';
     const targetName = langNames[targetLang] || 'Japanese';
 
-    const domainHint = category ? ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate technical terminology.` : '';
-    const prompt = `You are a professional simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n`
-                 + `Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n`
-                 + `Translate the following text from ${srcName} into fluent, natural, and accurate ${targetName}.\n`
-                 + `STRICT CONSTRAINTS:\n`
-                 + `1. Return ONLY the direct translation.\n`
-                 + `2. Do not include quotes, explanations, language labels, prefixes, or notes.\n`
-                 + `3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n`
-                 + `4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n\n`
-                 + `Text:\n${text}`;
+    let contextBlock = '';
+    if (Array.isArray(contextRecords) && contextRecords.length > 0) {
+      const lines = contextRecords.slice(-2).map((c, idx) => {
+        const origSnippet = String(c.original || '').trim().slice(0, 220);
+        const transSnippet = String(c.translated || '').trim().slice(0, 220);
+        return `  (${idx + 1}) Original: ${origSnippet}${transSnippet ? ` | Translation: ${transSnippet}` : ''}`;
+      });
+      contextBlock =
+        `[Recent Conversation Context — FOR REFERENCE ONLY. DO NOT TRANSLATE THIS SECTION. Use it only to resolve pronouns, tone, and technical terminology consistency.]
+` +
+        lines.join('
+') + '
+
+';
+    }
+
+    const domainHint = category
+      ? ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate technical terminology.`
+      : '';
+
+    const longFormInstruction = targetLang === 'ja'
+      ? `5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.
+`
+      : `5. Produce fluent, natural, and accurate business English preserving the speaker's complete meaning.
+`;
+
+    const prompt =
+      `You are a professional consecutive/simultaneous interpreter specializing in maritime audit and safety.${domainHint}
+` +
+      `Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).
+` +
+      `Translate ONLY the [Text to Translate] from ${srcName} into fluent, natural, and accurate ${targetName}.
+` +
+      `STRICT CONSTRAINTS:
+` +
+      `1. Return ONLY the direct translation of [Text to Translate].
+` +
+      `2. Do not include quotes, explanations, language labels, prefixes, or notes.
+` +
+      `3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.
+` +
+      `4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.
+` +
+      longFormInstruction + '
+' +
+      contextBlock +
+      `[Text to Translate]:
+${text}`;
 
     // Layer 1: Gemini REST API (Cascade Fallback)
     if (apiKey && apiKey.trim() !== '') {
@@ -1941,18 +1980,18 @@ class TranslationService {
             body: JSON.stringify({
               contents: [{ parts: [{ text: prompt }] }],
               generationConfig: {
-                temperature: 0.1,
-                maxOutputTokens: 800
+                temperature: 0.15,
+                maxOutputTokens: 2048
               }
             })
-          }, 12000);
+          }, 20000);
 
           if (res.ok) {
             const data = await res.json();
             if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
               const transText = data.candidates[0].content.parts[0].text.trim();
               this._preferredModel = modelName;
-              this.log('success', `Gemini (${modelName}) 翻訳完了: "${transText}"`);
+              this.log('success', `Gemini (${modelName}) 長文翻訳完了 (${text.length}文字 ➔ ${transText.length}文字)`);
               return {
                 translated: transText,
                 speakerLang: srcLang
@@ -1966,7 +2005,7 @@ class TranslationService {
           }
         } catch (err) {
           if (this._preferredModel === modelName) this._preferredModel = null;
-          const reason = err.name === 'AbortError' ? 'タイムアウト (12秒)' : err.message;
+          const reason = err.name === 'AbortError' ? 'タイムアウト (20秒)' : err.message;
           this.log('warn', `Gemini (${modelName}) 通信エラー: ${reason}`);
         }
       }
@@ -1990,7 +2029,7 @@ class TranslationService {
             srcLang: srcLang,
             targetLang: targetLang
           })
-        }, 15000);
+        }, 20000);
 
         if (gasRes.ok) {
           const gasData = await gasRes.json();
@@ -2007,7 +2046,7 @@ class TranslationService {
           this.log('warn', `GAS翻訳通信エラー: HTTP ${gasRes.status}`);
         }
       } catch (gasErr) {
-        const gasReason = gasErr.name === 'AbortError' ? 'タイムアウト (15秒)' : gasErr.message;
+        const gasReason = gasErr.name === 'AbortError' ? 'タイムアウト (20秒)' : gasErr.message;
         this.log('warn', `GAS翻訳接続失敗: ${gasReason}`);
       }
     }
@@ -2152,139 +2191,381 @@ class GasStorageClient {
 }
 
 // ==========================================
-// StreamSentenceSplitter (リアルタイム文分割・自動チャンキング機構)
-// 短い会話も長文連続スピーチも、文・ポーズごとにテンポよく自動確定する
+// LongFormUtteranceBuffer (リアルタイム原語表示 ＋ 日本語長文翻訳アグリゲーター)
 // ==========================================
-class StreamSentenceSplitter {
-  constructor() {
-    this.confirmedText = '';
-    this.lastRawText = '';
+class LongFormUtteranceBuffer {
+  static PRESETS = {
+    'long': {
+      // 英・ベンガル・ヒンディー ➔ 日本語（長文・文脈重視）
+      ja: { silenceMs: 4000, minCharsForSentenceEnd: 260, hardMaxChars: 520, maxWaitMs: 28000 },
+      // 日本語 ➔ 英語（会話テンポと文脈の両立）
+      en: { silenceMs: 2000, minCharsForSentenceEnd: 80, hardMaxChars: 200, maxWaitMs: 15000 }
+    },
+    'extra-long': {
+      ja: { silenceMs: 6000, minCharsForSentenceEnd: 420, hardMaxChars: 800, maxWaitMs: 45000 },
+      en: { silenceMs: 2800, minCharsForSentenceEnd: 130, hardMaxChars: 300, maxWaitMs: 20000 }
+    },
+    'balanced': {
+      ja: { silenceMs: 2200, minCharsForSentenceEnd: 120, hardMaxChars: 280, maxWaitMs: 16000 },
+      en: { silenceMs: 1500, minCharsForSentenceEnd: 45, hardMaxChars: 150, maxWaitMs: 12000 }
+    }
+  };
+
+  constructor({ onFlush, onDisplayUpdate, onLog } = {}) {
+    this.onFlush = onFlush || null;
+    this.onDisplayUpdate = onDisplayUpdate || null;
+    this.onLog = onLog || null;
+
+    this.mode = 'long';
+    this.direction = 'auto';
+
+    this.committedText = '';
+    this.currentInterim = '';
+    this.bufferLangHint = null;
+    this.bufferTargetLang = 'ja';
+    this._afterTurnComplete = false;
+
     this.silenceTimer = null;
+    this.maxWaitTimer = null;
+  }
+
+  setConfig({ mode, direction }) {
+    if (mode && LongFormUtteranceBuffer.PRESETS[mode]) {
+      this.mode = mode;
+    }
+    if (direction) {
+      this.direction = direction;
+    }
+    this._notifyDisplay();
+  }
+
+  hasPendingText() {
+    return (this.committedText + this.currentInterim).trim().length > 0;
   }
 
   reset() {
-    if (this.silenceTimer) {
-      clearTimeout(this.silenceTimer);
-      this.silenceTimer = null;
-    }
-    this.confirmedText = '';
-    this.lastRawText = '';
+    this._clearTimers();
+    this.committedText = '';
+    this.currentInterim = '';
+    this.bufferLangHint = null;
+    this.bufferTargetLang = this.direction === 'ja-to-en' ? 'en' : 'ja';
+    this._afterTurnComplete = false;
+    this._notifyDisplay();
   }
 
-  feed(currentFullText, onChunk) {
-    if (!currentFullText) return '';
-    this.lastRawText = currentFullText;
+  markTurnComplete() {
+    this._afterTurnComplete = true;
+  }
 
+  _clearTimers() {
     if (this.silenceTimer) {
       clearTimeout(this.silenceTimer);
       this.silenceTimer = null;
     }
+    if (this.maxWaitTimer) {
+      clearTimeout(this.maxWaitTimer);
+      this.maxWaitTimer = null;
+    }
+  }
 
-    let unconfirmed = '';
-    if (this.confirmedText && currentFullText.startsWith(this.confirmedText)) {
-      unconfirmed = currentFullText.slice(this.confirmedText.length).trim();
-    } else if (this.confirmedText && currentFullText.length > this.confirmedText.length) {
-      unconfirmed = currentFullText.slice(this.confirmedText.length).trim();
+  _getPresetConfig(targetLang) {
+    const preset = LongFormUtteranceBuffer.PRESETS[this.mode] || LongFormUtteranceBuffer.PRESETS.long;
+    return targetLang === 'en' ? preset.en : preset.ja;
+  }
+
+  _resolveTargetLang(text, langCode) {
+    if (this.direction === 'ja-to-en') return 'en';
+    if (this.direction === 'en-to-ja' || this.direction === 'bn-to-ja' || this.direction === 'hi-to-ja') return 'ja';
+    const detected = detectLanguage4(text, langCode);
+    return detected === 'ja' ? 'en' : 'ja';
+  }
+
+  /**
+   * 自動切替モード時に、日本語 ⇄ 外国語 の明確な言語切替だけを判定
+   * - 英・ベンガル・ヒンディー間の混在（Benglish等）は切替とみなさず1段落にまとめる
+   * - 日本語内の短い英字略語（HKC, IHM, EU-SRR等）でも誤分割しない
+   */
+  _isClearLanguageGroupSwitch(incomingText, langCode) {
+    if (this.direction !== 'auto') return false;
+    if (!this.committedText.trim()) return false;
+
+    const clean = incomingText.trim();
+    if (!clean) return false;
+
+    const currentTarget = this.bufferTargetLang; // 'ja' (外国語発話中) or 'en' (日本語発話中)
+    const kanaCount = (clean.match(/[぀-ゟ゠-ヿ]/g) || []).length;
+    const indicCount = (clean.match(/[ऀ-ॿঀ-৿]/g) || []).length;
+    const latinWords = clean.match(/[A-Za-z]{2,}/g) || [];
+    const latinLetters = (clean.match(/[A-Za-z]/g) || []).length;
+
+    if (currentTarget === 'ja') {
+      // 外国語バッファ蓄積中に、明確な日本語（かな2文字以上、または明示的なjaヒント＋漢字）が来た場合
+      if (kanaCount >= 2) return true;
+      if (langCode && String(langCode).toLowerCase().startsWith('ja') && /[一-鿿]/.test(clean)) return true;
+      return false;
     } else {
-      unconfirmed = currentFullText.trim();
+      // 日本語バッファ蓄積中に、明確な外国語（ベンガル/ヒンディー文字、または3単語/18文字以上の英語）が来た場合
+      if (indicCount >= 2) return true;
+      if (kanaCount === 0 && (latinWords.length >= 3 || latinLetters >= 18)) return true;
+      return false;
     }
-
-    if (!unconfirmed) {
-      return '';
-    }
-
-    const emitted = [];
-    let remaining = unconfirmed;
-
-    while (true) {
-      // 1. 文末記号 ([.?!。！？]) ＋ スペース ＋ 次の文の開始文字 を検出
-      const m = remaining.match(/^([\s\S]*?[.?!。！？\u0964\u0965])(?:\s+([A-Z0-9\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u0900-\u097f\u0980-\u09ff][\s\S]*)|$)/);
-      if (m) {
-        const sentence = m[1].trim();
-        const nextPart = m[2];
-        if (nextPart) {
-          // 次の文がすでに開始している場合は直前の文を即時確定
-          emitted.push(sentence);
-          remaining = nextPart.trim();
-          continue;
-        } else if (sentence.length >= 80) {
-          // 1文がある程度まとまった長さ（80文字以上）に達していれば即時確定
-          emitted.push(sentence);
-          remaining = '';
-          break;
-        } else {
-          break;
-        }
-      } else {
-        // 2. ピリオド等が付かない長文（120文字以上）は、カンマ等で安全に分割
-        if (remaining.length >= 120) {
-          const commaM = remaining.match(/^([\s\S]*?[,、;])\s+([\s\S]+)$/);
-          if (commaM && commaM[1].trim().length >= 35) {
-            emitted.push(commaM[1].trim());
-            remaining = commaM[2].trim();
-            continue;
-          }
-        }
-        break;
-      }
-    }
-
-    if (emitted.length > 0) {
-      if (remaining) {
-        const pos = currentFullText.lastIndexOf(remaining);
-        if (pos !== -1) {
-          this.confirmedText = currentFullText.slice(0, pos);
-        } else {
-          this.confirmedText += ' ' + emitted.join(' ');
-        }
-      } else {
-        this.confirmedText = currentFullText;
-      }
-
-      for (const s of emitted) {
-        if (onChunk && s && s.trim()) onChunk(s.trim());
-      }
-    }
-
-    // 3. 短い発話やポーズ検知：0.9秒間新しい文字が来なければ、残っている文を自動確定！
-    if (remaining && remaining.trim().length >= 2) {
-      this.silenceTimer = setTimeout(() => {
-        if (remaining && remaining.trim()) {
-          const chunk = remaining.trim();
-          this.confirmedText = currentFullText;
-          if (onChunk) onChunk(chunk);
-        }
-      }, 1500);
-    }
-
-    return remaining;
   }
 
-  flush(finalText, onChunk) {
+  _joinText(base, addition, forceSpaceIfNonCJK = false) {
+    if (!addition) return base;
+    if (!base) return addition.replace(/^\s+/, '');
+
+    // エンジンが累積テキストを送ってきた場合の重複防止
+    const trimmedBase = base.trim();
+    const trimmedAdd = addition.trim();
+    if (trimmedBase.length >= 6 && trimmedAdd.startsWith(trimmedBase)) {
+      return trimmedAdd;
+    }
+
+    const startsWithSpace = /^\s/.test(addition);
+    const endsWithSpace = /\s$/.test(base);
+    if (startsWithSpace || endsWithSpace) {
+      return (base + addition).replace(/[ 	]{2,}/g, ' ');
+    }
+
+    const lastChar = base.slice(-1);
+    const firstChar = addition.charAt(0);
+    const isCJK = (ch) => /[　-ヿ㐀-䶿一-鿿]/.test(ch);
+    const startsWithClosingPunct = /^[.,?!;:)\]'"’”）。、！？।॥]/.test(firstChar);
+
+    if (startsWithClosingPunct) {
+      return base + addition;
+    }
+    if (isCJK(lastChar) && isCJK(firstChar)) {
+      return base + addition;
+    }
+
+    // 文末・句読点の後、またはターン終了後／WebSpeech確定時は半角スペースで接続
+    const endsWithPunct = /[.?!,;:।॥]$/.test(lastChar);
+    if (endsWithPunct || forceSpaceIfNonCJK) {
+      return base + ' ' + addition;
+    }
+
+    // 同一ターン内のサブワード断片（例: "asbes" + "tos"）はそのまま連結
+    return base + addition;
+  }
+
+  pushInterim(interimText) {
+    this.currentInterim = String(interimText || '');
+    // 発話継続中は無音タイマーを延長し、途中で切れないようにする
+    if (this.hasPendingText()) {
+      this._scheduleSilenceTimer();
+    }
+    this._notifyDisplay();
+  }
+
+  pushFinal(rawText, langCode = null, options = {}) {
+    if (typeof rawText !== 'string' || rawText.length === 0) return;
+
+    const fromWebSpeech = !!options.fromWebSpeech;
+
+    // 日本語 ⇄ 外国語 の切替があれば、直前までのバッファを先に確定翻訳へ送る
+    if (this._isClearLanguageGroupSwitch(rawText, langCode)) {
+      this._emitText(this.committedText, this.bufferLangHint, 'language-switch');
+      this.committedText = '';
+      this.bufferLangHint = null;
+      this._clearTimers();
+    }
+
+    const wasEmpty = this.committedText.trim().length === 0;
+    const forceSpace = fromWebSpeech || this._afterTurnComplete;
+    this._afterTurnComplete = false;
+
+    this.currentInterim = '';
+    this.committedText = this._joinText(this.committedText, rawText, forceSpace);
+
+    if (wasEmpty && this.committedText.trim().length > 0) {
+      this.bufferLangHint = langCode || detectLanguage4(this.committedText);
+      this.bufferTargetLang = this._resolveTargetLang(this.committedText, langCode);
+      this._scheduleMaxWaitTimer();
+    } else if (!this.bufferLangHint && langCode) {
+      this.bufferLangHint = langCode;
+    }
+
+    // 十分な長さに達した段落のみ、文末や自然な境界で翻訳へ送り出す
+    this._tryEmitReadyChunks();
+
+    if (this.committedText.trim().length > 0) {
+      this._scheduleSilenceTimer();
+      if (!this.maxWaitTimer) {
+        this._scheduleMaxWaitTimer();
+      }
+    } else {
+      this._clearTimers();
+    }
+
+    this._notifyDisplay();
+  }
+
+  _tryEmitReadyChunks() {
+    const cfg = this._getPresetConfig(this.bufferTargetLang);
+
+    while (this.committedText.trim().length >= cfg.minCharsForSentenceEnd) {
+      const text = this.committedText.trim();
+      const minSplit = Math.floor(cfg.minCharsForSentenceEnd * 0.55);
+
+      // 1. まずは文末記号（. ? ! 。 ！ ？ । ॥）で自然に区切れる位置を探す
+      let splitIdx = this._findSplitIndex(text, minSplit, text.length, true);
+
+      // 2. 文末がないまま上限文字数に達した場合は、カンマや単語境界で安全に区切る
+      if (splitIdx === -1 && text.length >= cfg.hardMaxChars) {
+        splitIdx = this._findSplitIndex(text, Math.floor(cfg.hardMaxChars * 0.5), cfg.hardMaxChars, false);
+      }
+
+      if (splitIdx === -1) break;
+
+      const chunk = text.slice(0, splitIdx).trim();
+      const remainder = text.slice(splitIdx).trim();
+
+      if (!chunk) break;
+
+      this._emitText(chunk, this.bufferLangHint, 'length-boundary');
+      this.committedText = remainder;
+
+      if (!remainder) {
+        this.bufferLangHint = null;
+        this._clearTimers();
+        break;
+      } else {
+        this.bufferLangHint = detectLanguage4(remainder);
+        this.bufferTargetLang = this._resolveTargetLang(remainder, null);
+        // 残りのテキスト用に最大待機タイマーをリセット
+        if (this.maxWaitTimer) {
+          clearTimeout(this.maxWaitTimer);
+          this.maxWaitTimer = null;
+        }
+        this._scheduleMaxWaitTimer();
+      }
+    }
+  }
+
+  _findSplitIndex(text, minIdx, maxIdx, sentenceOnly) {
+    const slice = text.slice(0, Math.min(text.length, maxIdx));
+
+    // 文末記号（後ろが空白または文字列末尾、あるいは全角/インド系句点）
+    const sentenceRegex = /([.?!](?=\s|$)|[。！？।॥])/g;
+    let lastSentenceEnd = -1;
+    let m;
+    while ((m = sentenceRegex.exec(slice)) !== null) {
+      const endPos = m.index + m[0].length;
+      if (endPos >= minIdx) {
+        lastSentenceEnd = endPos;
+      }
+    }
+    if (lastSentenceEnd !== -1) return lastSentenceEnd;
+    if (sentenceOnly) return -1;
+
+    // 読点・カンマ・セミコロン
+    const clauseRegex = /([,;](?=\s|$)|[、：；])/g;
+    let lastClauseEnd = -1;
+    while ((m = clauseRegex.exec(slice)) !== null) {
+      const endPos = m.index + m[0].length;
+      if (endPos >= minIdx) {
+        lastClauseEnd = endPos;
+      }
+    }
+    if (lastClauseEnd !== -1) return lastClauseEnd;
+
+    // 単語境界（スペース）
+    const lastSpace = slice.lastIndexOf(' ');
+    if (lastSpace >= minIdx) return lastSpace;
+
+    // CJK等でスペースがない場合の最終フォールバック
+    return Math.min(text.length, maxIdx);
+  }
+
+  _scheduleSilenceTimer() {
     if (this.silenceTimer) {
       clearTimeout(this.silenceTimer);
       this.silenceTimer = null;
     }
-
-    const textToFlush = finalText || this.lastRawText;
-    let leftover = '';
-    if (textToFlush) {
-      if (this.confirmedText && textToFlush.startsWith(this.confirmedText)) {
-        leftover = textToFlush.slice(this.confirmedText.length).trim();
-      } else if (textToFlush.length > this.confirmedText.length) {
-        leftover = textToFlush.slice(this.confirmedText.length).trim();
-      } else {
-        leftover = textToFlush.trim();
+    const cfg = this._getPresetConfig(this.bufferTargetLang);
+    this.silenceTimer = setTimeout(() => {
+      this.silenceTimer = null;
+      if (this.hasPendingText()) {
+        this.flushAll('silence-timeout');
       }
-    }
+    }, cfg.silenceMs);
+  }
 
-    this.confirmedText = '';
-    this.lastRawText = '';
-
-    if (leftover && leftover.trim() && onChunk) {
-      onChunk(leftover.trim());
+  _scheduleMaxWaitTimer() {
+    if (this.maxWaitTimer) {
+      clearTimeout(this.maxWaitTimer);
+      this.maxWaitTimer = null;
     }
-    return leftover;
+    const cfg = this._getPresetConfig(this.bufferTargetLang);
+    this.maxWaitTimer = setTimeout(() => {
+      this.maxWaitTimer = null;
+      const text = this.committedText.trim();
+      if (text.length < 80) {
+        if (text.length > 0) this._scheduleMaxWaitTimer();
+        return;
+      }
+      // 長時間途切れず話している場合でも、できるだけ文末・句読点で区切って翻訳を返す
+      const splitIdx = this._findSplitIndex(text, Math.floor(text.length * 0.45), text.length, false);
+      const chunk = text.slice(0, splitIdx).trim();
+      const remainder = text.slice(splitIdx).trim();
+      if (chunk) {
+        this._emitText(chunk, this.bufferLangHint, 'max-wait');
+        this.committedText = remainder;
+        if (!remainder) {
+          this.bufferLangHint = null;
+          this._clearTimers();
+        } else {
+          this._scheduleMaxWaitTimer();
+          this._scheduleSilenceTimer();
+        }
+        this._notifyDisplay();
+      }
+    }, cfg.maxWaitMs);
+  }
+
+  flushAll(reason = 'manual') {
+    this._clearTimers();
+    let combined = this.committedText;
+    if (this.currentInterim && this.currentInterim.trim().length > 0) {
+      combined = this._joinText(combined, this.currentInterim.trim(), true);
+    }
+    const finalChunk = combined.trim();
+    const langHint = this.bufferLangHint || (finalChunk ? detectLanguage4(finalChunk) : null);
+
+    this.committedText = '';
+    this.currentInterim = '';
+    this.bufferLangHint = null;
+    this._afterTurnComplete = false;
+
+    if (finalChunk.length > 0) {
+      this._emitText(finalChunk, langHint, reason);
+    }
+    this._notifyDisplay();
+  }
+
+  _emitText(text, langHint, reason) {
+    if (!text || !text.trim()) return;
+    if (this.onLog) {
+      this.onLog('info', `[長文バッファ確定:${reason}] ${text.trim().length}文字を翻訳キューへ送信`);
+    }
+    if (this.onFlush) {
+      this.onFlush(text.trim(), langHint);
+    }
+  }
+
+  _notifyDisplay() {
+    if (!this.onDisplayUpdate) return;
+    const cfg = this._getPresetConfig(this.bufferTargetLang);
+    this.onDisplayUpdate({
+      committed: this.committedText.trim(),
+      interim: this.currentInterim.trim(),
+      totalChars: (this.committedText + this.currentInterim).trim().length,
+      targetLang: this.bufferTargetLang,
+      silenceSec: (cfg.silenceMs / 1000).toFixed(1),
+      minChars: cfg.minCharsForSentenceEnd
+    });
   }
 }
 
@@ -2296,7 +2577,11 @@ class App {
     this.audioService = new AudioCaptureService();
     this.webSpeechService = new WebSpeechService();
     this.geminiClient = new GeminiLiveClient();
-    this.sentenceSplitter = new StreamSentenceSplitter();
+    this.utteranceBuffer = new LongFormUtteranceBuffer({
+      onFlush: (chunk, langCode) => this._handleFinalSpeech(chunk, langCode),
+      onDisplayUpdate: (state) => this._renderLiveDisplay(state),
+      onLog: (type, msg) => this.log(type, msg)
+    });
     this.translationService = new TranslationService();
     this.translationService.onLogCallback = (type, msg) => this.log(type, msg);
 
@@ -2323,7 +2608,7 @@ class App {
         }
       }
     }
-    this.log('info', '初期化完了 (v2.8.0)。SRF言語自動認識 ＆ iPad対応が有効です。');
+    this.log('info', '初期化完了 (v2.10.0)。リアルタイム原語表示＋長文日本語翻訳・4言語自動認識＆iPad対応が有効です。');
   }
 
   log(type, message) {
@@ -2345,6 +2630,7 @@ class App {
     this.elBtnPauseRecord = document.getElementById('btn-pause-record');
     this.elSelectDirection = document.getElementById('select-direction');
     this.elSelectCategory = document.getElementById('select-category');
+    this.elSelectChunkMode = document.getElementById('select-chunk-mode');
     this.elSelectAudioSource = document.getElementById('select-audio-source');
     this.elSelectGain = document.getElementById('select-gain');
     this.elSelectDefaultGain = document.getElementById('select-default-gain');
@@ -2366,6 +2652,8 @@ class App {
     this.elLivePreview = document.getElementById('livePreview');
     this.elLiveText = document.getElementById('liveText');
     this.elLiveEngineTag = document.getElementById('liveEngineTag');
+    this.elLiveBufferStatus = document.getElementById('liveBufferStatus');
+    this.elBtnFlushNow = document.getElementById('btn-flush-now');
     this.elMeterBar = document.querySelector('.meter-bar');
 
     this.elToggleDiag = document.getElementById('toggle-diag');
@@ -2412,6 +2700,7 @@ class App {
     this.audioSource = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, 'mic');
     this.direction = ConfigManager.get(ConfigManager.STORAGE_KEYS.DIRECTION, 'auto');
     this.category = ConfigManager.get(ConfigManager.STORAGE_KEYS.CATEGORY, 'HKC');
+    this.chunkMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.CHUNK_MODE, 'long');
     this.gain = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAIN, '2.5');
     this.engineMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(ConfigManager.STORAGE_KEYS.LIVE_MODEL, 'models/gemini-3.5-transcribe-live');
@@ -2434,6 +2723,8 @@ class App {
     if (this.elSelectAudioSource) this.elSelectAudioSource.value = this.audioSource;
     this.elSelectDirection.value = this.direction;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
+    if (this.elSelectChunkMode) this.elSelectChunkMode.value = this.chunkMode;
+    this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
     if (this.elSelectGain) this.elSelectGain.value = this.gain;
     if (this.elSelectDefaultGain) this.elSelectDefaultGain.value = this.gain;
     this.audioService.setGain(this.gain);
@@ -2484,15 +2775,37 @@ class App {
     }
 
     this.elSelectDirection.addEventListener('change', (e) => {
+      if (this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('direction-change');
+      }
       this.direction = e.target.value;
       ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, this.direction);
       this.geminiClient.setDirection(this.direction);
       this.webSpeechService.setDirection(this.direction);
+      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
       this.log('info', `翻訳方向変更: ${this.direction}`);
       if (this.isRecording) {
         this.showToast('翻訳方向が変更されました。次回発話から適用されます。', 'info');
       }
     });
+
+    if (this.elSelectChunkMode) {
+      this.elSelectChunkMode.addEventListener('change', (e) => {
+        this.chunkMode = e.target.value;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.CHUNK_MODE, this.chunkMode);
+        this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+        this.log('info', `翻訳区切りモード変更: ${this.chunkMode}`);
+        this.showToast('翻訳の区切り設定を変更しました。', 'info');
+      });
+    }
+
+    if (this.elBtnFlushNow) {
+      this.elBtnFlushNow.addEventListener('click', () => {
+        if (this.utteranceBuffer.hasPendingText()) {
+          this.utteranceBuffer.flushAll('manual-button');
+        }
+      });
+    }
 
     if (this.elSelectCategory) {
       this.elSelectCategory.addEventListener('change', (e) => {
@@ -2517,7 +2830,7 @@ class App {
       if (confirm('タイムラインの翻訳履歴を全消去しますか？')) {
         this.records = [];
         this.savedRecordCount = 0;
-        this.sentenceSplitter.reset();
+        this.utteranceBuffer.reset();
         this.hasUnsavedChanges = false;
         this.elTranscriptList.innerHTML = '';
         this.elEmptyState.style.display = 'block';
@@ -2632,7 +2945,7 @@ class App {
         const res = await GasStorageClient.ping(url, this.elInputGasToken.value.trim());
         if (res.status === 'ok' || res.status === 'success') {
           const authNote = res.authRequired ? ' (認証保護あり)' : '';
-          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.8.0'})${authNote}`;
+          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.6.0'})${authNote}`;
           this.elGasTestResult.className = 'test-result-text success';
           this.log('success', `GAS Web App 疎通確認完了: ${url}`);
         } else {
@@ -2655,16 +2968,13 @@ class App {
       this.stopRecording();
     };
     this.geminiClient.onInterimCallback = (text) => {
-      const rem = this.sentenceSplitter.feed(text, (chunk) => {
-        this._handleFinalSpeech(chunk, null);
-      });
-      this._renderInterim(rem);
+      this.utteranceBuffer.pushInterim(text);
     };
-    this.geminiClient.onFinalCallback = (finalText, langCode) => {
-      this.sentenceSplitter.flush(finalText, (chunk) => {
-        this._handleFinalSpeech(chunk, langCode);
-      });
-      this._renderInterim('');
+    this.geminiClient.onFinalCallback = (rawFinalText, langCode) => {
+      this.utteranceBuffer.pushFinal(rawFinalText, langCode, { fromWebSpeech: false });
+    };
+    this.geminiClient.onTurnCompleteCallback = () => {
+      this.utteranceBuffer.markTurnComplete();
     };
 
     // QR Modal Events
@@ -2785,16 +3095,10 @@ class App {
         this.webSpeechService.start(
           this.direction,
           (interim) => {
-            const rem = this.sentenceSplitter.feed(interim, (chunk) => {
-              this._handleFinalSpeech(chunk, null);
-            });
-            this._renderInterim(rem);
+            this.utteranceBuffer.pushInterim(interim);
           },
           (finalText, lang) => {
-            this.sentenceSplitter.flush(finalText, (chunk) => {
-              this._handleFinalSpeech(chunk, lang);
-            });
-            this._renderInterim('');
+            this.utteranceBuffer.pushFinal(finalText, lang, { fromWebSpeech: true });
           },
           (err) => {
             this.log('error', `WebSpeechエラー: ${err.message}`);
@@ -2808,11 +3112,11 @@ class App {
         this.log('success', 'ブラウザ標準音声認識 + Gemini翻訳パイプラインが起動しました。');
       }
 
-      if (this.sentenceSplitter) this.sentenceSplitter.reset();
       this.isRecording = true;
       this.isPaused = false;
       this.elLivePreview.style.display = 'flex';
-      this._renderInterim('話しかけてください...');
+      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+      this.utteranceBuffer.reset();
       this._updateStatus('recording');
       this._updateUIState();
       this.showToast('音声認識と自動翻訳を開始しました。マイクに向かって話してください。', 'success');
@@ -2842,7 +3146,9 @@ class App {
       try { this.webSpeechService.stop(); } catch (e) {}
     }
 
-    if (this.sentenceSplitter) this.sentenceSplitter.reset();
+    if (this.utteranceBuffer) {
+      this.utteranceBuffer.flushAll('stop-recording');
+    }
     this.isRecording = false;
     this.isPaused = false;
     this.activeEngine = 'none';
@@ -2878,6 +3184,9 @@ class App {
       } else if (this.activeEngine === 'web-speech') {
         this.webSpeechService.pause();
       }
+      if (this.utteranceBuffer && this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('pause-recording');
+      }
       this.isPaused = true;
       this._renderInterim('一時停止中 (音声を認識しません)');
       this._updateStatus('paused');
@@ -2899,11 +3208,64 @@ class App {
       this.elLiveText.className = 'live-text live-placeholder';
       this.elLiveText.textContent = this.isRecording
         ? '話しかけてください...'
-        : 'マイクを開始すると、リアルタイムの音声認識プレビューが表示されます...';
+        : 'マイクを開始すると、リアルタイムの原語プレビューが表示されます...';
     } else {
-      this.elLiveText.className = 'live-text';
+      this.elLiveText.className = 'live-text live-placeholder';
       this.elLiveText.textContent = text;
     }
+  }
+
+  _renderLiveDisplay({ committed, interim, totalChars, targetLang, silenceSec }) {
+    if (!this.elLiveText) return;
+
+    const hasText = Boolean(committed || interim);
+
+    if (this.elBtnFlushNow) {
+      this.elBtnFlushNow.disabled = !hasText;
+    }
+
+    if (this.elLiveBufferStatus) {
+      if (!hasText) {
+        this.elLiveBufferStatus.textContent = '発話待機中';
+        this.elLiveBufferStatus.className = 'tag buffer-status';
+      } else if (targetLang === 'ja') {
+        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒 or 文末で長文日本語訳）`;
+        this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
+      } else {
+        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒で英訳）`;
+        this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
+      }
+    }
+
+    if (!hasText) {
+      this.elLiveText.className = 'live-text live-placeholder';
+      this.elLiveText.textContent = this.isRecording
+        ? (this.isPaused ? '一時停止中 (音声を認識しません)' : '話しかけてください...')
+        : 'マイクを開始すると、リアルタイムの原語プレビューが表示されます...';
+      return;
+    }
+
+    this.elLiveText.className = 'live-text';
+    const parts = [];
+    if (committed) {
+      parts.push(`<span class="live-committed">${this._escapeHTML(committed)}</span>`);
+    }
+    if (interim) {
+      parts.push(`<span class="live-interim">${this._escapeHTML(interim)}</span>`);
+    }
+    this.elLiveText.innerHTML = parts.join(committed && interim ? ' ' : '');
+    // 長文になっても最新の発話部分が常に見えるよう自動スクロール
+    this.elLiveText.scrollTop = this.elLiveText.scrollHeight;
+  }
+
+  _getRecentContext(excludeRecordId = null) {
+    return this.records
+      .filter((r) => r.id !== excludeRecordId && r.originalText && !r.isTranslating)
+      .slice(-2)
+      .map((r) => ({
+        original: r.originalText,
+        translated: r.translatedText || ''
+      }));
   }
 
   /**
@@ -2915,8 +3277,6 @@ class App {
 
   _handleFinalSpeech(finalText, langCode) {
     if (!finalText || finalText.trim() === '') return;
-
-    this._renderInterim('話しかけてください...');
 
     const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
     const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -2960,7 +3320,8 @@ class App {
       this.gasUrl,
       this.gasToken,
       recordId,
-      (id, transResult) => this._onTranslationComplete(id, transResult)
+      (id, transResult) => this._onTranslationComplete(id, transResult),
+      this._getRecentContext(recordId)
     );
   }
 
@@ -3074,7 +3435,8 @@ class App {
           this.gasUrl,
           this.gasToken,
           item.id,
-          (id, transResult) => this._onTranslationComplete(id, transResult)
+          (id, transResult) => this._onTranslationComplete(id, transResult),
+          this._getRecentContext(item.id)
         );
         this.showToast('再翻訳を開始しました。', 'info');
         return;
@@ -3433,6 +3795,7 @@ class App {
       gasToken: this.gasToken || '',
       direction: this.direction || 'auto',
       category: this.category || 'HKC',
+      chunkMode: this.chunkMode || 'long',
       gain: this.gain || '2.5',
       engineMode: this.engineMode || 'auto',
       liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
@@ -3482,6 +3845,7 @@ class App {
         if (config.gasToken) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, config.gasToken);
         if (config.direction) ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, config.direction);
         if (config.category) ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, config.category);
+        if (config.chunkMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.CHUNK_MODE, config.chunkMode);
         if (config.gain) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, config.gain);
         if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
         if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
