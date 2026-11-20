@@ -1,4 +1,4 @@
-/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.10.0 - 4-Language & Mobile/iPad Optimized) */
+/* style.css - Modern Responsive Stylesheet for Gemini Live Translator (v2.10.1 - 4-Language & Mobile/iPad Optimized) */
 
 :root {
   --primary: #1b365d;
@@ -1033,7 +1033,7 @@ body.modal-open {
 }
 
 /* ====================================================
-   v2.10.0: Real-time Original Display & Long-Form Buffer UI
+   v2.10.1: Real-time Original Display & Long-Form Buffer UI
    ==================================================== */
 .live-head {
   flex-wrap: wrap;

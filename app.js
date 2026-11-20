@@ -1918,12 +1918,8 @@ class TranslationService {
         return `  (${idx + 1}) Original: ${origSnippet}${transSnippet ? ` | Translation: ${transSnippet}` : ''}`;
       });
       contextBlock =
-        `[Recent Conversation Context — FOR REFERENCE ONLY. DO NOT TRANSLATE THIS SECTION. Use it only to resolve pronouns, tone, and technical terminology consistency.]
-` +
-        lines.join('
-') + '
-
-';
+        '[Recent Conversation Context — FOR REFERENCE ONLY. DO NOT TRANSLATE THIS SECTION. Use it only to resolve pronouns, tone, and technical terminology consistency.]\n' +
+        lines.join('\n') + '\n\n';
     }
 
     const domainHint = category
@@ -1931,33 +1927,21 @@ class TranslationService {
       : '';
 
     const longFormInstruction = targetLang === 'ja'
-      ? `5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.
-`
-      : `5. Produce fluent, natural, and accurate business English preserving the speaker's complete meaning.
-`;
+      ? '5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.\n'
+      : '5. Produce fluent, natural, and accurate business English preserving the speaker\'s complete meaning.\n';
 
     const prompt =
-      `You are a professional consecutive/simultaneous interpreter specializing in maritime audit and safety.${domainHint}
-` +
-      `Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).
-` +
-      `Translate ONLY the [Text to Translate] from ${srcName} into fluent, natural, and accurate ${targetName}.
-` +
-      `STRICT CONSTRAINTS:
-` +
-      `1. Return ONLY the direct translation of [Text to Translate].
-` +
-      `2. Do not include quotes, explanations, language labels, prefixes, or notes.
-` +
-      `3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.
-` +
-      `4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.
-` +
-      longFormInstruction + '
-' +
+      `You are a professional consecutive/simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n` +
+      'Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n' +
+      `Translate ONLY the [Text to Translate] from ${srcName} into fluent, natural, and accurate ${targetName}.\n` +
+      'STRICT CONSTRAINTS:\n' +
+      '1. Return ONLY the direct translation of [Text to Translate].\n' +
+      '2. Do not include quotes, explanations, language labels, prefixes, or notes.\n' +
+      '3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n' +
+      '4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n' +
+      longFormInstruction + '\n' +
       contextBlock +
-      `[Text to Translate]:
-${text}`;
+      `[Text to Translate]:\n${text}`;
 
     // Layer 1: Gemini REST API (Cascade Fallback)
     if (apiKey && apiKey.trim() !== '') {
@@ -2293,15 +2277,15 @@ class LongFormUtteranceBuffer {
     if (!clean) return false;
 
     const currentTarget = this.bufferTargetLang; // 'ja' (外国語発話中) or 'en' (日本語発話中)
-    const kanaCount = (clean.match(/[぀-ゟ゠-ヿ]/g) || []).length;
-    const indicCount = (clean.match(/[ऀ-ॿঀ-৿]/g) || []).length;
+    const kanaCount = (clean.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
+    const indicCount = (clean.match(/[\u0900-\u097F\u0980-\u09FF]/g) || []).length;
     const latinWords = clean.match(/[A-Za-z]{2,}/g) || [];
     const latinLetters = (clean.match(/[A-Za-z]/g) || []).length;
 
     if (currentTarget === 'ja') {
       // 外国語バッファ蓄積中に、明確な日本語（かな2文字以上、または明示的なjaヒント＋漢字）が来た場合
       if (kanaCount >= 2) return true;
-      if (langCode && String(langCode).toLowerCase().startsWith('ja') && /[一-鿿]/.test(clean)) return true;
+      if (langCode && String(langCode).toLowerCase().startsWith('ja') && /[\u4E00-\u9FFF]/.test(clean)) return true;
       return false;
     } else {
       // 日本語バッファ蓄積中に、明確な外国語（ベンガル/ヒンディー文字、または3単語/18文字以上の英語）が来た場合
@@ -2325,13 +2309,13 @@ class LongFormUtteranceBuffer {
     const startsWithSpace = /^\s/.test(addition);
     const endsWithSpace = /\s$/.test(base);
     if (startsWithSpace || endsWithSpace) {
-      return (base + addition).replace(/[ 	]{2,}/g, ' ');
+      return (base + addition).replace(/[ \t]{2,}/g, ' ');
     }
 
     const lastChar = base.slice(-1);
     const firstChar = addition.charAt(0);
-    const isCJK = (ch) => /[　-ヿ㐀-䶿一-鿿]/.test(ch);
-    const startsWithClosingPunct = /^[.,?!;:)\]'"’”）。、！？।॥]/.test(firstChar);
+    const isCJK = (ch) => /[\u3000-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]/.test(ch);
+    const startsWithClosingPunct = /^[.,?!;:)\]'""’”）。、！？\u0964\u0965]/.test(firstChar);
 
     if (startsWithClosingPunct) {
       return base + addition;
@@ -2341,7 +2325,7 @@ class LongFormUtteranceBuffer {
     }
 
     // 文末・句読点の後、またはターン終了後／WebSpeech確定時は半角スペースで接続
-    const endsWithPunct = /[.?!,;:।॥]$/.test(lastChar);
+    const endsWithPunct = /[.?!,;:\u0964\u0965]$/.test(lastChar);
     if (endsWithPunct || forceSpaceIfNonCJK) {
       return base + ' ' + addition;
     }
@@ -2448,7 +2432,7 @@ class LongFormUtteranceBuffer {
     const slice = text.slice(0, Math.min(text.length, maxIdx));
 
     // 文末記号（後ろが空白または文字列末尾、あるいは全角/インド系句点）
-    const sentenceRegex = /([.?!](?=\s|$)|[。！？।॥])/g;
+    const sentenceRegex = /([.?!](?=\s|$)|[。！？\u0964\u0965])/g;
     let lastSentenceEnd = -1;
     let m;
     while ((m = sentenceRegex.exec(slice)) !== null) {
@@ -2608,7 +2592,7 @@ class App {
         }
       }
     }
-    this.log('info', '初期化完了 (v2.10.0)。リアルタイム原語表示＋長文日本語翻訳・4言語自動認識＆iPad対応が有効です。');
+    this.log('info', '初期化完了 (v2.10.1)。リアルタイム原語表示＋長文日本語翻訳・4言語自動認識＆iPad対応が有効です。');
   }
 
   log(type, message) {
