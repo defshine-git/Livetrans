@@ -848,33 +848,91 @@ global.QRCode = QRCode;
 })(typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : this));
 
 /**
- * app.js - Robust Frontend Logic for Gemini Live Bilingual Translator
- * Version: 2.10.0 (Real-time Original Display + Long-Form Context-Aware Japanese Translation)
- * 
- * Features:
- * 1. 2-Column Body Grid (原文 / 訳文) with responsive single-column layout.
- * 2. Role rotation tags: Auditor (監査員), Yard Rep (ヤード担当者), Facility (施設側), Other (その他).
- * 3. In-place card actions: Edit (✏️), Retry (🔄), Delete (🗑️), Copy (📋).
- * 4. Dedicated Live Transcription Banner with audio meter.
- * 5. Full Markdown table copy for meeting minutes.
- * 6. Single Document Sync: 確定した全翻訳をひとつのGoogleドキュメントとして確実に同期・保存。
+ * app.js - Optimized Frontend Architecture for Bilingual Transcriber
+ * Version: 3.0.0 (Refactored, Deduplicated & Audited Release)
+ *
+ * Modules:
+ *  1. Constants & Shared Utilities (Language detection, Base64 UTF-8, Timeout fetch)
+ *  2. ConfigManager (localStorage persistence)
+ *  3. AudioCaptureService (Anti-aliased 16kHz PCM, far-field boost, iPad/iOS unlock)
+ *  4. WebSpeechService (Native Web Speech API fallback)
+ *  5. GeminiLiveClient (Single `audio` stream, language-lock setup, auto-reconnect x5)
+ *  6. GeminiTextClient (Shared Gemini REST cascade client for Translation & Summary)
+ *  7. TranslationService (FIFO queue, dynamic prior-context continuity, custom nuance prompt)
+ *  8. SummaryService (On-demand lookback structured summarizer)
+ *  9. GasStorageClient (Google Docs single-document sync & GAS fallback)
+ * 10. LongFormUtteranceBuffer (Real-time original display + cohesive Japanese chunking)
+ * 11. App (Modular UI controller with concurrency locks & DOM bounds)
  */
 
+// ==========================================
+// 1. Constants & Shared Utilities
+// ==========================================
+const APP_VERSION = '3.0.0';
 
-/**
- * iPadOS / iOS 環境判定
- */
+const DEFAULT_SETTINGS = Object.freeze({
+  DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
+  DEFAULT_LIVE_MODEL: 'models/gemini-3.5-transcribe-live',
+  GEMINI_TEXT_MODELS: Object.freeze([
+    'gemini-3.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash'
+  ]),
+  MAX_LOG_LINES: 300
+});
+
+const LANGUAGE_META = Object.freeze({
+  ja: { name: '日本語', englishName: 'Japanese', badge: '🇯🇵 日本語' },
+  en: { name: '英語', englishName: 'English', badge: '🇺🇸 英語' },
+  bn: { name: 'ベンガル語', englishName: 'Bengali (বাংলা)', badge: '🇧🇩 ベンガル語' },
+  hi: { name: 'ヒンディー語', englishName: 'Hindi (हिन्दी)', badge: '🇮🇳 ヒンディー語' }
+});
+
+const DIRECTION_LANGUAGE_CODES = Object.freeze({
+  'ja-to-en': ['ja-JP'],
+  'en-to-ja': ['en-US'],
+  'bn-to-ja': ['bn-BD', 'bn-IN', 'en-US'],
+  'hi-to-ja': ['hi-IN', 'en-US'],
+  'auto': ['ja-JP', 'en-US', 'bn-BD', 'bn-IN', 'hi-IN']
+});
+
+const ROLES = Object.freeze([
+  'Auditor (監査員)',
+  'Yard Rep (ヤード担当者)',
+  'Facility (施設側)',
+  'Other (その他)'
+]);
+
+const DEFAULT_SYSTEM_INSTRUCTION =
+  'You are a speech transcription engine for maritime and safety audits. ' +
+  'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
+  'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
+  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
+  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
+
+const TRANSLATION_PROMPT_PRESETS = Object.freeze({
+  audit:
+    '【テーマ・ニュアンス: 監査・法令厳密】規制要件、認証基準、不適合・是正措置、責任範囲のニュアンスを正確に翻訳してください。推測や過度な意訳は避け、専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC等）は原語または定訳を維持してください。',
+  business:
+    '【テーマ・ニュアンス: 会議・丁寧ビジネス】ビジネスミーティング・顧客折衝向けの自然で丁寧な敬語（です・ます調）に整えてください。発言の意図や結論が明確に伝わるよう、話の前後関係をなめらかに繋いで翻訳してください。',
+  field:
+    '【テーマ・ニュアンス: 現場・口語かみ砕き】現場作業員やヤード担当者のくだけた口語表現・言い直し・省略を自然にくみ取り、安全衛生や作業手順の状況が直感的に把握できる平易で分かりやすい日本語にしてください。',
+  conference:
+    '【テーマ・ニュアンス: 講演・パネル議論】国際会議・セミナー・パネルディスカッションの文脈として、登壇者の主張や背景説明の論理展開が伝わる、読みやすく洗練された解説調の日本語に翻訳してください。'
+});
+
+/** iPadOS / iOS 環境判定 */
 function isIPadOrIOS() {
   if (typeof navigator === 'undefined') return false;
-  return /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
 /**
  * 4言語（日本語・英語・ベンガル語・ヒンディー語）の高精度自動判別
- * 韓国語やスワヒリ語等の誤認識・ハルシネーションを厳密に排除
- * @param {string} text 認識されたテキスト
- * @param {string|null} hintedLangCode Gemini Live から返却された言語コード
+ * @param {string} text
+ * @param {string|null} hintedLangCode
  * @returns {'ja'|'en'|'bn'|'hi'}
  */
 function detectLanguage4(text, hintedLangCode = null) {
@@ -885,72 +943,51 @@ function detectLanguage4(text, hintedLangCode = null) {
     if (code.startsWith('hi')) return 'hi';
     if (code.startsWith('en')) return 'en';
   }
-
   if (!text) return 'en';
-
-  // 1. 日本語: ひらがな、カタカナ
-  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) {
-    return 'ja';
-  }
-
-  // 2. ベンガル語 (Bengali Script: \u0980-\u09FF)
-  if (/[\u0980-\u09FF]/.test(text)) {
-    return 'bn';
-  }
-
-  // 3. ヒンディー語 (Devanagari Script: \u0900-\u097F)
-  if (/[\u0900-\u097F]/.test(text)) {
-    return 'hi';
-  }
-
-  // 4. 漢字（日本語監査用語など）
-  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) {
-    return 'ja';
-  }
-
-  // 5. その他（ラテン文字等）は英語として判定
+  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return 'ja';
+  if (/[\u0980-\u09FF]/.test(text)) return 'bn';
+  if (/[\u0900-\u097F]/.test(text)) return 'hi';
+  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) return 'ja';
   return 'en';
 }
 
 function getLanguageDisplayName(langCode) {
-  switch (langCode) {
-    case 'ja': return '日本語';
-    case 'en': return '英語';
-    case 'bn': return 'ベンガル語';
-    case 'hi': return 'ヒンディー語';
-    default: return String(langCode || '英語').toUpperCase();
-  }
+  return LANGUAGE_META[langCode]?.name || String(langCode || '英語').toUpperCase();
 }
 
 function getLanguageBadge(langCode) {
-  switch (langCode) {
-    case 'ja': return '🇯🇵 日本語';
-    case 'en': return '🇺🇸 英語';
-    case 'bn': return '🇧🇩 ベンガル語';
-    case 'hi': return '🇮🇳 ヒンディー語';
-    default: return '🌐 ' + (langCode || '自動');
+  return LANGUAGE_META[langCode]?.badge || ('🌐 ' + (langCode || '自動'));
+}
+
+function encodeBase64Utf8(str) {
+  return btoa(
+    encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, (_, p1) => String.fromCharCode(parseInt(p1, 16)))
+  );
+}
+
+function decodeBase64Utf8(b64) {
+  const binary = atob(b64);
+  const percentEncoded = Array.prototype.map
+    .call(binary, (c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+    .join('');
+  return decodeURIComponent(percentEncoded);
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-const ROLES = [
-  'Auditor (監査員)',
-  'Yard Rep (ヤード担当者)',
-  'Facility (施設側)',
-  'Other (その他)'
-];
-
 // ==========================================
-const DEFAULT_SYSTEM_INSTRUCTION =
-  'You are a speech transcription engine for maritime and safety audits. ' +
-  'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
-  'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
-  'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
-  'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
-
-// 1. Config Manager (localStorage)
+// 2. Config Manager (localStorage)
 // ==========================================
 class ConfigManager {
-  static STORAGE_KEYS = {
+  static STORAGE_KEYS = Object.freeze({
     API_KEY: 'glt_gemini_api_key',
     GAS_URL: 'glt_gas_web_app_url',
     GAS_TOKEN: 'glt_gas_token',
@@ -965,8 +1002,13 @@ class ConfigManager {
     LIVE_MODEL: 'glt_live_model',
     AUDIO_SOURCE: 'glt_audio_source',
     SYSTEM_INSTRUCTION: 'glt_system_instruction',
-    CHUNK_MODE: 'glt_chunk_mode'
-  };
+    CHUNK_MODE: 'glt_chunk_mode',
+    TRANSLATION_CUSTOM_PROMPT: 'glt_translation_custom_prompt',
+    TRANSLATION_PROMPT_OPEN: 'glt_translation_prompt_open',
+    CONTEXT_WINDOW: 'glt_context_window',
+    SUMMARY_RANGE: 'glt_summary_range',
+    SUMMARY_CUSTOM_MIN: 'glt_summary_custom_min'
+  });
 
   static get(key, defaultValue = '') {
     try {
@@ -988,7 +1030,7 @@ class ConfigManager {
 }
 
 // ==========================================
-// 2. Audio Capture Service (Anti-Aliased 16kHz PCM - iPad/iOS Optimized)
+// 3. Audio Capture Service (Anti-Aliased 16kHz PCM - iPad/iOS Optimized)
 // ==========================================
 class AudioCaptureService {
   constructor() {
@@ -1023,10 +1065,6 @@ class AudioCaptureService {
     }
   }
 
-  /**
-   * iPadOS / iOS 向け同期アンロック処理
-   * ユーザーのタップ・クリック操作内で同期実行し、AudioContext を即時アクティブ化
-   */
   unlockContext() {
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -1037,7 +1075,6 @@ class AudioCaptureService {
       if (this.audioContext.state === 'suspended') {
         this.audioContext.resume().catch(() => {});
       }
-      // iOS WebKit向け無音バッファ再生 (オーディオハードウェアセッション起動)
       const buffer = this.audioContext.createBuffer(1, 1, 22050);
       const source = this.audioContext.createBufferSource();
       source.buffer = buffer;
@@ -1064,14 +1101,7 @@ class AudioCaptureService {
     return Promise.resolve();
   }
 
-  async start(onChunk, onVolume, sourceType = 'mic', onEnded = null) {
-    if (this.isRecording) return;
-    this.onChunkCallback = onChunk;
-    this.onVolumeCallback = onVolume;
-
-    this.unlockContext();
-    await this.ensureContext();
-
+  async _acquireMediaStream(sourceType, onEnded) {
     const isIOS = isIPadOrIOS();
 
     if (sourceType === 'display') {
@@ -1084,10 +1114,7 @@ class AudioCaptureService {
 
       let displayStream;
       try {
-        displayStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
-        });
+        displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       } catch (err) {
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
           throw new Error('画面・音声共有がキャンセルされました。');
@@ -1098,77 +1125,65 @@ class AudioCaptureService {
       const audioTracks = displayStream.getAudioTracks();
       if (audioTracks.length === 0) {
         displayStream.getTracks().forEach((t) => t.stop());
-        throw new Error('音声が共有されていません。共有ウィンドウで「タブの音声も共有」または「音声を共有」のチェックボックスに必ずチェックを入れてください。');
+        throw new Error('音声が共有されていません。共有ウィンドウで「タブの音声も共有」または「音声を共有」にチェックを入れてください。');
       }
 
       displayStream.getVideoTracks().forEach((t) => t.stop());
-      this.mediaStream = new MediaStream([audioTracks[0]]);
-
       if (onEnded) {
-        audioTracks[0].onended = () => {
-          onEnded();
-        };
+        audioTracks[0].onended = () => onEnded();
       }
-    } else {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
-      }
-
-      // iOS Safari でエラーの原因となる非標準 goog* 制約を完全排除し、安全にフォールバック
-      const constraintCandidates = [
-        {
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: !isIOS,
-            autoGainControl: true
-          }
-        },
-        {
-          audio: {
-            echoCancellation: true
-          }
-        },
-        {
-          audio: true
-        }
-      ];
-
-      let stream = null;
-      let lastError = null;
-
-      for (const constraints of constraintCandidates) {
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-          if (stream) break;
-        } catch (err) {
-          lastError = err;
-          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-            throw new Error('マイクへのアクセスが拒否されました。iPad/ブラウザの設定からマイク使用を許可してください。');
-          }
-          console.warn('[AudioCapture] getUserMedia attempt failed with:', constraints, err);
-        }
-      }
-
-      if (!stream) {
-        throw new Error(`マイクの取得に失敗しました: ${lastError ? lastError.message : '利用可能なマイクが見つかりませんでした'}`);
-      }
-
-      this.mediaStream = stream;
+      return new MediaStream([audioTracks[0]]);
     }
 
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
+    }
+
+    const constraintCandidates = [
+      { audio: { echoCancellation: true, noiseSuppression: !isIOS, autoGainControl: true } },
+      { audio: { echoCancellation: true } },
+      { audio: true }
+    ];
+
+    let lastError = null;
+    for (const constraints of constraintCandidates) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (stream) return stream;
+      } catch (err) {
+        lastError = err;
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          throw new Error('マイクへのアクセスが拒否されました。iPad/ブラウザの設定からマイク使用を許可してください。');
+        }
+        console.warn('[AudioCapture] getUserMedia fallback:', constraints, err);
+      }
+    }
+
+    throw new Error(`マイクの取得に失敗しました: ${lastError ? lastError.message : '利用可能なマイクが見つかりませんでした'}`);
+  }
+
+  async start(onChunk, onVolume, sourceType = 'mic', onEnded = null) {
+    if (this.isRecording) return;
+    this.onChunkCallback = onChunk;
+    this.onVolumeCallback = onVolume;
+
+    this.unlockContext();
+    await this.ensureContext();
+
+    this.mediaStream = await this._acquireMediaStream(sourceType, onEnded);
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
 
-    // 1. Highpass Filter: 80Hz cutoff
+    // 1. 80Hz Highpass Filter (低周波ノイズ除去)
     this.highpassNode = this.audioContext.createBiquadFilter();
     this.highpassNode.type = 'highpass';
     this.highpassNode.frequency.value = 80;
     this.highpassNode.Q.value = 0.7;
 
-    // 2. Pre-amp Gain Booster
+    // 2. Pre-amp Gain Booster (遠距離集音)
     this.gainNode = this.audioContext.createGain();
     this.gainNode.gain.value = this.gainValue;
 
-    // 3. Dynamics Compressor
+    // 3. Dynamics Compressor (音割れ防止)
     this.compressorNode = this.audioContext.createDynamicsCompressor();
     this.compressorNode.threshold.value = -32;
     this.compressorNode.knee.value = 24;
@@ -1176,7 +1191,7 @@ class AudioCaptureService {
     this.compressorNode.attack.value = 0.003;
     this.compressorNode.release.value = 0.20;
 
-    // 4. Lowpass Anti-Aliasing Filter
+    // 4. 7.5kHz Lowpass Anti-Aliasing Filter
     this.filterNode = this.audioContext.createBiquadFilter();
     this.filterNode.type = 'lowpass';
     this.filterNode.frequency.value = 7500;
@@ -1190,10 +1205,9 @@ class AudioCaptureService {
     this.analyserNode.fftSize = 256;
     this.filterNode.connect(this.analyserNode);
 
-    const bufferSize = 2048;
-    this.processorNode = this.audioContext.createScriptProcessor(bufferSize, 1, 1);
-    
-    // WebKit (iOS/iPadOS) のガベージコレクション切断バグを完全防止
+    this.processorNode = this.audioContext.createScriptProcessor(2048, 1, 1);
+
+    // WebKit (iOS/iPadOS) のGCによるオーディオノード切断防止
     if (typeof window !== 'undefined') {
       window._activeAudioSession = {
         context: this.audioContext,
@@ -1206,38 +1220,30 @@ class AudioCaptureService {
         processor: this.processorNode,
         stream: this.mediaStream
       };
-      window._activeAudioProcessorNode = this.processorNode;
     }
 
     const inputSampleRate = this.audioContext.sampleRate;
     const targetSampleRate = 16000;
 
     this.processorNode.onaudioprocess = (e) => {
-      const outputBuffer = e.outputBuffer.getChannelData(0);
-      outputBuffer.fill(0);
-
+      e.outputBuffer.getChannelData(0).fill(0);
       if (!this.isRecording || this.isPaused) return;
 
-      // iPadバックグラウンド復帰時の自動リカバリー
       if (this.audioContext && this.audioContext.state === 'suspended') {
         this.audioContext.resume().catch(() => {});
       }
 
       const inputBuffer = e.inputBuffer.getChannelData(0);
-
       if (this.onVolumeCallback && this.analyserNode) {
         let sum = 0;
-        const len = inputBuffer.length;
-        for (let i = 0; i < len; i++) {
+        for (let i = 0; i < inputBuffer.length; i++) {
           sum += inputBuffer[i] * inputBuffer[i];
         }
-        const rms = Math.sqrt(sum / len);
-        this.onVolumeCallback(rms);
+        this.onVolumeCallback(Math.sqrt(sum / inputBuffer.length));
       }
 
       const downsampled = this._downsampleBuffer(inputBuffer, inputSampleRate, targetSampleRate);
       const base64Chunk = this._int16ToBase64(downsampled);
-
       if (this.onChunkCallback && base64Chunk) {
         this.onChunkCallback(base64Chunk);
       }
@@ -1257,18 +1263,24 @@ class AudioCaptureService {
     this.isRecording = false;
     this.isPaused = false;
     if (typeof window !== 'undefined') {
-      window._activeAudioProcessorNode = null;
       window._activeAudioSession = null;
     }
-    if (this.processorNode) { try { this.processorNode.disconnect(); } catch (e) {} this.processorNode = null; }
-    if (this.analyserNode) { try { this.analyserNode.disconnect(); } catch (e) {} this.analyserNode = null; }
-    if (this.filterNode) { try { this.filterNode.disconnect(); } catch (e) {} this.filterNode = null; }
-    if (this.compressorNode) { try { this.compressorNode.disconnect(); } catch (e) {} this.compressorNode = null; }
-    if (this.gainNode) { try { this.gainNode.disconnect(); } catch (e) {} this.gainNode = null; }
-    if (this.highpassNode) { try { this.highpassNode.disconnect(); } catch (e) {} this.highpassNode = null; }
-    if (this.sourceNode) { try { this.sourceNode.disconnect(); } catch (e) {} this.sourceNode = null; }
-    if (this.mediaStream) { try { this.mediaStream.getTracks().forEach((track) => track.stop()); } catch (e) {} this.mediaStream = null; }
-    if (this.audioContext) { this.audioContext.close().catch(() => {}); this.audioContext = null; }
+
+    const nodes = ['processorNode', 'analyserNode', 'filterNode', 'compressorNode', 'gainNode', 'highpassNode', 'sourceNode'];
+    for (const prop of nodes) {
+      if (this[prop]) {
+        try { this[prop].disconnect(); } catch (e) {}
+        this[prop] = null;
+      }
+    }
+    if (this.mediaStream) {
+      try { this.mediaStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      this.mediaStream = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
   }
 
   _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
@@ -1289,6 +1301,7 @@ class AudioCaptureService {
     if (!this._cachedBuffer || this._cachedBuffer.length !== newLength) {
       this._cachedBuffer = new Int16Array(newLength);
     }
+
     const result = this._cachedBuffer;
     let offsetResult = 0;
     let offsetBuffer = 0;
@@ -1313,16 +1326,17 @@ class AudioCaptureService {
   _int16ToBase64(int16Array) {
     const uint8 = new Uint8Array(int16Array.buffer, int16Array.byteOffset, int16Array.byteLength);
     let binary = '';
-    const len = uint8.byteLength;
     const chunkSize = 8192;
-    for (let i = 0; i < len; i += chunkSize) {
-      const chunk = uint8.subarray(i, Math.min(i + chunkSize, len));
+    for (let i = 0; i < uint8.byteLength; i += chunkSize) {
+      const chunk = uint8.subarray(i, Math.min(i + chunkSize, uint8.byteLength));
       binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
   }
 }
-// 3. Web Speech API Service (Native Fallback - 4-Language & iPad Optimized)
+
+// ==========================================
+// 4. Web Speech API Service (Native Fallback)
 // ==========================================
 class WebSpeechService {
   constructor() {
@@ -1340,14 +1354,17 @@ class WebSpeechService {
     return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   }
 
+  _resolveSpeechLang(direction) {
+    if (direction === 'en-to-ja') return 'en-US';
+    if (direction === 'bn-to-ja') return 'bn-BD';
+    if (direction === 'hi-to-ja') return 'hi-IN';
+    return 'ja-JP';
+  }
+
   setDirection(direction) {
     this.direction = direction;
     if (this.recognition && this.isListening) {
-      let targetLang = 'ja-JP';
-      if (this.direction === 'en-to-ja') targetLang = 'en-US';
-      else if (this.direction === 'bn-to-ja') targetLang = 'bn-BD';
-      else if (this.direction === 'hi-to-ja') targetLang = 'hi-IN';
-      else if (this.direction === 'ja-to-en') targetLang = 'ja-JP';
+      const targetLang = this._resolveSpeechLang(direction);
       if (this.recognition.lang !== targetLang) {
         this.recognition.lang = targetLang;
         try { this.recognition.stop(); } catch (e) {}
@@ -1363,19 +1380,10 @@ class WebSpeechService {
     rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-
-    if (this.direction === 'en-to-ja') {
-      rec.lang = 'en-US';
-    } else if (this.direction === 'bn-to-ja') {
-      rec.lang = 'bn-BD';
-    } else if (this.direction === 'hi-to-ja') {
-      rec.lang = 'hi-IN';
-    } else {
-      rec.lang = 'ja-JP';
-    }
+    rec.lang = this._resolveSpeechLang(this.direction);
 
     rec.onresult = (event) => {
-      if (this.isPaused) return;
+      if (!this.isListening || this.isPaused) return;
 
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -1383,8 +1391,7 @@ class WebSpeechService {
         if (item.isFinal) {
           const finalTranscript = item[0].transcript.trim();
           if (finalTranscript.length > 0 && this.onFinalCallback) {
-            const detectedLang = detectLanguage4(finalTranscript, rec.lang);
-            this.onFinalCallback(finalTranscript, detectedLang);
+            this.onFinalCallback(finalTranscript, detectLanguage4(finalTranscript, rec.lang));
           }
         } else {
           interim += item[0].transcript;
@@ -1397,50 +1404,43 @@ class WebSpeechService {
 
     rec.onerror = (event) => {
       console.warn('[WebSpeech] Error:', event.error);
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-        if (this.onErrorCallback) {
-          const msg = isIPadOrIOS()
-            ? 'マイクまたは音声認識の使用が許可されていません。iPadの「設定」→「Safari」および「Siriと検索」の音声入力を有効にしてください。'
-            : 'マイクの使用が許可されていません。';
-          this.onErrorCallback(new Error(msg));
-        }
+      if ((event.error === 'not-allowed' || event.error === 'service-not-allowed') && this.onErrorCallback) {
+        const msg = isIPadOrIOS()
+          ? 'マイクまたは音声認識の使用が許可されていません。iPadの「設定」→「Safari」および「Siriと検索」の音声入力を有効にしてください。'
+          : 'マイクの使用が許可されていません。';
+        this.onErrorCallback(new Error(msg));
       }
     };
 
     rec.onend = () => {
-      if (this.isListening && !this.isPaused) {
-        clearTimeout(this.restartTimer);
-        // iOS Safari では onend 直後の start() 呼び出しが InvalidStateError になるため、200msの遅延制御を実施
-        this.restartTimer = setTimeout(() => {
-          if (this.isListening && !this.isPaused) {
-            try {
-              if (this.recognition) {
-                this.recognition.start();
-              }
-            } catch (e) {
-              console.warn('[WebSpeech] Restart failed, re-initializing instance:', e);
-              try {
-                this.recognition = this._initRecognition();
-                if (this.recognition) this.recognition.start();
-              } catch (e2) {
-                console.error('[WebSpeech] Re-init start failed:', e2);
-              }
-            }
+      if (!this.isListening || this.isPaused) return;
+      clearTimeout(this.restartTimer);
+      // iOS Safari での InvalidStateError 回避のため 200ms 遅延で再起動
+      this.restartTimer = setTimeout(() => {
+        if (!this.isListening || this.isPaused) return;
+        try {
+          if (this.recognition) this.recognition.start();
+        } catch (e) {
+          console.warn('[WebSpeech] Restart failed, re-initializing:', e);
+          try {
+            this.recognition = this._initRecognition();
+            if (this.recognition) this.recognition.start();
+          } catch (e2) {
+            console.error('[WebSpeech] Re-init start failed:', e2);
           }
-        }, 200);
-      }
+        }
+      }, 200);
     };
 
     return rec;
   }
 
   start(direction, onInterim, onFinal, onError) {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      if (isIPadOrIOS()) {
-        throw new Error('お使いのブラウザでは音声認識APIが利用できません。iPad/iPhoneでは「Safari」をご利用いただくか、Gemini Liveモードをご利用ください。');
-      }
-      throw new Error('ブラウザの音声認識 (Web Speech API) が利用できません。Google Chrome または Microsoft Edge をご利用ください。');
+    if (!this.isSupported()) {
+      const msg = isIPadOrIOS()
+        ? 'お使いのブラウザでは音声認識APIが利用できません。iPad/iPhoneでは「Safari」をご利用いただくか、Gemini Liveモードをご利用ください。'
+        : 'ブラウザの音声認識 (Web Speech API) が利用できません。Google Chrome または Microsoft Edge をご利用ください。';
+      throw new Error(msg);
     }
 
     this.direction = direction;
@@ -1480,27 +1480,32 @@ class WebSpeechService {
     this.isPaused = false;
     clearTimeout(this.restartTimer);
     if (this.recognition) {
-      try {
-        this.recognition.stop();
-      } catch (e) {}
+      try { this.recognition.stop(); } catch (e) {}
       this.recognition = null;
     }
   }
 }
-// 4. Gemini Live WebSocket Client
+
+// ==========================================
+// 5. Gemini Live WebSocket Client (Bandwidth-Optimized & Auto-Reconnect)
 // ==========================================
 class GeminiLiveClient {
   static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
   static SESSION_RECONNECT_INTERVAL = 570000;
+  static MAX_RECONNECT_ATTEMPTS = 5;
+  static RECONNECT_DELAYS_MS = Object.freeze([1500, 3000, 5000, 8000, 12000]);
+  static MAX_QUEUED_CHUNKS = 80; // 約3.5秒分の音声チャンクを再接続中に保持
 
   constructor() {
     this.ws = null;
     this.apiKey = null;
     this.direction = 'auto';
-    this.modelName = 'models/gemini-3.5-transcribe-live';
+    this.modelName = DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL;
     this.isConnected = false;
     this.isSetupComplete = false;
     this.isReconnecting = false;
+    this.manualDisconnect = false;
+    this.reconnectAttempt = 0;
     this.chunkQueue = [];
     this.systemInstruction = null;
 
@@ -1508,12 +1513,15 @@ class GeminiLiveClient {
     this._connectReject = null;
     this._connectTimeout = null;
     this._sessionTimer = null;
+    this._reconnectTimer = null;
+    this._onlineHandler = null;
 
     this.onInterimCallback = null;
     this.onFinalCallback = null;
     this.onTurnCompleteCallback = null;
-    this.onStatusChangeCallback = null;
     this.onErrorCallback = null;
+    this.onReconnectingCallback = null;
+    this.onReconnectedCallback = null;
     this.onDisconnectCallback = null;
     this.onLogCallback = null;
   }
@@ -1525,93 +1533,163 @@ class GeminiLiveClient {
   }
 
   setDirection(direction) {
+    const changed = this.direction !== direction;
     this.direction = direction;
     this.log('info', `Gemini Live 認識言語設定を更新: ${direction}`);
+
+    if (changed && this.isConnected && this.ws && !this.isReconnecting) {
+      this.log('info', `翻訳方向変更 (${direction}) を認識エンジンへ即時反映するためシームレス再接続します...`);
+      this._seamlessReconnect()
+        .then(() => {
+          this.log('success', `認識言語を ${direction} へ切り替え完了しました。`);
+        })
+        .catch((err) => {
+          this.log('warn', `翻訳方向切替に伴う再接続失敗: ${err.message}`);
+          if (!this.manualDisconnect) {
+            this._startAutoReconnectLoop(err.closeCode || 1006, err.message);
+          }
+        });
+    }
   }
 
   _normalizeModelName(model) {
-    if (!model) return 'models/gemini-3.5-transcribe-live';
+    if (!model) return DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL;
     return model.startsWith('models/') ? model : `models/${model}`;
   }
 
-  connect(apiKey, direction, modelName, systemInstruction = null) {
+  _isNonRetryableCloseCode(code) {
+    return code === 1007 || code === 1008;
+  }
+
+  _enqueueChunk(base64Pcm) {
+    if (!base64Pcm) return;
+    if (this.chunkQueue.length >= GeminiLiveClient.MAX_QUEUED_CHUNKS) {
+      this.chunkQueue.shift();
+    }
+    this.chunkQueue.push(base64Pcm);
+  }
+
+  connect(apiKey, direction, modelName, systemInstruction = null, options = {}) {
+    const preserveQueue = !!options.preserveQueue;
+
     return new Promise((resolve, reject) => {
       this.apiKey = apiKey;
       this.direction = direction;
       this.modelName = this._normalizeModelName(modelName);
       this.systemInstruction = systemInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+      this.manualDisconnect = false;
       this.isSetupComplete = false;
       this.isConnected = false;
-      this.chunkQueue = [];
+      if (!preserveQueue) {
+        this.chunkQueue = [];
+        this.reconnectAttempt = 0;
+      }
 
+      this._cleanupTimeout();
       this._connectResolve = resolve;
       this._connectReject = reject;
 
       if (!apiKey) {
+        this._connectResolve = null;
+        this._connectReject = null;
         return reject(new Error('Gemini API キーが未設定です。'));
       }
 
       const url = `${GeminiLiveClient.WS_URL}?key=${encodeURIComponent(this.apiKey)}`;
-      this.log('info', `WebSocket接続開始: ${this.modelName}`);
+      this.log('info', `WebSocket接続開始: ${this.modelName}${preserveQueue ? ' (再接続)' : ''}`);
 
+      let socket;
       try {
-        this.ws = new WebSocket(url);
+        socket = new WebSocket(url);
+        this.ws = socket;
       } catch (err) {
         this.log('error', `WebSocket作成失敗: ${err.message}`);
+        this._connectResolve = null;
+        this._connectReject = null;
         return reject(new Error(`WebSocket初期化エラー: ${err.message}`));
       }
 
       this._connectTimeout = setTimeout(() => {
-        if (!this.isSetupComplete) {
-          const timeoutErr = new Error('Gemini Live API への接続がタイムアウトしました。');
-          this.log('warn', '接続タイムアウト (10秒)');
-          this.disconnect();
-          reject(timeoutErr);
-        }
+        if (this.ws !== socket || this.isSetupComplete) return;
+        const timeoutErr = new Error('Gemini Live API への接続がタイムアウトしました。');
+        this.log('warn', '接続タイムアウト (10秒)');
+        const pendingReject = this._connectReject;
+        this._connectResolve = null;
+        this._connectReject = null;
+        try { socket.close(); } catch (e) {}
+        if (this.ws === socket) this.ws = null;
+        if (pendingReject) pendingReject(timeoutErr);
       }, 10000);
 
-      this.ws.onopen = () => {
+      socket.onopen = () => {
+        if (this.ws !== socket || this.manualDisconnect) {
+          try { socket.close(); } catch (e) {}
+          return;
+        }
         this.log('info', 'WebSocket接続オープン。Setup送信中...');
-        this._sendSetupMessage();
+        this._sendSetupMessage(socket);
       };
 
-      this.ws.onmessage = async (event) => {
+      socket.onmessage = async (event) => {
+        if (this.ws !== socket || this.manualDisconnect) return;
         let raw = event.data;
         if (event.data instanceof Blob) {
           raw = await event.data.text();
         }
+        if (this.ws !== socket || this.manualDisconnect) return;
         this._handleServerMessage(raw);
       };
 
-      this.ws.onerror = (event) => {
-        this.log('error', 'WebSocketエラーが発生しました。');
+      socket.onerror = () => {
+        if (this.ws !== socket) return;
+        this.log('error', 'WebSocket通信エラーが発生しました。');
         this._cleanupTimeout();
         if (this._connectReject) {
-          this._connectReject(new Error('Gemini Live API への接続に失敗しました。'));
+          const pendingReject = this._connectReject;
+          this._connectResolve = null;
           this._connectReject = null;
+          pendingReject(new Error('Gemini Live API への接続に失敗しました。'));
         }
       };
 
-      this.ws.onclose = (event) => {
-        this.log('warn', `WebSocket切断: Code ${event.code}`);
+      socket.onclose = (event) => {
+        if (this.ws !== socket) return;
+        this.log('warn', `WebSocket切断: Code ${event.code}${event.reason ? ` (${event.reason})` : ''}`);
         this._cleanupTimeout();
         this._clearSessionTimer();
 
-        const wasConnected = this.isConnected && this.isSetupComplete;
+        const wasEstablished = this.isConnected && this.isSetupComplete;
         this.isConnected = false;
         this.isSetupComplete = false;
+        this.ws = null;
 
         if (this._connectReject) {
           let errorMsg = `接続が切断されました (Code: ${event.code})`;
           if (event.code === 1006) {
-            errorMsg = `Gemini Live APIに接続できませんでした (Code: 1006)。APIキーまたはモデル権限を確認してください。`;
+            errorMsg = 'Gemini Live APIに接続できませんでした (Code: 1006)。通信状態・APIキーまたはモデル権限を確認してください。';
           } else if (event.code === 1007 || event.code === 1008) {
             errorMsg = `認証またはリクエスト形式エラーです (Code: ${event.code})`;
           }
-          this._connectReject(new Error(errorMsg));
+          const err = new Error(errorMsg);
+          err.closeCode = event.code;
+          const pendingReject = this._connectReject;
+          this._connectResolve = null;
           this._connectReject = null;
-        } else if (wasConnected && !this.isReconnecting && this.onDisconnectCallback) {
-          this.onDisconnectCallback(event.code, event.reason);
+          pendingReject(err);
+          return;
+        }
+
+        if (this.manualDisconnect || this.isReconnecting) return;
+
+        if (wasEstablished) {
+          if (this._isNonRetryableCloseCode(event.code)) {
+            this.log('error', `回復不能な切断コード (${event.code}) のため自動再接続を中止します。`);
+            if (this.onDisconnectCallback) {
+              this.onDisconnectCallback(event.code, event.reason, false);
+            }
+            return;
+          }
+          this._startAutoReconnectLoop(event.code, event.reason);
         }
       };
     });
@@ -1631,50 +1709,174 @@ class GeminiLiveClient {
     }
   }
 
+  _clearReconnectTimer() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    if (this._onlineHandler && typeof window !== 'undefined') {
+      window.removeEventListener('online', this._onlineHandler);
+      this._onlineHandler = null;
+    }
+  }
+
   _startSessionResumptionTimer() {
     this._clearSessionTimer();
     this._sessionTimer = setTimeout(async () => {
+      if (this.manualDisconnect || this.isReconnecting) return;
       this.log('info', 'Gemini Live 10分セッション制限に伴う自動シームレス再接続を実行します...');
       try {
         await this._seamlessReconnect();
         this.log('success', 'シームレス再接続完了。セッションが継続更新されました。');
       } catch (err) {
-        this.log('warn', `セッション更新失敗: ${err.message}`);
+        this.log('warn', `セッション定期更新失敗 (${err.message})。自動リトライへ移行します...`);
+        if (!this.manualDisconnect) {
+          this._startAutoReconnectLoop(err.closeCode || 1006, err.message);
+        }
       }
     }, GeminiLiveClient.SESSION_RECONNECT_INTERVAL);
   }
 
   async _seamlessReconnect() {
-    if (!this.isConnected || !this.ws) return;
+    if (this.manualDisconnect) return;
     this.isReconnecting = true;
-    try {
-      this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
-      this.ws.close();
-    } catch (e) {}
+    const oldSocket = this.ws;
+    this.ws = null;
+    this.isConnected = false;
+    this.isSetupComplete = false;
+    this._clearSessionTimer();
+
+    if (oldSocket) {
+      try {
+        if (oldSocket.readyState === WebSocket.OPEN) {
+          oldSocket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+        }
+        oldSocket.close();
+      } catch (e) {}
+    }
 
     try {
-      await this.connect(this.apiKey, this.direction, this.modelName, this.systemInstruction);
+      await this.connect(this.apiKey, this.direction, this.modelName, this.systemInstruction, { preserveQueue: true });
       this.isReconnecting = false;
+      this.reconnectAttempt = 0;
     } catch (err) {
       this.isReconnecting = false;
       throw err;
     }
   }
 
+  _startAutoReconnectLoop(code, reason = '') {
+    if (this.manualDisconnect || this.isReconnecting) return;
+    this.isReconnecting = true;
+    this.reconnectAttempt = 0;
+    this._scheduleNextReconnect(code, reason);
+  }
+
+  _scheduleNextReconnect(lastCode, lastReason = '') {
+    if (this.manualDisconnect) {
+      this.isReconnecting = false;
+      this._clearReconnectTimer();
+      return;
+    }
+
+    this.reconnectAttempt += 1;
+    const maxAttempts = GeminiLiveClient.MAX_RECONNECT_ATTEMPTS;
+
+    if (this.reconnectAttempt > maxAttempts) {
+      this.log('error', `自動再接続が上限 (${maxAttempts}回) に達しました。セッションを終了します。`);
+      this.isReconnecting = false;
+      this._clearReconnectTimer();
+      this.chunkQueue = [];
+      if (this.onDisconnectCallback) {
+        this.onDisconnectCallback(lastCode, lastReason || `自動再接続上限 (${maxAttempts}回) 到達`, true);
+      }
+      return;
+    }
+
+    const delayIdx = Math.min(this.reconnectAttempt - 1, GeminiLiveClient.RECONNECT_DELAYS_MS.length - 1);
+    const delayMs = GeminiLiveClient.RECONNECT_DELAYS_MS[delayIdx];
+    const attemptNum = this.reconnectAttempt;
+
+    this.log(
+      'warn',
+      `回線瞬断検知 (Code: ${lastCode})。${(delayMs / 1000).toFixed(1)}秒後に自動再接続を試行します (${attemptNum}/${maxAttempts}回目)...`
+    );
+
+    if (this.onReconnectingCallback) {
+      this.onReconnectingCallback(attemptNum, maxAttempts, delayMs, lastCode);
+    }
+
+    const executeAttempt = async () => {
+      this._clearReconnectTimer();
+      if (this.manualDisconnect) {
+        this.isReconnecting = false;
+        return;
+      }
+
+      this.log('info', `自動再接続を実行中 (${attemptNum}/${maxAttempts}回目)...`);
+      try {
+        await this.connect(this.apiKey, this.direction, this.modelName, this.systemInstruction, { preserveQueue: true });
+        if (this.manualDisconnect) {
+          this.disconnect();
+          return;
+        }
+        this.isReconnecting = false;
+        const recoveredOnAttempt = this.reconnectAttempt;
+        this.reconnectAttempt = 0;
+        this.log('success', `自動再接続に成功しました (${recoveredOnAttempt}回目で復帰)。音声認識を継続します。`);
+        if (this.onReconnectedCallback) {
+          this.onReconnectedCallback(recoveredOnAttempt);
+        }
+      } catch (err) {
+        if (this.manualDisconnect) {
+          this.isReconnecting = false;
+          return;
+        }
+        const errCode = err.closeCode || lastCode || 1006;
+        this.log('warn', `自動再接続 ${attemptNum}/${maxAttempts}回目失敗: ${err.message}`);
+        if (this._isNonRetryableCloseCode(errCode)) {
+          this.isReconnecting = false;
+          this.chunkQueue = [];
+          if (this.onDisconnectCallback) {
+            this.onDisconnectCallback(errCode, err.message, false);
+          }
+          return;
+        }
+        this._scheduleNextReconnect(errCode, err.message);
+      }
+    };
+
+    this._clearReconnectTimer();
+    this._reconnectTimer = setTimeout(executeAttempt, delayMs);
+
+    if (typeof window !== 'undefined') {
+      this._onlineHandler = () => {
+        if (!this.manualDisconnect && this.isReconnecting && this._reconnectTimer) {
+          this.log('info', 'ネットワーク復帰を検知しました。待機をスキップして即座に再接続を試行します...');
+          executeAttempt();
+        }
+      };
+      window.addEventListener('online', this._onlineHandler, { once: true });
+    }
+  }
+
   disconnect() {
+    this.manualDisconnect = true;
     this._cleanupTimeout();
     this._clearSessionTimer();
+    this._clearReconnectTimer();
     this.isReconnecting = false;
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        try {
-          this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
-        } catch (e) {}
+    this.reconnectAttempt = 0;
+    this._connectResolve = null;
+    this._connectReject = null;
+
+    const oldSocket = this.ws;
+    this.ws = null;
+    if (oldSocket) {
+      if (oldSocket.readyState === WebSocket.OPEN) {
+        try { oldSocket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } })); } catch (e) {}
       }
-      try {
-        this.ws.close();
-      } catch (e) {}
-      this.ws = null;
+      try { oldSocket.close(); } catch (e) {}
     }
     this.isConnected = false;
     this.isSetupComplete = false;
@@ -1682,32 +1884,24 @@ class GeminiLiveClient {
   }
 
   sendAudioChunk(base64Pcm) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      return;
-    }
+    if (this.manualDisconnect) return;
 
-    if (!this.isSetupComplete) {
-      this.chunkQueue.push(base64Pcm);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.isSetupComplete) {
+      if (this.isReconnecting || (this.ws && (this.ws.readyState === WebSocket.CONNECTING || !this.isSetupComplete))) {
+        this._enqueueChunk(base64Pcm);
+      }
       return;
     }
 
     while (this.chunkQueue.length > 0) {
-      const qChunk = this.chunkQueue.shift();
-      this._dispatchChunk(qChunk);
+      this._dispatchChunk(this.chunkQueue.shift());
     }
-
     this._dispatchChunk(base64Pcm);
   }
 
   _dispatchChunk(base64Data) {
     const payload = {
       realtimeInput: {
-        mediaChunks: [
-          {
-            mimeType: 'audio/pcm;rate=16000',
-            data: base64Data
-          }
-        ],
         audio: {
           data: base64Data,
           mimeType: 'audio/pcm;rate=16000'
@@ -1715,52 +1909,62 @@ class GeminiLiveClient {
       }
     };
     try {
-      this.ws.send(JSON.stringify(payload));
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(payload));
+      }
     } catch (e) {
       console.warn('Failed to send audio chunk:', e);
     }
   }
 
-  _sendSetupMessage() {
-    let languageCodes = [];
-    if (this.direction === 'ja-to-en') {
-      languageCodes = ['ja-JP'];
-    } else if (this.direction === 'en-to-ja') {
-      languageCodes = ['en-US'];
-    } else if (this.direction === 'bn-to-ja') {
-      // ベンガル語話者は英語を混じえて話すため英語もバインド
-      languageCodes = ['bn-BD', 'bn-IN', 'en-US'];
-    } else if (this.direction === 'hi-to-ja') {
-      // ヒンディー語話者は英語を混じえて話すため英語もバインド
-      languageCodes = ['hi-IN', 'en-US'];
-    } else {
-      // 自動切替 (日本語、英語、ベンガル語、ヒンディー語の4言語同時自動認識)
-      languageCodes = ['ja-JP', 'en-US', 'bn-BD', 'bn-IN', 'hi-IN'];
-    }
+  _buildEffectiveSystemInstruction() {
+    const rawUserInstruction = (this.systemInstruction || '').trim();
+    const isDefault = !rawUserInstruction || rawUserInstruction === DEFAULT_SYSTEM_INSTRUCTION.trim();
 
-    const customInstruction = this.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+    const lockRules = {
+      'en-to-ja':
+        'STRICT LANGUAGE LOCK (ENGLISH ONLY): You are transcribing spoken English for maritime and safety audits. ' +
+        'Transcribe ALL speech STRICTLY in English using standard Latin alphabet characters ONLY. ' +
+        'Even if the speaker has a South Asian (Indian/Bangladeshi), Japanese, or other non-native accent, or if audio is noisy, ' +
+        'ALWAYS transcribe it as English words in the Latin alphabet. ' +
+        'NEVER output Hindi (Devanagari script), Bengali script, Japanese, Korean, or any non-Latin characters.',
+      'ja-to-en':
+        'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese for maritime and safety audits. ' +
+        'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard maritime abbreviations like HKC/IHM/EU-SRR). ' +
+        'NEVER output Hindi (Devanagari), Bengali, Korean, or Swahili characters.',
+      'bn-to-ja':
+        'STRICT LANGUAGE LOCK (BENGALI & ENGLISH ONLY): Transcribe speech ONLY in Bengali (বাংলা) and/or English (for code-mixing/technical terms). ' +
+        'NEVER output Hindi (Devanagari script), Korean, or other unlisted languages.',
+      'hi-to-ja':
+        'STRICT LANGUAGE LOCK (HINDI & ENGLISH ONLY): Transcribe speech ONLY in Hindi (हिन्दी) and/or English (for code-mixing/technical terms). ' +
+        'NEVER output Bengali script, Korean, or other unlisted languages.'
+    };
+
+    const lock = lockRules[this.direction];
+    if (lock) {
+      return isDefault ? lock : `${rawUserInstruction}\n\n[HIGHEST PRIORITY OVERRIDE - ${lock}]`;
+    }
+    return rawUserInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+  }
+
+  _sendSetupMessage(targetSocket = null) {
+    const sock = targetSocket || this.ws;
+    if (!sock || sock.readyState !== WebSocket.OPEN) return;
+
+    const languageCodes = DIRECTION_LANGUAGE_CODES[this.direction] || DIRECTION_LANGUAGE_CODES.auto;
+    const effectiveInstruction = this._buildEffectiveSystemInstruction();
 
     const setupPayload = {
       setup: {
         model: this.modelName,
-        generationConfig: {
-          responseModalities: ['TEXT']
-        },
-        systemInstruction: {
-          parts: [
-            {
-              text: customInstruction
-            }
-          ]
-        },
-        inputAudioTranscription: {
-          languageCodes: languageCodes
-        }
+        generationConfig: { responseModalities: ['TEXT'] },
+        systemInstruction: { parts: [{ text: effectiveInstruction }] },
+        inputAudioTranscription: { languageCodes }
       }
     };
 
-    this.log('info', `Setup送信 (言語指定: ${languageCodes.join(', ')} | customInstruction適用): ${JSON.stringify(setupPayload)}`);
-    this.ws.send(JSON.stringify(setupPayload));
+    this.log('info', `Setup送信 (方向: ${this.direction} | 言語指定: ${languageCodes.join(', ')})`);
+    sock.send(JSON.stringify(setupPayload));
   }
 
   _handleServerMessage(rawMessage) {
@@ -1768,21 +1972,24 @@ class GeminiLiveClient {
       const data = typeof rawMessage === 'string' ? JSON.parse(rawMessage) : rawMessage;
 
       if (data.setupComplete) {
-        this.log('success', 'SetupComplete 受信。音声認識ストリーム準備完了。');
+        this.log('success', 'SetupComplete 受信。音声認識ストリーム準備完了 (audio単一送信モード)。');
         this.isConnected = true;
         this.isSetupComplete = true;
         this._cleanupTimeout();
         this._startSessionResumptionTimer();
 
         if (this._connectResolve) {
-          this._connectResolve();
+          const pendingResolve = this._connectResolve;
           this._connectResolve = null;
           this._connectReject = null;
+          pendingResolve();
         }
 
+        if (this.chunkQueue.length > 0) {
+          this.log('info', `再接続中に保持していた音声バッファ (${this.chunkQueue.length}チャンク) を一括送信します...`);
+        }
         while (this.chunkQueue.length > 0) {
-          const qChunk = this.chunkQueue.shift();
-          this._dispatchChunk(qChunk);
+          this._dispatchChunk(this.chunkQueue.shift());
         }
         return;
       }
@@ -1790,15 +1997,12 @@ class GeminiLiveClient {
       if (data.serverContent) {
         const sc = data.serverContent;
         const interimObj = sc.interimInputTranscription || sc.interim_input_transcription;
-        if (interimObj && typeof interimObj.text === 'string' && interimObj.text.length > 0) {
-          if (this.onInterimCallback) {
-            this.onInterimCallback(interimObj.text);
-          }
+        if (interimObj && typeof interimObj.text === 'string' && interimObj.text.length > 0 && this.onInterimCallback) {
+          this.onInterimCallback(interimObj.text);
         }
 
         const finalObj = sc.inputTranscription || sc.input_transcription;
         if (finalObj && typeof finalObj.text === 'string' && finalObj.text.length > 0) {
-          // 単語境界の空白を保持するため trim() せずそのままバッファへ渡す
           const rawFinalText = finalObj.text;
           const langCode = finalObj.languageCode || null;
           if (rawFinalText.trim().length > 0) {
@@ -1809,10 +2013,8 @@ class GeminiLiveClient {
           }
         }
 
-        if (sc.turnComplete || sc.turn_complete) {
-          if (this.onTurnCompleteCallback) {
-            this.onTurnCompleteCallback();
-          }
+        if ((sc.turnComplete || sc.turn_complete) && this.onTurnCompleteCallback) {
+          this.onTurnCompleteCallback();
         }
       }
     } catch (e) {
@@ -1822,27 +2024,80 @@ class GeminiLiveClient {
 }
 
 // ==========================================
-// Shared fetch with AbortController timeout
+// 6. Shared Gemini Text Client (Cascade Fallback + Preferred Model Cache)
 // ==========================================
-async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
+class GeminiTextClient {
+  constructor() {
+    this._preferredModel = null;
+    this.onLogCallback = null;
+  }
+
+  log(type, tag, message) {
+    if (this.onLogCallback) {
+      this.onLogCallback(type, `[${tag}] ${message}`);
+    }
+  }
+
+  async generateText({ apiKey, prompt, temperature = 0.15, maxOutputTokens = 2048, timeoutMs = 20000, logTag = 'Gemini' }) {
+    if (!apiKey || apiKey.trim() === '') {
+      throw new Error('Gemini APIキーが未設定です。');
+    }
+
+    const baseModels = DEFAULT_SETTINGS.GEMINI_TEXT_MODELS;
+    const modelsToTry = this._preferredModel
+      ? [this._preferredModel, ...baseModels.filter((m) => m !== this._preferredModel)]
+      : baseModels;
+
+    let lastError = 'Gemini API 応答を取得できませんでした。';
+
+    for (const modelName of modelsToTry) {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+      try {
+        const res = await fetchWithTimeout(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature, maxOutputTokens }
+          })
+        }, timeoutMs);
+
+        if (res.ok) {
+          const data = await res.json();
+          const outText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (typeof outText === 'string' && outText.trim().length > 0) {
+            this._preferredModel = modelName;
+            return { text: outText.trim(), model: modelName };
+          }
+          lastError = `Gemini (${modelName}): 空の応答を受信`;
+        } else {
+          const errData = await res.json().catch(() => null);
+          const errDetail = errData?.error?.message || `HTTP ${res.status}`;
+          lastError = `Gemini (${modelName}): ${errDetail}`;
+          if (this._preferredModel === modelName) this._preferredModel = null;
+          this.log('warn', logTag, `Gemini (${modelName}) 失敗: ${errDetail}`);
+        }
+      } catch (err) {
+        if (this._preferredModel === modelName) this._preferredModel = null;
+        const reason = err.name === 'AbortError' ? `タイムアウト (${Math.round(timeoutMs / 1000)}秒)` : err.message;
+        lastError = `Gemini (${modelName}): ${reason}`;
+        this.log('warn', logTag, `Gemini (${modelName}) 通信エラー: ${reason}`);
+      }
+    }
+
+    throw new Error(lastError);
   }
 }
 
 // ==========================================
-// 5. Translation Service & Resilient Queue (Context-Aware Long-Form)
+// 7. Translation Service & Resilient FIFO Queue
 // ==========================================
 class TranslationService {
-  constructor() {
+  constructor(geminiTextClient) {
+    this.textClient = geminiTextClient;
     this.queue = [];
     this.isProcessing = false;
     this.onLogCallback = null;
-    this._preferredModel = null;
   }
 
   log(type, message) {
@@ -1851,8 +2106,8 @@ class TranslationService {
     }
   }
 
-  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextRecords = []) {
-    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextRecords });
+  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextProvider = null, customPrompt = '') {
+    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextProvider, customPrompt });
     this._processNext();
   }
 
@@ -1862,7 +2117,18 @@ class TranslationService {
 
     const job = this.queue.shift();
     try {
-      const result = await this._executeTranslation(job);
+      let resolvedContext = [];
+      if (typeof job.contextProvider === 'function') {
+        try {
+          resolvedContext = job.contextProvider() || [];
+        } catch (ctxErr) {
+          this.log('warn', `前文脈取得時エラー: ${ctxErr.message}`);
+        }
+      } else if (Array.isArray(job.contextProvider)) {
+        resolvedContext = job.contextProvider;
+      }
+
+      const result = await this._executeTranslation({ ...job, contextRecords: resolvedContext });
       if (job.onComplete) {
         job.onComplete(job.recordId, result);
       }
@@ -1877,49 +2143,55 @@ class TranslationService {
     }
   }
 
-  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken, contextRecords = [] }) {
-    if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
+  _tailSnippet(str, maxChars) {
+    const clean = String(str || '').replace(/\s+/g, ' ').trim();
+    if (!clean) return '';
+    return clean.length <= maxChars ? clean : '…' + clean.slice(-maxChars).trim();
+  }
 
-    let srcLang = 'ja';
-    let targetLang = 'en';
+  _resolveLanguagePair(text, direction) {
+    if (direction === 'ja-to-en') return { srcLang: 'ja', targetLang: 'en' };
+    if (direction === 'en-to-ja') return { srcLang: 'en', targetLang: 'ja' };
+    if (direction === 'bn-to-ja') return { srcLang: 'bn', targetLang: 'ja' };
+    if (direction === 'hi-to-ja') return { srcLang: 'hi', targetLang: 'ja' };
+    const srcLang = detectLanguage4(text);
+    return { srcLang, targetLang: srcLang === 'ja' ? 'en' : 'ja' };
+  }
 
-    if (direction === 'ja-to-en') {
-      srcLang = 'ja';
-      targetLang = 'en';
-    } else if (direction === 'en-to-ja') {
-      srcLang = 'en';
-      targetLang = 'ja';
-    } else if (direction === 'bn-to-ja') {
-      srcLang = 'bn';
-      targetLang = 'ja';
-    } else if (direction === 'hi-to-ja') {
-      srcLang = 'hi';
-      targetLang = 'ja';
-    } else {
-      // 4言語自動切替 (日 ➔ 英 / 英・ベンガル・ヒンディー ➔ 日)
-      srcLang = detectLanguage4(text);
-      targetLang = srcLang === 'ja' ? 'en' : 'ja';
-    }
-
-    const langNames = {
-      ja: 'Japanese',
-      en: 'English',
-      bn: 'Bengali (বাংলা)',
-      hi: 'Hindi (हिन्दी)'
-    };
-    const srcName = langNames[srcLang] || 'the source language';
-    const targetName = langNames[targetLang] || 'Japanese';
+  _buildPrompt({ text, direction, category, srcLang, targetLang, validContext, customPrompt }) {
+    const srcName = LANGUAGE_META[srcLang]?.englishName || 'the source language';
+    const targetName = LANGUAGE_META[targetLang]?.englishName || 'Japanese';
 
     let contextBlock = '';
-    if (Array.isArray(contextRecords) && contextRecords.length > 0) {
-      const lines = contextRecords.slice(-2).map((c, idx) => {
-        const origSnippet = String(c.original || '').trim().slice(0, 220);
-        const transSnippet = String(c.translated || '').trim().slice(0, 220);
-        return `  (${idx + 1}) Original: ${origSnippet}${transSnippet ? ` | Translation: ${transSnippet}` : ''}`;
-      });
+    if (validContext.length > 0) {
+      const earlierItems = validContext.slice(0, -1);
+      const immediatePrev = validContext[validContext.length - 1];
+      const sections = [];
+
+      if (earlierItems.length > 0) {
+        const earlierLines = earlierItems.map((c, idx) => {
+          const spk = c.speaker ? `[${c.speaker}] ` : '';
+          const origSnippet = this._tailSnippet(c.original, 320);
+          const transSnippet = this._tailSnippet(c.translated, 320);
+          return `  (${idx + 1}) ${spk}Original: ${origSnippet}${transSnippet ? `\n      Translation: ${transSnippet}` : ''}`;
+        });
+        sections.push('Earlier turns (oldest to newer):\n' + earlierLines.join('\n'));
+      }
+
+      if (immediatePrev) {
+        const spk = immediatePrev.speaker ? `[${immediatePrev.speaker}] ` : '';
+        const origSnippet = this._tailSnippet(immediatePrev.original, 800);
+        const transSnippet = this._tailSnippet(immediatePrev.translated, 800);
+        sections.push(
+          'Immediately preceding turn (HIGHEST PRIORITY for continuity):\n' +
+          `  ${spk}Original: ${origSnippet}` +
+          (transSnippet ? `\n  Translation: ${transSnippet}` : '')
+        );
+      }
+
       contextBlock =
-        '[Recent Conversation Context — FOR REFERENCE ONLY. DO NOT TRANSLATE THIS SECTION. Use it only to resolve pronouns, tone, and technical terminology consistency.]\n' +
-        lines.join('\n') + '\n\n';
+        '[Previous Conversation Context — FOR CONTEXTUAL CONTINUITY ONLY. NEVER RE-TRANSLATE OR REPEAT THIS SECTION]\n' +
+        sections.join('\n\n') + '\n\n';
     }
 
     const domainHint = category
@@ -1930,68 +2202,84 @@ class TranslationService {
       ? '5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.\n'
       : '5. Produce fluent, natural, and accurate business English preserving the speaker\'s complete meaning.\n';
 
-    const prompt =
+    const contextUsageInstruction = validContext.length > 0
+      ? (targetLang === 'ja'
+        ? '6. CONTEXT-AWARE JAPANESE TRANSLATION: Actively use [Previous Conversation Context] so the Japanese translation flows seamlessly from prior turns:\n' +
+          '   - Resolve ambiguous pronouns (it, they, this, that, there, the same, so, etc.) and omitted subjects/objects using the prior context, explicitly clarifying the referent in natural Japanese whenever needed for readability.\n' +
+          '   - If [Text to Translate] continues a sentence or explanation from the immediately preceding turn (e.g., due to speech segmentation), connect smoothly in logic, tense, and nuance without duplicating what was already translated.\n' +
+          '   - If the preceding turn was a question or remark by another speaker, phrase the Japanese naturally as a response or follow-up to it.\n' +
+          '   - Keep technical terminology, proper nouns, abbreviations, and register/politeness consistent with the previous Japanese translations.\n' +
+          '   - If ASR misheard a technical term in [Text to Translate], disambiguate it using the topic established in the prior context.\n'
+        : '6. CONTEXT-AWARE TRANSLATION: Use [Previous Conversation Context] to resolve pronouns, omitted subjects, and domain terminology consistently with previous turns, ensuring natural continuity without re-translating prior turns.\n')
+      : '';
+
+    const isStrictEnglishToJa = direction === 'en-to-ja';
+    const isStrictJaToEnglish = direction === 'ja-to-en';
+
+    const culturalContextLine = isStrictEnglishToJa
+      ? 'Context: The speaker is speaking English (possibly with a non-native accent). If minor speech-recognition artifacts or misrecognized characters appear, infer the intended English meaning from the surrounding maritime audit context.\n'
+      : isStrictJaToEnglish
+      ? 'Context: The speaker is speaking Japanese during a maritime/safety audit.\n'
+      : 'Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n';
+
+    const constraint3And4 = isStrictEnglishToJa
+      ? '3. Treat the input strictly as English speech to be translated into natural Japanese.\n' +
+        '4. Do not leave stray foreign words untranslated; express the complete intended meaning clearly in natural Japanese.\n'
+      : isStrictJaToEnglish
+      ? '3. Treat the input strictly as Japanese speech to be translated into natural, professional English.\n' +
+        '4. Preserve maritime/regulatory abbreviations (e.g., HKC, IHM, EU-SRR, SRFP, HSE) accurately.\n'
+      : '3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n' +
+        '4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n';
+
+    const trimmedCustomPrompt = String(customPrompt || '').trim();
+    const customPromptBlock = trimmedCustomPrompt
+      ? `[Additional Theme & Nuance Instructions — Follow these tone, domain, and terminology preferences while STRICTLY obeying constraints 1 and 2 (output ONLY the translation with no commentary)]:\n${trimmedCustomPrompt}\n\n`
+      : '';
+
+    return (
       `You are a professional consecutive/simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n` +
-      'Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n' +
+      culturalContextLine +
       `Translate ONLY the [Text to Translate] from ${srcName} into fluent, natural, and accurate ${targetName}.\n` +
       'STRICT CONSTRAINTS:\n' +
       '1. Return ONLY the direct translation of [Text to Translate].\n' +
       '2. Do not include quotes, explanations, language labels, prefixes, or notes.\n' +
-      '3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n' +
-      '4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n' +
-      longFormInstruction + '\n' +
+      constraint3And4 +
+      longFormInstruction +
+      contextUsageInstruction + '\n' +
+      customPromptBlock +
       contextBlock +
-      `[Text to Translate]:\n${text}`;
+      `[Text to Translate]:\n${text}`
+    );
+  }
 
-    // Layer 1: Gemini REST API (Cascade Fallback)
+  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken, contextRecords = [], customPrompt = '' }) {
+    if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
+
+    const { srcLang, targetLang } = this._resolveLanguagePair(text, direction);
+    const validContext = Array.isArray(contextRecords)
+      ? contextRecords.filter((c) => c && (c.original || c.translated))
+      : [];
+
+    const trimmedCustomPrompt = String(customPrompt || '').trim();
+    const prompt = this._buildPrompt({ text, direction, category, srcLang, targetLang, validContext, customPrompt: trimmedCustomPrompt });
+
+    // Layer 1: Shared Gemini REST Client
     if (apiKey && apiKey.trim() !== '') {
-      const baseModels = [
-        'gemini-3.5-flash-lite',
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash'
-      ];
-      const modelsToTry = this._preferredModel
-        ? [this._preferredModel, ...baseModels.filter((m) => m !== this._preferredModel)]
-        : baseModels;
-
-      for (const modelName of modelsToTry) {
-        const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
-        try {
-          const res = await fetchWithTimeout(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: {
-                temperature: 0.15,
-                maxOutputTokens: 2048
-              }
-            })
-          }, 20000);
-
-          if (res.ok) {
-            const data = await res.json();
-            if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
-              const transText = data.candidates[0].content.parts[0].text.trim();
-              this._preferredModel = modelName;
-              this.log('success', `Gemini (${modelName}) 長文翻訳完了 (${text.length}文字 ➔ ${transText.length}文字)`);
-              return {
-                translated: transText,
-                speakerLang: srcLang
-              };
-            }
-          } else {
-            const errData = await res.json().catch(() => null);
-            const errDetail = errData?.error?.message || `HTTP ${res.status}`;
-            if (this._preferredModel === modelName) this._preferredModel = null;
-            this.log('warn', `Gemini (${modelName}) 失敗: ${errDetail}`);
-          }
-        } catch (err) {
-          if (this._preferredModel === modelName) this._preferredModel = null;
-          const reason = err.name === 'AbortError' ? 'タイムアウト (20秒)' : err.message;
-          this.log('warn', `Gemini (${modelName}) 通信エラー: ${reason}`);
-        }
+      try {
+        const res = await this.textClient.generateText({
+          apiKey,
+          prompt,
+          temperature: 0.15,
+          maxOutputTokens: 2048,
+          timeoutMs: 20000,
+          logTag: 'Translation'
+        });
+        const ctxNote = validContext.length > 0 ? ` / 文脈${validContext.length}件参照` : '';
+        const customNote = trimmedCustomPrompt ? ' / 追記プロンプト適用' : '';
+        this.log('success', `Gemini (${res.model}) 長文翻訳完了 (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${customNote})`);
+        return { translated: res.text, speakerLang: srcLang };
+      } catch (err) {
+        this.log('warn', `Gemini 翻訳全モデル失敗 (${err.message})`);
       }
     } else {
       this.log('warn', 'Gemini APIキーが未入力のため、GASバックアップ翻訳を試行します。');
@@ -2009,9 +2297,9 @@ class TranslationService {
           body: JSON.stringify({
             action: 'translate',
             token: gasToken || '',
-            text: text,
-            srcLang: srcLang,
-            targetLang: targetLang
+            text,
+            srcLang,
+            targetLang
           })
         }, 20000);
 
@@ -2019,13 +2307,9 @@ class TranslationService {
           const gasData = await gasRes.json();
           if (gasData.status === 'success' && gasData.translated) {
             this.log('success', `GAS翻訳完了: "${gasData.translated}"`);
-            return {
-              translated: gasData.translated.trim(),
-              speakerLang: srcLang
-            };
-          } else if (gasData.message) {
-            this.log('warn', `GAS翻訳応答エラー: ${gasData.message}`);
+            return { translated: gasData.translated.trim(), speakerLang: srcLang };
           }
+          if (gasData.message) this.log('warn', `GAS翻訳応答エラー: ${gasData.message}`);
         } else {
           this.log('warn', `GAS翻訳通信エラー: HTTP ${gasRes.status}`);
         }
@@ -2043,24 +2327,123 @@ class TranslationService {
 }
 
 // ==========================================
-// 6. GAS Storage Client (Google Docs Integration)
+// 8. Summary Service (On-Demand Lookback Summarizer)
+// ==========================================
+class SummaryService {
+  constructor(geminiTextClient) {
+    this.textClient = geminiTextClient;
+    this.onLogCallback = null;
+  }
+
+  log(type, message) {
+    if (this.onLogCallback) {
+      this.onLogCallback(type, `[Summary] ${message}`);
+    }
+  }
+
+  async generateSummary({ records, pendingText, rangeLabel, category, customPrompt, apiKey }) {
+    if (!apiKey || apiKey.trim() === '') {
+      throw new Error('サマリー生成には Gemini API キーが必要です。設定画面から登録してください。');
+    }
+
+    const lines = [];
+    if (Array.isArray(records)) {
+      for (const r of records) {
+        const timeStr = r.time || '--:--:--';
+        const spk = r.speaker || '発話';
+        const orig = String(r.originalText || '').trim();
+        const hasValidTrans =
+          !r.isTranslating &&
+          r.translatedText &&
+          r.translatedText.trim() !== '' &&
+          !r.translatedText.startsWith('【翻訳');
+        const trans = hasValidTrans ? r.translatedText.trim() : '';
+
+        if (orig || trans) {
+          let entry = `[${timeStr}] (${spk})`;
+          if (trans && orig && trans !== orig) {
+            entry += `\n  訳文: ${trans}\n  原文: ${orig}`;
+          } else {
+            entry += `\n  内容: ${trans || orig}`;
+          }
+          lines.push(entry);
+        }
+      }
+    }
+
+    const cleanPending = String(pendingText || '').trim();
+    if (cleanPending) {
+      lines.push(`[現在発話中・未確定]\n  原文: ${cleanPending}`);
+    }
+
+    if (lines.length === 0) {
+      throw new Error('指定された範囲にサマリー対象の発話がありません。');
+    }
+
+    let transcriptText = lines.join('\n\n');
+    const MAX_INPUT_CHARS = 24000;
+    if (transcriptText.length > MAX_INPUT_CHARS) {
+      transcriptText = '…(古い一部発話を省略)…\n\n' + transcriptText.slice(-MAX_INPUT_CHARS);
+    }
+
+    const domainHint = category
+      ? `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）は正確に保持してください。`
+      : '';
+
+    const customThemeHint = String(customPrompt || '').trim()
+      ? `\n【ユーザー指定のテーマ・ニュアンス方針】\n${String(customPrompt).trim()}\n`
+      : '';
+
+    const prompt =
+      'あなたは海事・現地監査および国際会議に精通した優秀な議事録作成・要約アシスタントです。\n' +
+      `${domainHint}\n` +
+      `以下の会話ログ（対象範囲: ${rangeLabel}）を読み、日本語で簡潔かつ実務にすぐ使える構造化サマリーを作成してください。\n` +
+      customThemeHint +
+      '\n【出力ルール】\n' +
+      '1. 必ず以下のMarkdown見出し構成で日本語出力すること（該当内容が全く無い見出しは省略可）：\n' +
+      '### 要点サマリー\n' +
+      '（この時間帯の議論の結論・全体の流れを2〜4文で簡潔にまとめる）\n\n' +
+      '### 主なトピック・発言内容\n' +
+      '- 重要な発言・説明・質疑応答を話者や論点ごとに箇条書きで整理（具体名・数値・条件があれば落とさない）\n\n' +
+      '### 確認事項・合意・今後のアクション / 課題\n' +
+      '- 決定事項、宿題、懸念点、未解決の課題があれば箇条書きで整理\n\n' +
+      '2. ログに含まれていない事実・数値・結論を推測や創作で補わないこと。\n' +
+      '3. 音声認識の軽微な誤字・言い直しは前後文脈から自然に補正してまとめること。\n' +
+      '4. 前置き（「以下がサマリーです」等）や締めの挨拶は書かず、最初の「### 要点サマリー」から直接出力すること。\n\n' +
+      `【会話ログ（時系列順）】\n${transcriptText}`;
+
+    const res = await this.textClient.generateText({
+      apiKey,
+      prompt,
+      temperature: 0.2,
+      maxOutputTokens: 2048,
+      timeoutMs: 30000,
+      logTag: 'Summary'
+    });
+
+    this.log('success', `Gemini (${res.model}) サマリー生成完了 (${rangeLabel} / ${lines.length}件)`);
+    return { summary: res.text, model: res.model };
+  }
+}
+
+// ==========================================
+// 9. GAS Storage Client (Google Docs Integration)
 // ==========================================
 class GasStorageClient {
   static extractFolderId(input) {
     if (!input) return '';
     const match = String(input).trim().match(/\/folders\/([a-zA-Z0-9_-]+)/);
-    return (match && match[1]) ? match[1] : String(input).trim();
+    return match?.[1] || String(input).trim();
   }
 
   static extractDocId(input) {
     if (!input) return '';
     const match = String(input).trim().match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
-    return (match && match[1]) ? match[1] : String(input).trim();
+    return match?.[1] || String(input).trim();
   }
 
-  static async ping(gasUrl, token) {
+  static _validateGasUrl(gasUrl) {
     if (!gasUrl) throw new Error('GAS Web App URLが設定されていません。');
-    
     const trimmedUrl = gasUrl.trim();
     if (!trimmedUrl.startsWith('https://script.google.com/')) {
       throw new Error('GAS Web App URLは "https://script.google.com/..." で始まる必要があります。');
@@ -2068,7 +2451,22 @@ class GasStorageClient {
     if (trimmedUrl.endsWith('/edit')) {
       throw new Error('GASエディタの編集URLが設定されています。「デプロイ」→「ウェブアプリ」で発行されたURL (.../exec) を設定してください。');
     }
+    return trimmedUrl;
+  }
 
+  static _parseGasJson(rawText) {
+    try {
+      return JSON.parse(rawText);
+    } catch (jsonErr) {
+      if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('accounts.google.com')) {
+        throw new Error('Googleのログイン画面が返却されました。GASのデプロイ設定で「アクセスできるユーザー」を「全員 (Anyone)」に設定してください。');
+      }
+      throw new Error(`GAS応答の解析失敗: ${rawText.slice(0, 100)}`);
+    }
+  }
+
+  static async ping(gasUrl, token) {
+    const trimmedUrl = GasStorageClient._validateGasUrl(gasUrl);
     try {
       const res = await fetchWithTimeout(trimmedUrl, {
         method: 'POST',
@@ -2078,17 +2476,7 @@ class GasStorageClient {
         body: JSON.stringify({ action: 'ping', token: token || '' })
       }, 12000);
 
-      const rawText = await res.text();
-      let data;
-      try {
-        data = JSON.parse(rawText);
-      } catch (jsonErr) {
-        if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('accounts.google.com')) {
-          throw new Error('Googleのログイン画面が返却されました。GASのデプロイ設定で「アクセスできるユーザー」を「全員 (Anyone)」に設定してください。');
-        }
-        throw new Error(`JSONパース失敗: ${rawText.slice(0, 80)}`);
-      }
-
+      const data = GasStorageClient._parseGasJson(await res.text());
       if (data.status === 'error') {
         throw new Error(data.message || 'GASエラー');
       }
@@ -2098,49 +2486,38 @@ class GasStorageClient {
         throw new Error('GASサーバーが12秒以内に応答しませんでした（タイムアウト）。URLとデプロイ状態を確認してください。');
       }
       if (err.name === 'TypeError' && err.message.includes('fetch')) {
-        throw new Error('GASサーバーに接続できません (CORS/ネットワークエラー)。デプロイ設定で「アクセスできるユーザー: 全員」になっているか、URLが有効か確認してください。');
+        throw new Error('GASサーバーに接続できません (CORS/ネットワークエラー)。デプロイ設定で「アクセスできるユーザー: 全員」になっているか確認してください。');
       }
       throw err;
     }
   }
 
-  /**
-   * 確定翻訳をGoogleドキュメントへ保存・同期
-   */
   static async saveTranscript(gasUrl, { documentId, title, folderId, records, direction, category, model, token, saveMode = 'sync' }) {
-    if (!gasUrl) throw new Error('GAS Web App URLが未設定です。');
+    const trimmedUrl = GasStorageClient._validateGasUrl(gasUrl);
     if (!records || records.length === 0) throw new Error('保存対象の確定翻訳レコードがありません。');
 
-    const trimmedUrl = gasUrl.trim();
-    if (trimmedUrl.endsWith('/edit')) {
-      throw new Error('GASエディタの編集URLが設定されています。「デプロイ」→「ウェブアプリ」で発行されたURL (.../exec) を設定してください。');
-    }
-
-    const sanitizedDocId = GasStorageClient.extractDocId(documentId);
+    const extractedFolderId = GasStorageClient.extractFolderId(folderId);
     const payload = {
       action: 'save',
       token: token || '',
-      documentId: sanitizedDocId,
+      documentId: GasStorageClient.extractDocId(documentId),
       title: title || '',
-      folderId: GasStorageClient.extractFolderId(folderId),
-      outputFolderId: GasStorageClient.extractFolderId(folderId),
-      model: model || 'models/gemini-3.5-transcribe-live',
+      folderId: extractedFolderId,
+      outputFolderId: extractedFolderId,
+      model: model || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL,
       direction: direction || 'AUTO',
       category: category || 'HKC',
-      saveMode: saveMode, // 'sync' (デフォルト: ひとつのドキュメントとして上書き同期)
-      records: records
+      saveMode,
+      records
     };
 
     let res;
     try {
-      // 確定翻訳全体の同期書き込みに対応するため、タイムアウトを40秒に設定
       res = await fetchWithTimeout(trimmedUrl, {
         method: 'POST',
         mode: 'cors',
         redirect: 'follow',
-        headers: {
-          'Content-Type': 'text/plain'
-        },
+        headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify(payload)
       }, 40000);
     } catch (netErr) {
@@ -2154,17 +2531,7 @@ class GasStorageClient {
       throw new Error(`GAS通信HTTPエラー: ${res.status}`);
     }
 
-    const rawText = await res.text();
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch (jsonErr) {
-      if (rawText.includes('<html') || rawText.includes('<!DOCTYPE') || rawText.includes('accounts.google.com')) {
-        throw new Error('Googleのログイン画面に転送されました。GASのデプロイ設定で「アクセスできるユーザー」が「全員」になっているか確認してください。');
-      }
-      throw new Error(`GAS応答の解析失敗: ${rawText.slice(0, 100)}`);
-    }
-
+    const data = GasStorageClient._parseGasJson(await res.text());
     if (data.status === 'error') {
       const err = new Error(data.message || 'GAS処理エラー');
       err.code = data.code;
@@ -2175,14 +2542,12 @@ class GasStorageClient {
 }
 
 // ==========================================
-// LongFormUtteranceBuffer (リアルタイム原語表示 ＋ 日本語長文翻訳アグリゲーター)
+// 10. LongFormUtteranceBuffer (Real-time Original + Long-Form Japanese Aggregator)
 // ==========================================
 class LongFormUtteranceBuffer {
-  static PRESETS = {
+  static PRESETS = Object.freeze({
     'long': {
-      // 英・ベンガル・ヒンディー ➔ 日本語（長文・文脈重視）
       ja: { silenceMs: 4000, minCharsForSentenceEnd: 260, hardMaxChars: 520, maxWaitMs: 28000 },
-      // 日本語 ➔ 英語（会話テンポと文脈の両立）
       en: { silenceMs: 2000, minCharsForSentenceEnd: 80, hardMaxChars: 200, maxWaitMs: 15000 }
     },
     'extra-long': {
@@ -2193,7 +2558,7 @@ class LongFormUtteranceBuffer {
       ja: { silenceMs: 2200, minCharsForSentenceEnd: 120, hardMaxChars: 280, maxWaitMs: 16000 },
       en: { silenceMs: 1500, minCharsForSentenceEnd: 45, hardMaxChars: 150, maxWaitMs: 12000 }
     }
-  };
+  });
 
   constructor({ onFlush, onDisplayUpdate, onLog } = {}) {
     this.onFlush = onFlush || null;
@@ -2225,6 +2590,13 @@ class LongFormUtteranceBuffer {
 
   hasPendingText() {
     return (this.committedText + this.currentInterim).trim().length > 0;
+  }
+
+  getPendingText() {
+    const committed = this.committedText.trim();
+    const interim = this.currentInterim.trim();
+    if (committed && interim) return `${committed} ${interim}`;
+    return committed || interim || '';
   }
 
   reset() {
@@ -2260,55 +2632,39 @@ class LongFormUtteranceBuffer {
   _resolveTargetLang(text, langCode) {
     if (this.direction === 'ja-to-en') return 'en';
     if (this.direction === 'en-to-ja' || this.direction === 'bn-to-ja' || this.direction === 'hi-to-ja') return 'ja';
-    const detected = detectLanguage4(text, langCode);
-    return detected === 'ja' ? 'en' : 'ja';
+    return detectLanguage4(text, langCode) === 'ja' ? 'en' : 'ja';
   }
 
-  /**
-   * 自動切替モード時に、日本語 ⇄ 外国語 の明確な言語切替だけを判定
-   * - 英・ベンガル・ヒンディー間の混在（Benglish等）は切替とみなさず1段落にまとめる
-   * - 日本語内の短い英字略語（HKC, IHM, EU-SRR等）でも誤分割しない
-   */
   _isClearLanguageGroupSwitch(incomingText, langCode) {
-    if (this.direction !== 'auto') return false;
-    if (!this.committedText.trim()) return false;
-
+    if (this.direction !== 'auto' || !this.committedText.trim()) return false;
     const clean = incomingText.trim();
     if (!clean) return false;
 
-    const currentTarget = this.bufferTargetLang; // 'ja' (外国語発話中) or 'en' (日本語発話中)
     const kanaCount = (clean.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
     const indicCount = (clean.match(/[\u0900-\u097F\u0980-\u09FF]/g) || []).length;
     const latinWords = clean.match(/[A-Za-z]{2,}/g) || [];
     const latinLetters = (clean.match(/[A-Za-z]/g) || []).length;
 
-    if (currentTarget === 'ja') {
-      // 外国語バッファ蓄積中に、明確な日本語（かな2文字以上、または明示的なjaヒント＋漢字）が来た場合
+    if (this.bufferTargetLang === 'ja') {
       if (kanaCount >= 2) return true;
       if (langCode && String(langCode).toLowerCase().startsWith('ja') && /[\u4E00-\u9FFF]/.test(clean)) return true;
       return false;
-    } else {
-      // 日本語バッファ蓄積中に、明確な外国語（ベンガル/ヒンディー文字、または3単語/18文字以上の英語）が来た場合
-      if (indicCount >= 2) return true;
-      if (kanaCount === 0 && (latinWords.length >= 3 || latinLetters >= 18)) return true;
-      return false;
     }
+    if (indicCount >= 2) return true;
+    return kanaCount === 0 && (latinWords.length >= 3 || latinLetters >= 18);
   }
 
   _joinText(base, addition, forceSpaceIfNonCJK = false) {
     if (!addition) return base;
     if (!base) return addition.replace(/^\s+/, '');
 
-    // エンジンが累積テキストを送ってきた場合の重複防止
     const trimmedBase = base.trim();
     const trimmedAdd = addition.trim();
     if (trimmedBase.length >= 6 && trimmedAdd.startsWith(trimmedBase)) {
       return trimmedAdd;
     }
 
-    const startsWithSpace = /^\s/.test(addition);
-    const endsWithSpace = /\s$/.test(base);
-    if (startsWithSpace || endsWithSpace) {
+    if (/^\s/.test(addition) || /\s$/.test(base)) {
       return (base + addition).replace(/[ \t]{2,}/g, ' ');
     }
 
@@ -2317,26 +2673,19 @@ class LongFormUtteranceBuffer {
     const isCJK = (ch) => /[\u3000-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]/.test(ch);
     const startsWithClosingPunct = /^[.,?!;:)\]'""’”）。、！？\u0964\u0965]/.test(firstChar);
 
-    if (startsWithClosingPunct) {
-      return base + addition;
-    }
-    if (isCJK(lastChar) && isCJK(firstChar)) {
+    if (startsWithClosingPunct || (isCJK(lastChar) && isCJK(firstChar))) {
       return base + addition;
     }
 
-    // 文末・句読点の後、またはターン終了後／WebSpeech確定時は半角スペースで接続
     const endsWithPunct = /[.?!,;:\u0964\u0965]$/.test(lastChar);
     if (endsWithPunct || forceSpaceIfNonCJK) {
       return base + ' ' + addition;
     }
-
-    // 同一ターン内のサブワード断片（例: "asbes" + "tos"）はそのまま連結
     return base + addition;
   }
 
   pushInterim(interimText) {
     this.currentInterim = String(interimText || '');
-    // 発話継続中は無音タイマーを延長し、途中で切れないようにする
     if (this.hasPendingText()) {
       this._scheduleSilenceTimer();
     }
@@ -2346,9 +2695,6 @@ class LongFormUtteranceBuffer {
   pushFinal(rawText, langCode = null, options = {}) {
     if (typeof rawText !== 'string' || rawText.length === 0) return;
 
-    const fromWebSpeech = !!options.fromWebSpeech;
-
-    // 日本語 ⇄ 外国語 の切替があれば、直前までのバッファを先に確定翻訳へ送る
     if (this._isClearLanguageGroupSwitch(rawText, langCode)) {
       this._emitText(this.committedText, this.bufferLangHint, 'language-switch');
       this.committedText = '';
@@ -2357,7 +2703,7 @@ class LongFormUtteranceBuffer {
     }
 
     const wasEmpty = this.committedText.trim().length === 0;
-    const forceSpace = fromWebSpeech || this._afterTurnComplete;
+    const forceSpace = !!options.fromWebSpeech || this._afterTurnComplete;
     this._afterTurnComplete = false;
 
     this.currentInterim = '';
@@ -2371,7 +2717,6 @@ class LongFormUtteranceBuffer {
       this.bufferLangHint = langCode;
     }
 
-    // 十分な長さに達した段落のみ、文末や自然な境界で翻訳へ送り出す
     this._tryEmitReadyChunks();
 
     if (this.committedText.trim().length > 0) {
@@ -2393,19 +2738,14 @@ class LongFormUtteranceBuffer {
       const text = this.committedText.trim();
       const minSplit = Math.floor(cfg.minCharsForSentenceEnd * 0.55);
 
-      // 1. まずは文末記号（. ? ! 。 ！ ？ । ॥）で自然に区切れる位置を探す
       let splitIdx = this._findSplitIndex(text, minSplit, text.length, true);
-
-      // 2. 文末がないまま上限文字数に達した場合は、カンマや単語境界で安全に区切る
-      if (splitIdx === -1 && text.length >= cfg.hardMaxChars) {
+      if (splitIdx <= 0 && text.length >= cfg.hardMaxChars) {
         splitIdx = this._findSplitIndex(text, Math.floor(cfg.hardMaxChars * 0.5), cfg.hardMaxChars, false);
       }
-
-      if (splitIdx === -1) break;
+      if (splitIdx <= 0) break;
 
       const chunk = text.slice(0, splitIdx).trim();
       const remainder = text.slice(splitIdx).trim();
-
       if (!chunk) break;
 
       this._emitText(chunk, this.bufferLangHint, 'length-boundary');
@@ -2415,51 +2755,42 @@ class LongFormUtteranceBuffer {
         this.bufferLangHint = null;
         this._clearTimers();
         break;
-      } else {
-        this.bufferLangHint = detectLanguage4(remainder);
-        this.bufferTargetLang = this._resolveTargetLang(remainder, null);
-        // 残りのテキスト用に最大待機タイマーをリセット
-        if (this.maxWaitTimer) {
-          clearTimeout(this.maxWaitTimer);
-          this.maxWaitTimer = null;
-        }
-        this._scheduleMaxWaitTimer();
       }
+
+      this.bufferLangHint = detectLanguage4(remainder);
+      this.bufferTargetLang = this._resolveTargetLang(remainder, null);
+      if (this.maxWaitTimer) {
+        clearTimeout(this.maxWaitTimer);
+        this.maxWaitTimer = null;
+      }
+      this._scheduleMaxWaitTimer();
     }
   }
 
   _findSplitIndex(text, minIdx, maxIdx, sentenceOnly) {
     const slice = text.slice(0, Math.min(text.length, maxIdx));
 
-    // 文末記号（後ろが空白または文字列末尾、あるいは全角/インド系句点）
     const sentenceRegex = /([.?!](?=\s|$)|[。！？\u0964\u0965])/g;
     let lastSentenceEnd = -1;
     let m;
     while ((m = sentenceRegex.exec(slice)) !== null) {
       const endPos = m.index + m[0].length;
-      if (endPos >= minIdx) {
-        lastSentenceEnd = endPos;
-      }
+      if (endPos >= minIdx) lastSentenceEnd = endPos;
     }
     if (lastSentenceEnd !== -1) return lastSentenceEnd;
     if (sentenceOnly) return -1;
 
-    // 読点・カンマ・セミコロン
     const clauseRegex = /([,;](?=\s|$)|[、：；])/g;
     let lastClauseEnd = -1;
     while ((m = clauseRegex.exec(slice)) !== null) {
       const endPos = m.index + m[0].length;
-      if (endPos >= minIdx) {
-        lastClauseEnd = endPos;
-      }
+      if (endPos >= minIdx) lastClauseEnd = endPos;
     }
     if (lastClauseEnd !== -1) return lastClauseEnd;
 
-    // 単語境界（スペース）
     const lastSpace = slice.lastIndexOf(' ');
     if (lastSpace >= minIdx) return lastSpace;
 
-    // CJK等でスペースがない場合の最終フォールバック
     return Math.min(text.length, maxIdx);
   }
 
@@ -2490,7 +2821,6 @@ class LongFormUtteranceBuffer {
         if (text.length > 0) this._scheduleMaxWaitTimer();
         return;
       }
-      // 長時間途切れず話している場合でも、できるだけ文末・句読点で区切って翻訳を返す
       const splitIdx = this._findSplitIndex(text, Math.floor(text.length * 0.45), text.length, false);
       const chunk = text.slice(0, splitIdx).trim();
       const remainder = text.slice(splitIdx).trim();
@@ -2547,241 +2877,277 @@ class LongFormUtteranceBuffer {
       interim: this.currentInterim.trim(),
       totalChars: (this.committedText + this.currentInterim).trim().length,
       targetLang: this.bufferTargetLang,
-      silenceSec: (cfg.silenceMs / 1000).toFixed(1),
-      minChars: cfg.minCharsForSentenceEnd
+      silenceSec: (cfg.silenceMs / 1000).toFixed(1)
     });
   }
 }
 
 // ==========================================
-// 7. Main Application Controller
+// 11. Main Application Controller
 // ==========================================
 class App {
   constructor() {
     this.audioService = new AudioCaptureService();
     this.webSpeechService = new WebSpeechService();
     this.geminiClient = new GeminiLiveClient();
+    this.geminiTextClient = new GeminiTextClient();
+    this.geminiTextClient.onLogCallback = (type, msg) => this.log(type, msg);
+
     this.utteranceBuffer = new LongFormUtteranceBuffer({
       onFlush: (chunk, langCode) => this._handleFinalSpeech(chunk, langCode),
       onDisplayUpdate: (state) => this._renderLiveDisplay(state),
       onLog: (type, msg) => this.log(type, msg)
     });
-    this.translationService = new TranslationService();
+
+    this.translationService = new TranslationService(this.geminiTextClient);
     this.translationService.onLogCallback = (type, msg) => this.log(type, msg);
+
+    this.summaryService = new SummaryService(this.geminiTextClient);
+    this.summaryService.onLogCallback = (type, msg) => this.log(type, msg);
 
     this.activeEngine = 'none';
     this.records = [];
-    this.savedRecordCount = 0; // 最後にドキュメントに同期保存した確定翻訳数
+    this.summaryHistory = [];
+    this.currentSummaryId = null;
+    this.savedRecordCount = 0;
+
+    // State & concurrency locks
     this.hasUnsavedChanges = false;
     this.isRecording = false;
+    this.isStarting = false;
     this.isPaused = false;
+    this.isSummarizing = false;
+    this.isSavingDocs = false;
+    this.summaryBodyCollapsed = false;
 
     this._initElements();
     this._loadSettings();
-    this._bindEvents();
+    this._bindAllEvents();
     this._checkHashConfig();
     this._updateUIState();
 
     if (isIPadOrIOS()) {
       this.log('info', '📱 iPadOS / iOS 環境を検出しました。Web Audio 即時アンロック＆最適化マイク設定を適用しました。');
-      if (this.elSelectAudioSource) {
-        const displayOption = this.elSelectAudioSource.querySelector('option[value="display"]');
-        if (displayOption) {
-          displayOption.disabled = true;
-          displayOption.textContent = 'タブ・PC音声 (PCのみ・iPad非対応)';
-        }
+      const displayOption = this.elSelectAudioSource?.querySelector('option[value="display"]');
+      if (displayOption) {
+        displayOption.disabled = true;
+        displayOption.textContent = 'タブ・PC音声 (PCのみ・iPad非対応)';
       }
     }
-    this.log('info', '初期化完了 (v2.10.1)。リアルタイム原語表示＋長文日本語翻訳・4言語自動認識＆iPad対応が有効です。');
+
+    this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
+    this.log('info', `初期化完了 (v${APP_VERSION})。最適化アーキテクチャ・通信量半減・自動再接続・前文脈連動・任意範囲サマリーが有効です。`);
   }
 
   log(type, message) {
+    if (!this.elDiagLog || !this.elDiagLogContainer) return;
     const time = new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const line = document.createElement('div');
     line.className = `log-line log-${type}`;
     line.textContent = `[${time}] ${message}`;
     this.elDiagLog.appendChild(line);
+
+    // 長時間稼働時のDOM肥大化を防止
+    while (this.elDiagLog.childElementCount > DEFAULT_SETTINGS.MAX_LOG_LINES) {
+      this.elDiagLog.removeChild(this.elDiagLog.firstElementChild);
+    }
     this.elDiagLogContainer.scrollTop = this.elDiagLogContainer.scrollHeight;
   }
 
   _initElements() {
-    this.elStatusBadge = document.getElementById('connection-status');
-    this.elStatusText = document.getElementById('status-text');
-    this.elEngineBadge = document.getElementById('active-engine-badge');
-    this.elBtnSettings = document.getElementById('btn-open-settings');
+    const byId = (id) => document.getElementById(id);
 
-    this.elBtnToggleRecord = document.getElementById('btn-toggle-record');
-    this.elBtnPauseRecord = document.getElementById('btn-pause-record');
-    this.elSelectDirection = document.getElementById('select-direction');
-    this.elSelectCategory = document.getElementById('select-category');
-    this.elSelectChunkMode = document.getElementById('select-chunk-mode');
-    this.elSelectAudioSource = document.getElementById('select-audio-source');
-    this.elSelectGain = document.getElementById('select-gain');
-    this.elSelectDefaultGain = document.getElementById('select-default-gain');
-    this.elBtnClearFeed = document.getElementById('btn-clear-feed');
-    this.elBtnSaveDocs = document.getElementById('btn-save-docs');
-    this.elSaveDocsText = document.getElementById('btn-save-docs-text');
-    this.elUnsavedBadge = document.getElementById('unsaved-badge');
+    this.elStatusBadge = byId('connection-status');
+    this.elStatusText = byId('status-text');
+    this.elEngineBadge = byId('active-engine-badge');
+    this.elBtnSettings = byId('btn-open-settings');
+
+    this.elBtnToggleRecord = byId('btn-toggle-record');
+    this.elBtnPauseRecord = byId('btn-pause-record');
+    this.elSelectDirection = byId('select-direction');
+    this.elSelectCategory = byId('select-category');
+    this.elSelectChunkMode = byId('select-chunk-mode');
+    this.elSelectContextWindow = byId('select-context-window');
+    this.elSelectAudioSource = byId('select-audio-source');
+    this.elSelectGain = byId('select-gain');
+    this.elSelectDefaultGain = byId('select-default-gain');
+    this.elBtnClearFeed = byId('btn-clear-feed');
+    this.elBtnSaveDocs = byId('btn-save-docs');
+    this.elSaveDocsText = byId('btn-save-docs-text');
+    this.elUnsavedBadge = byId('unsaved-badge');
 
     this.elRadioDocModes = document.getElementsByName('doc-save-mode');
-    this.elInputDocTitle = document.getElementById('input-doc-title');
-    this.elInputDocId = document.getElementById('input-doc-id');
-    this.elInputFolderId = document.getElementById('input-folder-id');
-    this.elInputDefaultFolderId = document.getElementById('input-default-folder-id');
-    this.elSavedFolderSep = document.getElementById('saved-folder-sep');
-    this.elSavedFolderLink = document.getElementById('saved-folder-link');
-    this.elSavedDocBanner = document.getElementById('saved-doc-banner');
-    this.elSavedDocLink = document.getElementById('saved-doc-link');
+    this.elInputDocTitle = byId('input-doc-title');
+    this.elInputDocId = byId('input-doc-id');
+    this.elInputFolderId = byId('input-folder-id');
+    this.elInputDefaultFolderId = byId('input-default-folder-id');
+    this.elSavedFolderSep = byId('saved-folder-sep');
+    this.elSavedFolderLink = byId('saved-folder-link');
+    this.elSavedDocBanner = byId('saved-doc-banner');
+    this.elSavedDocLink = byId('saved-doc-link');
 
-    this.elLivePreview = document.getElementById('livePreview');
-    this.elLiveText = document.getElementById('liveText');
-    this.elLiveEngineTag = document.getElementById('liveEngineTag');
-    this.elLiveBufferStatus = document.getElementById('liveBufferStatus');
-    this.elBtnFlushNow = document.getElementById('btn-flush-now');
+    this.elLivePreview = byId('livePreview');
+    this.elLiveText = byId('liveText');
+    this.elLiveEngineTag = byId('liveEngineTag');
+    this.elLiveBufferStatus = byId('liveBufferStatus');
+    this.elBtnFlushNow = byId('btn-flush-now');
     this.elMeterBar = document.querySelector('.meter-bar');
 
-    this.elToggleDiag = document.getElementById('toggle-diag');
-    this.elDiagLogContainer = document.getElementById('diag-log-container');
-    this.elDiagLog = document.getElementById('diag-log');
+    this.elToggleDiag = byId('toggle-diag');
+    this.elDiagLogContainer = byId('diag-log-container');
+    this.elDiagLog = byId('diag-log');
 
-    this.elTranscriptList = document.getElementById('transcript-list');
-    this.elEmptyState = document.getElementById('empty-state');
-    this.elRecordCount = document.getElementById('record-count');
-    this.elBtnCopyAll = document.getElementById('btn-copy-all');
+    this.elTranscriptList = byId('transcript-list');
+    this.elEmptyState = byId('empty-state');
+    this.elRecordCount = byId('record-count');
+    this.elBtnCopyAll = byId('btn-copy-all');
 
-    // Modal
-    this.elModal = document.getElementById('settings-modal');
-    this.elBtnCloseModal = document.getElementById('btn-close-modal');
-    this.elInputApiKey = document.getElementById('input-gemini-key');
-    this.elBtnToggleKeyVis = document.getElementById('btn-toggle-key-vis');
-    this.elSelectEngineMode = document.getElementById('select-engine-mode');
-    this.elSelectLiveModel = document.getElementById('select-live-model');
-    this.elInputSystemInstruction = document.getElementById('input-system-instruction');
-    this.elBtnResetInstruction = document.getElementById('btn-reset-instruction');
-    this.elInputGasUrl = document.getElementById('input-gas-url');
-    this.elInputGasToken = document.getElementById('input-gas-token');
-    this.elBtnTestGas = document.getElementById('btn-test-gas');
-    this.elGasTestResult = document.getElementById('gas-test-result');
-    this.elCheckAutoSave = document.getElementById('check-auto-save');
-    this.elBtnSaveSettings = document.getElementById('btn-save-settings');
+    // Custom Prompt Panel
+    this.elBtnTogglePromptPanel = byId('btn-toggle-prompt-panel');
+    this.elPromptPanelBody = byId('prompt-panel-body');
+    this.elPromptStatusBadge = byId('prompt-status-badge');
+    this.elPromptToggleChevron = byId('prompt-toggle-chevron');
+    this.elInputTranslationPrompt = byId('input-translation-prompt');
+    this.elBtnClearTranslationPrompt = byId('btn-clear-translation-prompt');
+    this.elPromptPresetBtns = document.querySelectorAll('.prompt-preset-btn');
 
-    this.elToastContainer = document.getElementById('toast-container');
+    // Summary UI
+    this.elSelectSummaryRange = byId('select-summary-range');
+    this.elSummaryCustomWrapper = byId('summary-custom-wrapper');
+    this.elInputSummaryCustomMin = byId('input-summary-custom-min');
+    this.elSummaryTargetPreview = byId('summary-target-preview');
+    this.elBtnGenerateSummary = byId('btn-generate-summary');
+    this.elSummaryResultCard = byId('summary-result-card');
+    this.elSummaryMetaBadge = byId('summary-meta-badge');
+    this.elSelectSummaryHistory = byId('select-summary-history');
+    this.elBtnCopySummary = byId('btn-copy-summary');
+    this.elBtnToggleSummaryBody = byId('btn-toggle-summary-body');
+    this.elBtnCloseSummary = byId('btn-close-summary');
+    this.elSummaryResultBody = byId('summary-result-body');
+    this.elSummaryContent = byId('summary-content');
 
-    // QR Code Modal elements
-    this.elBtnOpenQr = document.getElementById('btn-open-qr');
-    this.elQrModal = document.getElementById('qr-modal');
-    this.elBtnCloseQrModal = document.getElementById('btn-close-qr-modal');
-    this.elBtnDoneQrModal = document.getElementById('btn-done-qr-modal');
-    this.elQrCanvas = document.getElementById('qr-canvas');
-    this.elInputShareUrl = document.getElementById('input-share-url');
-    this.elBtnCopyShareUrl = document.getElementById('btn-copy-share-url');
+    // Settings Modal
+    this.elModal = byId('settings-modal');
+    this.elBtnCloseModal = byId('btn-close-modal');
+    this.elInputApiKey = byId('input-gemini-key');
+    this.elBtnToggleKeyVis = byId('btn-toggle-key-vis');
+    this.elSelectEngineMode = byId('select-engine-mode');
+    this.elSelectLiveModel = byId('select-live-model');
+    this.elInputSystemInstruction = byId('input-system-instruction');
+    this.elBtnResetInstruction = byId('btn-reset-instruction');
+    this.elInputGasUrl = byId('input-gas-url');
+    this.elInputGasToken = byId('input-gas-token');
+    this.elBtnTestGas = byId('btn-test-gas');
+    this.elGasTestResult = byId('gas-test-result');
+    this.elCheckAutoSave = byId('check-auto-save');
+    this.elBtnSaveSettings = byId('btn-save-settings');
+
+    this.elToastContainer = byId('toast-container');
+
+    // QR Code Modal
+    this.elBtnOpenQr = byId('btn-open-qr');
+    this.elQrModal = byId('qr-modal');
+    this.elBtnCloseQrModal = byId('btn-close-qr-modal');
+    this.elBtnDoneQrModal = byId('btn-done-qr-modal');
+    this.elQrCanvas = byId('qr-canvas');
+    this.elInputShareUrl = byId('input-share-url');
+    this.elBtnCopyShareUrl = byId('btn-copy-share-url');
   }
 
   _loadSettings() {
-    this.apiKey = ConfigManager.get(ConfigManager.STORAGE_KEYS.API_KEY, '');
-    this.gasUrl = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_URL, '');
-    this.gasToken = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAS_TOKEN, '');
-    this.audioSource = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, 'mic');
-    this.direction = ConfigManager.get(ConfigManager.STORAGE_KEYS.DIRECTION, 'auto');
-    this.category = ConfigManager.get(ConfigManager.STORAGE_KEYS.CATEGORY, 'HKC');
-    this.chunkMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.CHUNK_MODE, 'long');
-    this.gain = ConfigManager.get(ConfigManager.STORAGE_KEYS.GAIN, '2.5');
-    this.engineMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.ENGINE_MODE, 'auto');
-    this.liveModel = ConfigManager.get(ConfigManager.STORAGE_KEYS.LIVE_MODEL, 'models/gemini-3.5-transcribe-live');
-    this.systemInstruction = ConfigManager.get(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
-    if (this.elInputSystemInstruction) this.elInputSystemInstruction.value = this.systemInstruction;
-    this.autoSave = ConfigManager.get(ConfigManager.STORAGE_KEYS.AUTO_SAVE, 'false') === 'true';
-    this.docMode = ConfigManager.get(ConfigManager.STORAGE_KEYS.DOC_MODE, 'new');
-    this.folderId = ConfigManager.get(ConfigManager.STORAGE_KEYS.FOLDER_ID, '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f');
-    if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
-    if (this.elInputDefaultFolderId) this.elInputDefaultFolderId.value = this.folderId;
-    this.lastDocId = ConfigManager.get(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, '');
+    const K = ConfigManager.STORAGE_KEYS;
+    this.apiKey = ConfigManager.get(K.API_KEY, '');
+    this.gasUrl = ConfigManager.get(K.GAS_URL, '');
+    this.gasToken = ConfigManager.get(K.GAS_TOKEN, '');
+    this.audioSource = ConfigManager.get(K.AUDIO_SOURCE, 'mic');
+    this.direction = ConfigManager.get(K.DIRECTION, 'auto');
+    this.category = ConfigManager.get(K.CATEGORY, 'HKC');
+    this.chunkMode = ConfigManager.get(K.CHUNK_MODE, 'long');
 
+    const savedCtxWin = parseInt(ConfigManager.get(K.CONTEXT_WINDOW, '6'), 10);
+    this.contextWindow = isNaN(savedCtxWin) ? 6 : savedCtxWin;
+
+    this.translationCustomPrompt = ConfigManager.get(K.TRANSLATION_CUSTOM_PROMPT, '');
+    this.promptPanelOpen = ConfigManager.get(K.TRANSLATION_PROMPT_OPEN, 'false') === 'true';
+
+    this.summaryRange = ConfigManager.get(K.SUMMARY_RANGE, '5');
+    const savedCustomMin = parseInt(ConfigManager.get(K.SUMMARY_CUSTOM_MIN, '5'), 10);
+    this.summaryCustomMin = (!isNaN(savedCustomMin) && savedCustomMin >= 1 && savedCustomMin <= 360) ? savedCustomMin : 5;
+
+    this.gain = ConfigManager.get(K.GAIN, '2.5');
+    this.engineMode = ConfigManager.get(K.ENGINE_MODE, 'auto');
+    this.liveModel = ConfigManager.get(K.LIVE_MODEL, DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
+    this.systemInstruction = ConfigManager.get(K.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
+    this.autoSave = ConfigManager.get(K.AUTO_SAVE, 'false') === 'true';
+    this.docMode = ConfigManager.get(K.DOC_MODE, 'new');
+    this.folderId = ConfigManager.get(K.FOLDER_ID, DEFAULT_SETTINGS.DEFAULT_FOLDER_ID);
+    this.lastDocId = ConfigManager.get(K.LAST_DOC_ID, '');
+
+    if (isIPadOrIOS() && this.audioSource === 'display') {
+      this.audioSource = 'mic';
+      ConfigManager.set(K.AUDIO_SOURCE, 'mic');
+    }
+
+    // Apply loaded values to DOM
     this.elInputApiKey.value = this.apiKey;
     this.elInputGasUrl.value = this.gasUrl;
     this.elInputGasToken.value = this.gasToken;
-    if (isIPadOrIOS() && this.audioSource === 'display') {
-      this.audioSource = 'mic';
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, 'mic');
-    }
     if (this.elSelectAudioSource) this.elSelectAudioSource.value = this.audioSource;
     this.elSelectDirection.value = this.direction;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
     if (this.elSelectChunkMode) this.elSelectChunkMode.value = this.chunkMode;
-    this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+    if (this.elSelectContextWindow) this.elSelectContextWindow.value = String(this.contextWindow);
     if (this.elSelectGain) this.elSelectGain.value = this.gain;
     if (this.elSelectDefaultGain) this.elSelectDefaultGain.value = this.gain;
-    this.audioService.setGain(this.gain);
     this.elSelectEngineMode.value = this.engineMode;
     this.elSelectLiveModel.value = this.liveModel;
+    if (this.elInputSystemInstruction) this.elInputSystemInstruction.value = this.systemInstruction;
     this.elCheckAutoSave.checked = this.autoSave;
+    if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
+    if (this.elInputDefaultFolderId) this.elInputDefaultFolderId.value = this.folderId;
+    if (this.lastDocId) this.elInputDocId.value = this.lastDocId;
 
-    if (this.lastDocId) {
-      this.elInputDocId.value = this.lastDocId;
-    }
+    this.audioService.setGain(this.gain);
+    this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
 
     for (const radio of this.elRadioDocModes) {
       if (radio.value === this.docMode) radio.checked = true;
     }
     this._syncDocModeUI();
+
+    if (this.elInputTranslationPrompt) {
+      this.elInputTranslationPrompt.value = this.translationCustomPrompt;
+    }
+    this._syncPromptPanelUI();
+
+    if (this.elSelectSummaryRange) this.elSelectSummaryRange.value = this.summaryRange;
+    if (this.elInputSummaryCustomMin) this.elInputSummaryCustomMin.value = String(this.summaryCustomMin);
+    this._syncSummaryRangeUI();
   }
 
-  _bindEvents() {
-    this.elBtnToggleRecord.addEventListener('click', () => {
-      // iPad/iOS Web Audio 即時同期アンロック
-      this.audioService.unlockContext();
-      this.toggleRecording();
-    });
+  // ---- Modular Event Binding ----
+  _bindAllEvents() {
+    this._bindRecordingEvents();
+    this._bindControlEvents();
+    this._bindPromptEvents();
+    this._bindSummaryEvents();
+    this._bindModalEvents();
+    this._bindGeminiClientCallbacks();
 
-    // 画面初回タッチでAudioContext先行アンロック
     const unlockAudioHandler = () => {
-      try {
-        this.audioService.unlockContext();
-      } catch (e) {}
+      try { this.audioService.unlockContext(); } catch (e) {}
     };
     document.addEventListener('touchstart', unlockAudioHandler, { once: true, passive: true });
     document.addEventListener('click', unlockAudioHandler, { once: true, passive: true });
-
-    // QRスキャン後ハッシュ変更時の自動リロード
     window.addEventListener('hashchange', () => this._checkHashConfig());
-    this.elBtnPauseRecord.addEventListener('click', () => this.togglePause());
+  }
 
-    if (this.elSelectAudioSource) {
-      this.elSelectAudioSource.addEventListener('change', (e) => {
-        this.audioSource = e.target.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.AUDIO_SOURCE, this.audioSource);
-        this.log('info', `音源切り替え: ${this.audioSource === 'display' ? '🖥️ タブ・PC音声 (イヤホン再生音)' : '🎤 マイク入力'}`);
-        this._updateUIState();
-        if (this.isRecording) {
-          this.showToast('音源設定を変更しました。再起動後に適用されます。', 'info');
-        }
-      });
-    }
-
-    this.elSelectDirection.addEventListener('change', (e) => {
-      if (this.utteranceBuffer.hasPendingText()) {
-        this.utteranceBuffer.flushAll('direction-change');
-      }
-      this.direction = e.target.value;
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, this.direction);
-      this.geminiClient.setDirection(this.direction);
-      this.webSpeechService.setDirection(this.direction);
-      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
-      this.log('info', `翻訳方向変更: ${this.direction}`);
-      if (this.isRecording) {
-        this.showToast('翻訳方向が変更されました。次回発話から適用されます。', 'info');
-      }
+  _bindRecordingEvents() {
+    this.elBtnToggleRecord.addEventListener('click', () => {
+      this.audioService.unlockContext();
+      this.toggleRecording();
     });
-
-    if (this.elSelectChunkMode) {
-      this.elSelectChunkMode.addEventListener('change', (e) => {
-        this.chunkMode = e.target.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.CHUNK_MODE, this.chunkMode);
-        this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
-        this.log('info', `翻訳区切りモード変更: ${this.chunkMode}`);
-        this.showToast('翻訳の区切り設定を変更しました。', 'info');
-      });
-    }
+    this.elBtnPauseRecord.addEventListener('click', () => this.togglePause());
 
     if (this.elBtnFlushNow) {
       this.elBtnFlushNow.addEventListener('click', () => {
@@ -2790,38 +3156,97 @@ class App {
         }
       });
     }
+  }
 
-    if (this.elSelectCategory) {
-      this.elSelectCategory.addEventListener('change', (e) => {
-        this.category = e.target.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, this.category);
-        this.log('info', `監査分野変更: ${this.category}`);
-      });
-    }
+  _bindControlEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
 
-    if (this.elSelectGain) {
-      this.elSelectGain.addEventListener('change', (e) => {
-        this.gain = e.target.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, this.gain);
-        this.audioService.setGain(this.gain);
-        this.log('info', `マイク集音感度変更: ${this.gain}x (遠距離ブースト適用)`);
-        this.showToast(`マイク感度を ${this.gain}x に設定しました。`, 'info');
-      });
-    }
+    this.elSelectAudioSource?.addEventListener('change', (e) => {
+      this.audioSource = e.target.value;
+      ConfigManager.set(K.AUDIO_SOURCE, this.audioSource);
+      this.log('info', `音源切り替え: ${this.audioSource === 'display' ? '🖥️ タブ・PC音声 (イヤホン再生音)' : '🎤 マイク入力'}`);
+      this._updateUIState();
+      if (this.isRecording) {
+        this.showToast('音源設定を変更しました。再起動後に適用されます。', 'info');
+      }
+    });
+
+    this.elSelectDirection.addEventListener('change', (e) => {
+      if (this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('direction-change');
+      }
+      this.direction = e.target.value;
+      ConfigManager.set(K.DIRECTION, this.direction);
+      this.geminiClient.setDirection(this.direction);
+      this.webSpeechService.setDirection(this.direction);
+      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+      this.log('info', `翻訳方向変更: ${this.direction}`);
+      if (this.isRecording) {
+        this.showToast(
+          this.activeEngine === 'gemini-live'
+            ? '翻訳方向を変更し、認識言語設定を即時再適用しました。'
+            : '翻訳方向が変更されました。次回発話から適用されます。',
+          'info'
+        );
+      }
+    });
+
+    this.elSelectChunkMode?.addEventListener('change', (e) => {
+      this.chunkMode = e.target.value;
+      ConfigManager.set(K.CHUNK_MODE, this.chunkMode);
+      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+      this.log('info', `翻訳区切りモード変更: ${this.chunkMode}`);
+      this.showToast('翻訳の区切り設定を変更しました。', 'info');
+    });
+
+    this.elSelectContextWindow?.addEventListener('change', (e) => {
+      const val = parseInt(e.target.value, 10);
+      this.contextWindow = isNaN(val) ? 6 : val;
+      ConfigManager.set(K.CONTEXT_WINDOW, String(this.contextWindow));
+      this.log('info', `翻訳時の前文脈参照件数を変更: ${this.contextWindow === 0 ? 'なし (独立翻訳)' : `直近${this.contextWindow}件`}`);
+      this.showToast(
+        this.contextWindow === 0
+          ? '前文脈参照をオフ（独立翻訳）にしました。'
+          : `直近 ${this.contextWindow} 件の前文脈を参照して翻訳します。`,
+        'info'
+      );
+    });
+
+    this.elSelectCategory?.addEventListener('change', (e) => {
+      this.category = e.target.value;
+      ConfigManager.set(K.CATEGORY, this.category);
+      this.log('info', `監査分野変更: ${this.category}`);
+    });
+
+    this.elSelectGain?.addEventListener('change', (e) => {
+      this.gain = e.target.value;
+      ConfigManager.set(K.GAIN, this.gain);
+      this.audioService.setGain(this.gain);
+      this.log('info', `マイク集音感度変更: ${this.gain}x (遠距離ブースト適用)`);
+      this.showToast(`マイク感度を ${this.gain}x に設定しました。`, 'info');
+    });
 
     this.elBtnClearFeed.addEventListener('click', () => {
       if (this.records.length === 0) return;
-      if (confirm('タイムラインの翻訳履歴を全消去しますか？')) {
-        this.records = [];
-        this.savedRecordCount = 0;
-        this.utteranceBuffer.reset();
-        this.hasUnsavedChanges = false;
-        this.elTranscriptList.innerHTML = '';
-        this.elEmptyState.style.display = 'block';
-        this.elRecordCount.textContent = '0 件の発話';
-        this._updateUIState();
-        this.showToast('全履歴をクリアしました。', 'info');
+      if (!confirm('タイムラインの翻訳履歴を全消去しますか？')) return;
+
+      this.records = [];
+      this.summaryHistory = [];
+      this.currentSummaryId = null;
+      this.savedRecordCount = 0;
+      this.utteranceBuffer.reset();
+      this.hasUnsavedChanges = false;
+      this.elTranscriptList.innerHTML = '';
+      this.elEmptyState.style.display = 'block';
+      this.elRecordCount.textContent = '0 件の発話';
+      if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'none';
+      if (this.elSelectSummaryHistory) {
+        this.elSelectSummaryHistory.innerHTML = '';
+        this.elSelectSummaryHistory.style.display = 'none';
       }
+      this._updateSummaryTargetPreview();
+      this._updateUIState();
+      this.showToast('全履歴をクリアしました。', 'info');
     });
 
     this.elBtnSaveDocs.addEventListener('click', () => this.saveToDocs(false));
@@ -2829,16 +3254,14 @@ class App {
     for (const radio of this.elRadioDocModes) {
       radio.addEventListener('change', (e) => {
         this.docMode = e.target.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, this.docMode);
+        ConfigManager.set(K.DOC_MODE, this.docMode);
         this._syncDocModeUI();
       });
     }
 
     this.elInputDocId.addEventListener('input', (e) => {
       const sanitized = GasStorageClient.extractDocId(e.target.value);
-      if (sanitized !== e.target.value) {
-        e.target.value = sanitized;
-      }
+      if (sanitized !== e.target.value) e.target.value = sanitized;
       this.hasUnsavedChanges = true;
       this._updateUIState();
     });
@@ -2849,67 +3272,161 @@ class App {
       const isHidden = this.elDiagLogContainer.style.display === 'none';
       this.elDiagLogContainer.style.display = isHidden ? 'block' : 'none';
     });
+  }
 
-    // Modal Handlers (スマホ・iPadスクロール対応)
+  _bindPromptEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
+
+    this.elBtnTogglePromptPanel?.addEventListener('click', () => {
+      this.promptPanelOpen = !this.promptPanelOpen;
+      ConfigManager.set(K.TRANSLATION_PROMPT_OPEN, String(this.promptPanelOpen));
+      this._syncPromptPanelUI();
+    });
+
+    this.elInputTranslationPrompt?.addEventListener('input', (e) => {
+      this.translationCustomPrompt = e.target.value;
+      ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, this.translationCustomPrompt);
+      this._updatePromptStatusBadge();
+    });
+
+    this.elBtnClearTranslationPrompt?.addEventListener('click', () => {
+      this.translationCustomPrompt = '';
+      if (this.elInputTranslationPrompt) this.elInputTranslationPrompt.value = '';
+      ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, '');
+      this._updatePromptStatusBadge();
+      this.log('info', '翻訳プロンプト追記をクリアしました（標準プロンプトのみに戻りました）。');
+      this.showToast('追記プロンプトをクリアしました。', 'info');
+    });
+
+    this.elPromptPresetBtns?.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const presetKey = btn.dataset.preset;
+        const presetText = TRANSLATION_PROMPT_PRESETS[presetKey];
+        if (!presetText) return;
+        this.translationCustomPrompt = presetText;
+        if (this.elInputTranslationPrompt) {
+          this.elInputTranslationPrompt.value = presetText;
+          this.elInputTranslationPrompt.focus();
+        }
+        ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, presetText);
+        this._updatePromptStatusBadge();
+        this.log('info', `翻訳プロンプトプリセット適用: ${presetKey}`);
+        this.showToast('翻訳ニュアンスのプリセットを反映しました（自由に編集・追記できます）。', 'success');
+      });
+    });
+  }
+
+  _bindSummaryEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
+
+    this.elSelectSummaryRange?.addEventListener('change', (e) => {
+      this.summaryRange = e.target.value;
+      ConfigManager.set(K.SUMMARY_RANGE, this.summaryRange);
+      this._syncSummaryRangeUI();
+      if (this.summaryRange === 'custom' && this.elInputSummaryCustomMin) {
+        this.elInputSummaryCustomMin.focus();
+        this.elInputSummaryCustomMin.select();
+      }
+    });
+
+    if (this.elInputSummaryCustomMin) {
+      const updateCustomMin = () => {
+        let val = parseInt(this.elInputSummaryCustomMin.value, 10);
+        if (isNaN(val) || val < 1) val = 1;
+        if (val > 360) val = 360;
+        this.summaryCustomMin = val;
+        ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(val));
+        this._updateSummaryTargetPreview();
+      };
+      this.elInputSummaryCustomMin.addEventListener('input', updateCustomMin);
+      this.elInputSummaryCustomMin.addEventListener('change', () => {
+        updateCustomMin();
+        this.elInputSummaryCustomMin.value = String(this.summaryCustomMin);
+      });
+      this.elInputSummaryCustomMin.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          updateCustomMin();
+          this.generateSummary();
+        }
+      });
+    }
+
+    this.elBtnGenerateSummary?.addEventListener('click', () => this.generateSummary());
+
+    this.elSelectSummaryHistory?.addEventListener('change', (e) => {
+      this.currentSummaryId = e.target.value;
+      this._renderCurrentSummary();
+    });
+
+    this.elBtnCopySummary?.addEventListener('click', () => this.copyCurrentSummary());
+
+    this.elBtnToggleSummaryBody?.addEventListener('click', () => {
+      this.summaryBodyCollapsed = !this.summaryBodyCollapsed;
+      if (this.elSummaryResultBody) {
+        this.elSummaryResultBody.style.display = this.summaryBodyCollapsed ? 'none' : 'block';
+      }
+      this.elBtnToggleSummaryBody.textContent = this.summaryBodyCollapsed ? '▼ 開く' : '▲ 折りたたむ';
+    });
+
+    this.elBtnCloseSummary?.addEventListener('click', () => {
+      if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'none';
+    });
+  }
+
+  _bindModalEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
+
+    // Settings Modal
     this.elBtnSettings.addEventListener('click', () => this._openSettingsModal());
     this.elBtnCloseModal.addEventListener('click', () => this._closeSettingsModal());
     this.elModal.addEventListener('click', (e) => {
       if (e.target === this.elModal) this._closeSettingsModal();
     });
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.elModal.style.display === 'flex') {
-        this._closeSettingsModal();
-      }
-    });
 
     this.elBtnToggleKeyVis.addEventListener('click', () => {
-      if (this.elInputApiKey.type === 'password') {
-        this.elInputApiKey.type = 'text';
-        this.elBtnToggleKeyVis.textContent = '非表示';
-      } else {
-        this.elInputApiKey.type = 'password';
-        this.elBtnToggleKeyVis.textContent = '表示';
-      }
+      const isHidden = this.elInputApiKey.type === 'password';
+      this.elInputApiKey.type = isHidden ? 'text' : 'password';
+      this.elBtnToggleKeyVis.textContent = isHidden ? '非表示' : '表示';
     });
 
-    if (this.elBtnResetInstruction) {
-      this.elBtnResetInstruction.addEventListener('click', () => {
-        if (this.elInputSystemInstruction) {
-          this.elInputSystemInstruction.value = DEFAULT_SYSTEM_INSTRUCTION;
-          this.showToast('systemInstruction を初期値にリセットしました。', 'info');
-        }
-      });
-    }
+    this.elBtnResetInstruction?.addEventListener('click', () => {
+      if (this.elInputSystemInstruction) {
+        this.elInputSystemInstruction.value = DEFAULT_SYSTEM_INSTRUCTION;
+        this.showToast('systemInstruction を初期値にリセットしました。', 'info');
+      }
+    });
 
     this.elBtnSaveSettings.addEventListener('click', () => {
       this.apiKey = this.elInputApiKey.value.trim();
       this.gasUrl = this.elInputGasUrl.value.trim();
       this.gasToken = this.elInputGasToken.value.trim();
       this.engineMode = this.elSelectEngineMode.value;
+      this.liveModel = this.elSelectLiveModel.value;
+      this.autoSave = this.elCheckAutoSave.checked;
+
       if (this.elSelectDefaultGain) {
         this.gain = this.elSelectDefaultGain.value;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, this.gain);
+        ConfigManager.set(K.GAIN, this.gain);
         if (this.elSelectGain) this.elSelectGain.value = this.gain;
         this.audioService.setGain(this.gain);
       }
-      this.liveModel = this.elSelectLiveModel.value;
       if (this.elInputSystemInstruction) {
         this.systemInstruction = this.elInputSystemInstruction.value.trim() || DEFAULT_SYSTEM_INSTRUCTION;
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, this.systemInstruction);
+        ConfigManager.set(K.SYSTEM_INSTRUCTION, this.systemInstruction);
       }
       if (this.elInputDefaultFolderId) {
-        this.folderId = GasStorageClient.extractFolderId(this.elInputDefaultFolderId.value.trim()) || '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f';
-        ConfigManager.set(ConfigManager.STORAGE_KEYS.FOLDER_ID, this.folderId);
+        this.folderId = GasStorageClient.extractFolderId(this.elInputDefaultFolderId.value.trim()) || DEFAULT_SETTINGS.DEFAULT_FOLDER_ID;
+        ConfigManager.set(K.FOLDER_ID, this.folderId);
         if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
       }
-      this.autoSave = this.elCheckAutoSave.checked;
 
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.API_KEY, this.apiKey);
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_URL, this.gasUrl);
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, this.gasToken);
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, this.engineMode);
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, this.liveModel);
-      ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(this.autoSave));
+      ConfigManager.set(K.API_KEY, this.apiKey);
+      ConfigManager.set(K.GAS_URL, this.gasUrl);
+      ConfigManager.set(K.GAS_TOKEN, this.gasToken);
+      ConfigManager.set(K.ENGINE_MODE, this.engineMode);
+      ConfigManager.set(K.LIVE_MODEL, this.liveModel);
+      ConfigManager.set(K.AUTO_SAVE, String(this.autoSave));
 
       this._closeSettingsModal();
       this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}`);
@@ -2929,7 +3446,7 @@ class App {
         const res = await GasStorageClient.ping(url, this.elInputGasToken.value.trim());
         if (res.status === 'ok' || res.status === 'success') {
           const authNote = res.authRequired ? ' (認証保護あり)' : '';
-          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || '2.6.0'})${authNote}`;
+          this.elGasTestResult.textContent = `✓ 接続成功 (v${res.version || APP_VERSION})${authNote}`;
           this.elGasTestResult.className = 'test-result-text success';
           this.log('success', `GAS Web App 疎通確認完了: ${url}`);
         } else {
@@ -2943,14 +3460,57 @@ class App {
       }
     });
 
-    // Gemini Client Callbacks
+    // QR Code Modal
+    this.elBtnOpenQr?.addEventListener('click', () => this._openQrModal());
+    this.elBtnCloseQrModal?.addEventListener('click', () => this._closeQrModal());
+    this.elBtnDoneQrModal?.addEventListener('click', () => this._closeQrModal());
+    this.elQrModal?.addEventListener('click', (e) => {
+      if (e.target === this.elQrModal) this._closeQrModal();
+    });
+
+    this.elBtnCopyShareUrl?.addEventListener('click', () => {
+      if (!this.elInputShareUrl.value) return;
+      this.copyToClipboard(this.elInputShareUrl.value)
+        .then(() => this.showToast('スマホ連携用URLをクリップボードにコピーしました。', 'info'))
+        .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
+    });
+
+    // Consolidated Escape key handler for all modals
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (this.elModal?.style.display === 'flex') this._closeSettingsModal();
+      if (this.elQrModal?.style.display === 'flex') this._closeQrModal();
+    });
+  }
+
+  _bindGeminiClientCallbacks() {
     this.geminiClient.onLogCallback = (type, msg) => this.log(type, msg);
-    this.geminiClient.onStatusChangeCallback = (status) => this._updateStatus(status);
     this.geminiClient.onErrorCallback = (err) => this.showToast(err, 'error');
-    this.geminiClient.onDisconnectCallback = (code, reason) => {
-      this.log('warn', `セッション終了切断: Code ${code}`);
+
+    this.geminiClient.onReconnectingCallback = (attempt, maxAttempts, _delayMs, code) => {
+      if (!this.isRecording) return;
+      this._updateStatus('reconnecting', `再接続中 (${attempt}/${maxAttempts})...`);
+      if (attempt === 1) {
+        this.showToast(`回線が一時切断されました (Code: ${code})。録音を維持したまま自動再接続を試行します...`, 'warning');
+      }
+    };
+
+    this.geminiClient.onReconnectedCallback = (attempt) => {
+      if (!this.isRecording) return;
+      this._updateStatus(this.isPaused ? 'paused' : 'recording');
+      this.showToast(`音声認識サーバーへ自動再接続しました (${attempt}回目で復帰)。`, 'success');
+    };
+
+    this.geminiClient.onDisconnectCallback = (code, reason, exhausted) => {
+      this.log('warn', `セッション終了切断: Code ${code}${reason ? ` (${reason})` : ''}`);
+      if (exhausted) {
+        this.showToast(`回線が復旧せず自動再接続の上限に達したため録音を停止しました (Code: ${code})。`, 'error');
+      } else if (code === 1007 || code === 1008) {
+        this.showToast(`認証または設定エラーのため録音を停止しました (Code: ${code})。APIキーを確認してください。`, 'error');
+      }
       this.stopRecording();
     };
+
     this.geminiClient.onInterimCallback = (text) => {
       this.utteranceBuffer.pushInterim(text);
     };
@@ -2960,51 +3520,262 @@ class App {
     this.geminiClient.onTurnCompleteCallback = () => {
       this.utteranceBuffer.markTurnComplete();
     };
-
-    // QR Modal Events
-    if (this.elBtnOpenQr) {
-      this.elBtnOpenQr.addEventListener('click', () => this._openQrModal());
-    }
-    if (this.elBtnCloseQrModal) {
-      this.elBtnCloseQrModal.addEventListener('click', () => this._closeQrModal());
-    }
-    if (this.elBtnDoneQrModal) {
-      this.elBtnDoneQrModal.addEventListener('click', () => this._closeQrModal());
-    }
-    if (this.elQrModal) {
-      this.elQrModal.addEventListener('click', (e) => {
-        if (e.target === this.elQrModal) this._closeQrModal();
-      });
-    }
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.elQrModal && this.elQrModal.style.display === 'flex') {
-        this._closeQrModal();
-      }
-    });
-    if (this.elBtnCopyShareUrl) {
-      this.elBtnCopyShareUrl.addEventListener('click', () => {
-        if (this.elInputShareUrl.value) {
-          navigator.clipboard.writeText(this.elInputShareUrl.value).then(() => {
-            this.showToast('スマホ連携用URLをクリップボードにコピーしました。', 'info');
-          });
-        }
-      });
-    }
   }
 
+  // ---- UI Sync Helpers ----
   _syncDocModeUI() {
-    if (this.docMode === 'existing') {
-      this.elInputDocTitle.style.display = 'none';
-      if (this.elInputFolderId) this.elInputFolderId.style.display = 'none';
-      this.elInputDocId.style.display = 'block';
+    const isExisting = this.docMode === 'existing';
+    this.elInputDocTitle.style.display = isExisting ? 'none' : 'block';
+    if (this.elInputFolderId) this.elInputFolderId.style.display = isExisting ? 'none' : 'block';
+    this.elInputDocId.style.display = isExisting ? 'block' : 'none';
+  }
+
+  _syncPromptPanelUI() {
+    if (this.elPromptPanelBody) {
+      this.elPromptPanelBody.style.display = this.promptPanelOpen ? 'flex' : 'none';
+    }
+    this.elBtnTogglePromptPanel?.setAttribute('aria-expanded', String(this.promptPanelOpen));
+    if (this.elPromptToggleChevron) {
+      this.elPromptToggleChevron.textContent = this.promptPanelOpen ? '▲ 閉じる' : '▼ 開く';
+    }
+    this._updatePromptStatusBadge();
+  }
+
+  _updatePromptStatusBadge() {
+    if (!this.elPromptStatusBadge) return;
+    const len = (this.translationCustomPrompt || '').trim().length;
+    this.elPromptStatusBadge.textContent = len > 0 ? `追記適用中 (${len}文字)` : '標準のみ';
+    this.elPromptStatusBadge.className = len > 0 ? 'tag prompt-status-badge is-active' : 'tag prompt-status-badge';
+  }
+
+  _syncSummaryRangeUI() {
+    if (this.elSummaryCustomWrapper) {
+      this.elSummaryCustomWrapper.style.display = this.summaryRange === 'custom' ? 'inline-flex' : 'none';
+    }
+    this._updateSummaryTargetPreview();
+  }
+
+  // ---- Summary Management ----
+  _getSummaryLookbackSpec() {
+    if (this.summaryRange === 'all') {
+      return { mode: 'all', minutes: null, label: 'セッション全体' };
+    }
+    const rawVal = this.summaryRange === 'custom'
+      ? (this.elInputSummaryCustomMin ? this.elInputSummaryCustomMin.value : this.summaryCustomMin)
+      : this.summaryRange;
+    const parsed = parseInt(rawVal, 10);
+    const minutes = (!isNaN(parsed) && parsed >= 1) ? Math.min(360, parsed) : 5;
+    return { mode: 'minutes', minutes, label: `直近${minutes}分` };
+  }
+
+  _getRecordTimestampMs(record) {
+    if (record && typeof record.createdAt === 'number' && !isNaN(record.createdAt)) {
+      return record.createdAt;
+    }
+    if (record && typeof record.time === 'string') {
+      const m = record.time.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+      if (m) {
+        const d = new Date();
+        d.setHours(parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3] || '0', 10), 0);
+        return d.getTime();
+      }
+    }
+    return Date.now();
+  }
+
+  _collectRecordsForSummary(nowMs = Date.now()) {
+    const spec = this._getSummaryLookbackSpec();
+    const matchedRecords = spec.mode === 'all'
+      ? [...this.records]
+      : this.records.filter((r) => this._getRecordTimestampMs(r) >= nowMs - spec.minutes * 60 * 1000);
+    const pendingText = this.utteranceBuffer ? this.utteranceBuffer.getPendingText() : '';
+    return {
+      spec,
+      records: matchedRecords,
+      pendingText,
+      totalCount: matchedRecords.length + (pendingText ? 1 : 0)
+    };
+  }
+
+  _updateSummaryTargetPreview() {
+    if (!this.elSummaryTargetPreview) return;
+    const { records, pendingText } = this._collectRecordsForSummary();
+    const count = records.length;
+    const hasPending = Boolean(pendingText);
+    if (count > 0 || hasPending) {
+      this.elSummaryTargetPreview.textContent = hasPending ? `対象: ${count}件 (+認識中)` : `対象: ${count}件`;
+      this.elSummaryTargetPreview.className = 'tag summary-target-badge has-items';
     } else {
-      this.elInputDocTitle.style.display = 'block';
-      if (this.elInputFolderId) this.elInputFolderId.style.display = 'block';
-      this.elInputDocId.style.display = 'none';
+      this.elSummaryTargetPreview.textContent = '対象: 0件';
+      this.elSummaryTargetPreview.className = 'tag summary-target-badge';
     }
   }
 
+  async generateSummary() {
+    if (this.isSummarizing) return;
+
+    if (!this.apiKey) {
+      this.showToast('サマリー生成には Gemini API キーが必要です。', 'warning');
+      this._openSettingsModal();
+      return;
+    }
+
+    const nowMs = Date.now();
+    const { spec, records, pendingText, totalCount } = this._collectRecordsForSummary(nowMs);
+
+    if (totalCount === 0) {
+      const hint = this.records.length > 0
+        ? `（セッション全体には ${this.records.length} 件あります。対象範囲を広げてお試しください）`
+        : '';
+      this.showToast(`${spec.label}以内にサマリー対象の発話がありません${hint}`, 'warning');
+      return;
+    }
+
+    this.isSummarizing = true;
+    this.summaryBodyCollapsed = false;
+    if (this.elBtnGenerateSummary) {
+      this.elBtnGenerateSummary.disabled = true;
+      this.elBtnGenerateSummary.textContent = '⏳ サマリー生成中...';
+    }
+    if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'flex';
+    if (this.elSummaryResultBody) this.elSummaryResultBody.style.display = 'block';
+    if (this.elBtnToggleSummaryBody) this.elBtnToggleSummaryBody.textContent = '▲ 折りたたむ';
+    if (this.elSummaryMetaBadge) {
+      this.elSummaryMetaBadge.textContent = `${spec.label} / ${records.length}件${pendingText ? '+進行中' : ''} を集計中...`;
+    }
+    if (this.elSummaryContent) {
+      this.elSummaryContent.className = 'summary-content is-loading';
+      this.elSummaryContent.textContent = `⏳ ${spec.label}の会話内容を分析し、日本語サマリーを生成しています...`;
+    }
+
+    const endTimeStr = new Date(nowMs).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const startTimeStr = records.length > 0 ? (records[0].time || endTimeStr) : endTimeStr;
+    this.log('info', `会話サマリー生成開始 (範囲: ${spec.label}, 対象: ${records.length}件${pendingText ? '+認識中1件' : ''})`);
+
+    try {
+      const result = await this.summaryService.generateSummary({
+        records,
+        pendingText,
+        rangeLabel: spec.mode === 'all' ? `セッション全体 (${startTimeStr}〜${endTimeStr})` : `${spec.label} (${startTimeStr}〜${endTimeStr})`,
+        category: this.category,
+        customPrompt: this.translationCustomPrompt,
+        apiKey: this.apiKey
+      });
+
+      const entry = {
+        id: `sum_${nowMs}`,
+        generatedAt: endTimeStr,
+        rangeLabel: spec.label,
+        timeSpan: `${startTimeStr}〜${endTimeStr}`,
+        count: records.length,
+        hasPending: Boolean(pendingText),
+        markdown: result.summary,
+        model: result.model
+      };
+
+      this.summaryHistory.unshift(entry);
+      this.currentSummaryId = entry.id;
+      this._refreshSummaryHistorySelect();
+      this._renderCurrentSummary();
+      this.showToast(`${spec.label}のサマリーを出力しました！`, 'success');
+    } catch (err) {
+      console.error('Summary generation failed:', err);
+      this.log('error', `サマリー生成失敗: ${err.message}`);
+      if (this.elSummaryContent) {
+        this.elSummaryContent.className = 'summary-content';
+        this.elSummaryContent.textContent = `⚠️ サマリー生成に失敗しました: ${err.message}`;
+      }
+      this.showToast('サマリー生成エラー: ' + err.message, 'error');
+    } finally {
+      this.isSummarizing = false;
+      if (this.elBtnGenerateSummary) {
+        this.elBtnGenerateSummary.disabled = false;
+        this.elBtnGenerateSummary.textContent = '✨ サマリー出力';
+      }
+    }
+  }
+
+  _refreshSummaryHistorySelect() {
+    if (!this.elSelectSummaryHistory) return;
+    if (this.summaryHistory.length <= 1) {
+      this.elSelectSummaryHistory.style.display = 'none';
+      return;
+    }
+    this.elSelectSummaryHistory.innerHTML = '';
+    for (const s of this.summaryHistory) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = `${s.generatedAt} (${s.rangeLabel} / ${s.count}件)`;
+      if (s.id === this.currentSummaryId) opt.selected = true;
+      this.elSelectSummaryHistory.appendChild(opt);
+    }
+    this.elSelectSummaryHistory.style.display = 'inline-block';
+  }
+
+  _renderCurrentSummary() {
+    const entry = this.summaryHistory.find((s) => s.id === this.currentSummaryId) || this.summaryHistory[0];
+    if (!entry) return;
+    if (this.elSummaryMetaBadge) {
+      this.elSummaryMetaBadge.textContent = `${entry.rangeLabel} (${entry.timeSpan} / ${entry.count}件${entry.hasPending ? '+進行中' : ''})`;
+    }
+    if (this.elSummaryContent) {
+      this.elSummaryContent.className = 'summary-content';
+      this.elSummaryContent.innerHTML = this._renderSummaryMarkdown(entry.markdown);
+    }
+  }
+
+  _renderSummaryMarkdown(md) {
+    const lines = String(md || '').split(/\r?\n/);
+    const htmlParts = [];
+    let inList = false;
+
+    const formatInline = (text) => this._escapeHTML(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    const closeListIfOpen = () => {
+      if (inList) {
+        htmlParts.push('</ul>');
+        inList = false;
+      }
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        closeListIfOpen();
+        continue;
+      }
+      if (/^#{1,4}\s+/.test(line)) {
+        closeListIfOpen();
+        htmlParts.push(`<h4>${formatInline(line.replace(/^#{1,4}\s+/, ''))}</h4>`);
+      } else if (/^([-*•・]|\d+\.)\s+/.test(line)) {
+        if (!inList) {
+          htmlParts.push('<ul>');
+          inList = true;
+        }
+        htmlParts.push(`<li>${formatInline(line.replace(/^([-*•・]|\d+\.)\s+/, ''))}</li>`);
+      } else {
+        closeListIfOpen();
+        htmlParts.push(`<p>${formatInline(line)}</p>`);
+      }
+    }
+    closeListIfOpen();
+    return htmlParts.join('');
+  }
+
+  copyCurrentSummary() {
+    const entry = this.summaryHistory.find((s) => s.id === this.currentSummaryId) || this.summaryHistory[0];
+    if (!entry) {
+      this.showToast('コピーするサマリーがありません。', 'warning');
+      return;
+    }
+    const header = `## 会話サマリー [${entry.rangeLabel} / ${entry.timeSpan} / ${entry.count}件 / 分野: ${this.category}]\n\n`;
+    this.copyToClipboard(header + entry.markdown)
+      .then(() => this.showToast('サマリーをMarkdown形式でコピーしました。', 'info'))
+      .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
+  }
+
+  // ---- Recording Lifecycle ----
   async toggleRecording() {
+    if (this.isStarting) return;
     if (this.isRecording) {
       await this.stopRecording();
     } else {
@@ -3013,6 +3784,8 @@ class App {
   }
 
   async startRecording() {
+    if (this.isStarting || this.isRecording) return;
+
     if (window.location.protocol === 'file:') {
       this.log('error', 'file:// プロトコルではブラウザのマイク機能が無効化されます。HTTPS または http://localhost 上でアクセスしてください。');
       this.showToast('file:// ではマイクが動作しません。ローカルサーバーまたはGitHub Pagesで開いてください。', 'error');
@@ -3025,6 +3798,8 @@ class App {
       return;
     }
 
+    this.isStarting = true;
+    this.elBtnToggleRecord.disabled = true;
     this.log('info', `=== 翻訳セッション開始 (モード: ${this.engineMode}) ===`);
 
     try {
@@ -3061,9 +3836,7 @@ class App {
           try { this.audioService.stop(); } catch (e) {}
           try { this.geminiClient.disconnect(); } catch (e) {}
 
-          if (this.engineMode === 'gemini-live') {
-            throw liveErr;
-          }
+          if (this.engineMode === 'gemini-live') throw liveErr;
           this.log('info', '自動フォールバック: ブラウザ標準音声認識 (Web Speech API) を起動します...');
         }
       }
@@ -3078,12 +3851,8 @@ class App {
 
         this.webSpeechService.start(
           this.direction,
-          (interim) => {
-            this.utteranceBuffer.pushInterim(interim);
-          },
-          (finalText, lang) => {
-            this.utteranceBuffer.pushFinal(finalText, lang, { fromWebSpeech: true });
-          },
+          (interim) => this.utteranceBuffer.pushInterim(interim),
+          (finalText, lang) => this.utteranceBuffer.pushFinal(finalText, lang, { fromWebSpeech: true }),
           (err) => {
             this.log('error', `WebSpeechエラー: ${err.message}`);
             this.showToast(err.message, 'error');
@@ -3118,6 +3887,9 @@ class App {
       this._updateStatus('idle');
       this._updateUIState();
       this.showToast('開始エラー: ' + err.message, 'error');
+    } finally {
+      this.isStarting = false;
+      this.elBtnToggleRecord.disabled = false;
     }
   }
 
@@ -3130,9 +3902,7 @@ class App {
       try { this.webSpeechService.stop(); } catch (e) {}
     }
 
-    if (this.utteranceBuffer) {
-      this.utteranceBuffer.flushAll('stop-recording');
-    }
+    this.utteranceBuffer?.flushAll('stop-recording');
     this.isRecording = false;
     this.isPaused = false;
     this.activeEngine = 'none';
@@ -3143,7 +3913,6 @@ class App {
     this.log('info', 'セッション停止完了。');
     this.showToast('翻訳セッションを停止しました。', 'info');
 
-    // 自動保存が有効で、未保存の確定翻訳がある場合は自動同期
     if (this.autoSave && this.hasUnsavedChanges && this.gasUrl) {
       await this.saveToDocs(true);
     }
@@ -3151,28 +3920,25 @@ class App {
 
   togglePause() {
     if (!this.isRecording) return;
+
     if (this.isPaused) {
-      if (this.activeEngine === 'gemini-live') {
-        this.audioService.resume();
-      } else if (this.activeEngine === 'web-speech') {
-        this.webSpeechService.resume();
-      }
+      if (this.activeEngine === 'gemini-live') this.audioService.resume();
+      else if (this.activeEngine === 'web-speech') this.webSpeechService.resume();
+
       this.isPaused = false;
       this.elLivePreview.style.display = 'flex';
-      this._renderInterim('翻訳を再開しました。話しかけてください...');
+      this.utteranceBuffer._notifyDisplay();
       this._updateStatus('recording');
       this.showToast('翻訳を再開しました。', 'info');
     } else {
-      if (this.activeEngine === 'gemini-live') {
-        this.audioService.pause();
-      } else if (this.activeEngine === 'web-speech') {
-        this.webSpeechService.pause();
-      }
-      if (this.utteranceBuffer && this.utteranceBuffer.hasPendingText()) {
+      if (this.activeEngine === 'gemini-live') this.audioService.pause();
+      else if (this.activeEngine === 'web-speech') this.webSpeechService.pause();
+
+      if (this.utteranceBuffer.hasPendingText()) {
         this.utteranceBuffer.flushAll('pause-recording');
       }
       this.isPaused = true;
-      this._renderInterim('一時停止中 (音声を認識しません)');
+      this.utteranceBuffer._notifyDisplay();
       this._updateStatus('paused');
       this.showToast('翻訳を一時停止しました。', 'warning');
     }
@@ -3180,28 +3946,12 @@ class App {
   }
 
   _updateMeter(volume) {
-    const pct = Math.min(100, Math.round(volume * 400));
-    if (this.elMeterBar) {
-      this.elMeterBar.style.width = `${pct}%`;
-    }
-  }
-
-  _renderInterim(text) {
-    if (!this.elLiveText) return;
-    if (!text || text.trim() === '') {
-      this.elLiveText.className = 'live-text live-placeholder';
-      this.elLiveText.textContent = this.isRecording
-        ? '話しかけてください...'
-        : 'マイクを開始すると、リアルタイムの原語プレビューが表示されます...';
-    } else {
-      this.elLiveText.className = 'live-text live-placeholder';
-      this.elLiveText.textContent = text;
-    }
+    if (!this.elMeterBar) return;
+    this.elMeterBar.style.width = `${Math.min(100, Math.round(volume * 400))}%`;
   }
 
   _renderLiveDisplay({ committed, interim, totalChars, targetLang, silenceSec }) {
     if (!this.elLiveText) return;
-
     const hasText = Boolean(committed || interim);
 
     if (this.elBtnFlushNow) {
@@ -3210,7 +3960,7 @@ class App {
 
     if (this.elLiveBufferStatus) {
       if (!hasText) {
-        this.elLiveBufferStatus.textContent = '発話待機中';
+        this.elLiveBufferStatus.textContent = this.isPaused ? '一時停止中' : '発話待機中';
         this.elLiveBufferStatus.className = 'tag buffer-status';
       } else if (targetLang === 'ja') {
         this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒 or 文末で長文日本語訳）`;
@@ -3226,35 +3976,51 @@ class App {
       this.elLiveText.textContent = this.isRecording
         ? (this.isPaused ? '一時停止中 (音声を認識しません)' : '話しかけてください...')
         : 'マイクを開始すると、リアルタイムの原語プレビューが表示されます...';
+      this._updateSummaryTargetPreview();
       return;
     }
 
     this.elLiveText.className = 'live-text';
     const parts = [];
-    if (committed) {
-      parts.push(`<span class="live-committed">${this._escapeHTML(committed)}</span>`);
-    }
-    if (interim) {
-      parts.push(`<span class="live-interim">${this._escapeHTML(interim)}</span>`);
-    }
+    if (committed) parts.push(`<span class="live-committed">${this._escapeHTML(committed)}</span>`);
+    if (interim) parts.push(`<span class="live-interim">${this._escapeHTML(interim)}</span>`);
     this.elLiveText.innerHTML = parts.join(committed && interim ? ' ' : '');
-    // 長文になっても最新の発話部分が常に見えるよう自動スクロール
     this.elLiveText.scrollTop = this.elLiveText.scrollHeight;
+    this._updateSummaryTargetPreview();
   }
 
-  _getRecentContext(excludeRecordId = null) {
-    return this.records
-      .filter((r) => r.id !== excludeRecordId && r.originalText && !r.isTranslating)
-      .slice(-2)
-      .map((r) => ({
-        original: r.originalText,
-        translated: r.translatedText || ''
-      }));
+  // ---- Transcript & Translation Management ----
+  _getRecentContext(targetRecordId = null) {
+    const windowSize = Number(this.contextWindow);
+    if (!windowSize || windowSize <= 0) return [];
+
+    let priorRecords = this.records;
+    if (targetRecordId) {
+      const targetIdx = this.records.findIndex((r) => r.id === targetRecordId);
+      priorRecords = targetIdx !== -1
+        ? this.records.slice(0, targetIdx)
+        : this.records.filter((r) => r.id !== targetRecordId);
+    }
+
+    return priorRecords
+      .filter((r) => r && ((r.originalText && r.originalText.trim()) || (r.translatedText && r.translatedText.trim())))
+      .slice(-windowSize)
+      .map((r) => {
+        const hasValidTranslation =
+          !r.isTranslating &&
+          r.translatedText &&
+          r.translatedText.trim() !== '' &&
+          !r.translatedText.startsWith('【翻訳');
+        return {
+          time: r.time || '',
+          speaker: r.speaker || '',
+          speakerLang: r.speakerLang || '',
+          original: r.originalText || '',
+          translated: hasValidTranslation ? r.translatedText : ''
+        };
+      });
   }
 
-  /**
-   * 確定翻訳レコード（翻訳完了済みの発話一覧）を取得
-   */
   getFinalizedRecords() {
     return this.records.filter((r) => !r.isTranslating && r.translatedText && r.translatedText.trim() !== '');
   }
@@ -3265,20 +4031,15 @@ class App {
     const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
     const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    // 4言語（日本語・英語・ベンガル語・ヒンディー語）の自動検出
-    const detectedLang = detectLanguage4(finalText, langCode);
-
-    // 話者初期自動割り当て: 日本語は監査員(Auditor)、英語・ベンガル語・ヒンディー語はヤード担当者(Yard Rep)
-    let initialSpeaker = ROLES[1]; // Yard Rep
-    if (detectedLang === 'ja') {
-      initialSpeaker = ROLES[0]; // Auditor
-    }
-
+    const fixedLangMap = { 'en-to-ja': 'en', 'ja-to-en': 'ja', 'bn-to-ja': 'bn', 'hi-to-ja': 'hi' };
+    const detectedLang = fixedLangMap[this.direction] || detectLanguage4(finalText, langCode);
+    const initialSpeaker = detectedLang === 'ja' ? ROLES[0] : ROLES[1];
     const engineLabel = this.activeEngine === 'gemini-live' ? 'Gemini Live' : 'Web Speech';
 
     const record = {
       id: recordId,
       time: timestamp,
+      createdAt: Date.now(),
       speaker: initialSpeaker,
       speakerLang: detectedLang,
       originalText: finalText,
@@ -3292,6 +4053,7 @@ class App {
     this.records.push(record);
     this.hasUnsavedChanges = true;
     this._appendSingleCard(record);
+    this._updateSummaryTargetPreview();
     this._updateUIState();
 
     this.log('info', `確定発話をFIFOキューに投入: "${finalText}"`);
@@ -3305,7 +4067,8 @@ class App {
       this.gasToken,
       recordId,
       (id, transResult) => this._onTranslationComplete(id, transResult),
-      this._getRecentContext(recordId)
+      () => this._getRecentContext(recordId),
+      this.translationCustomPrompt
     );
   }
 
@@ -3328,14 +4091,14 @@ class App {
         <div class="meta-left">
           <span>🕒 ${this._escapeHTML(item.time)}</span>
           <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="クリックで話者を変更">${this._escapeHTML(item.speaker || '発話')}</span>
-          <span class="tag lang-badge lang-${item.speakerLang}">${getLanguageBadge(item.speakerLang)}</span>
+          <span id="${item.id}_lang" class="tag lang-badge lang-${item.speakerLang}">${getLanguageBadge(item.speakerLang)}</span>
           <span class="tag engine">${this._escapeHTML(item.engine || 'Gemini')}</span>
         </div>
         <div class="card-actions">
-          <button class="small-btn" data-a="copy" title="このカード内容をコピー">📋</button>
-          <button class="small-btn" data-a="edit" title="原文・訳文を修正">✏️</button>
-          <button class="small-btn" data-a="retry" title="再翻訳を実行">🔄</button>
-          <button class="small-btn" data-a="delete" title="この発話を削除">🗑️</button>
+          <button type="button" class="small-btn" data-a="copy" title="このカード内容をコピー">📋</button>
+          <button type="button" class="small-btn" data-a="edit" title="原文・訳文を修正">✏️</button>
+          <button type="button" class="small-btn" data-a="retry" title="再翻訳を実行">🔄</button>
+          <button type="button" class="small-btn" data-a="delete" title="この発話を削除">🗑️</button>
         </div>
       </div>
       <div id="${item.id}_view" class="body-grid">
@@ -3354,47 +4117,47 @@ class App {
           <textarea id="${item.id}_edit_trans" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
         </div>
         <div class="edit-actions">
-          <button class="btn btn-sm btn-outline" data-a="cancel">キャンセル</button>
-          <button class="btn btn-sm btn-primary" data-a="save">保存</button>
+          <button type="button" class="btn btn-sm btn-outline" data-a="cancel">キャンセル</button>
+          <button type="button" class="btn btn-sm btn-primary" data-a="save">保存</button>
         </div>
       </div>
     `;
 
     card.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-a]');
-      const a = btn ? btn.dataset.a : null;
+      const action = btn ? btn.dataset.a : null;
 
-      // Copy Single Card
-      if (a === 'copy') {
+      if (action === 'copy') {
         const textToCopy = `[${item.time}] (${item.speaker})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
-        this.copyToClipboard(textToCopy).then(() => {
-          this.showToast('カード内容をコピーしました。', 'info');
-        }).catch((err) => {
-          this.showToast('コピーに失敗しました: ' + err.message, 'error');
-        });
+        this.copyToClipboard(textToCopy)
+          .then(() => this.showToast('カード内容をコピーしました。', 'info'))
+          .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
         return;
       }
 
-      // Open Inline Edit
-      if (a === 'edit') {
+      if (action === 'edit') {
+        // 常に最新の原文・訳文を編集欄へ同期してから開く（翻訳完了後の空欄バグ防止）
+        const editOrigEl = document.getElementById(`${item.id}_edit_orig`);
+        const editTransEl = document.getElementById(`${item.id}_edit_trans`);
+        if (editOrigEl) editOrigEl.value = item.originalText || '';
+        if (editTransEl) editTransEl.value = item.translatedText || '';
         document.getElementById(`${item.id}_view`).style.display = 'none';
         document.getElementById(`${item.id}_edit`).classList.add('open');
         return;
       }
 
-      // Cancel Inline Edit
-      if (a === 'cancel') {
+      if (action === 'cancel') {
         document.getElementById(`${item.id}_edit`).classList.remove('open');
         document.getElementById(`${item.id}_view`).style.display = 'grid';
         return;
       }
 
-      // Save Inline Edit
-      if (a === 'save') {
+      if (action === 'save') {
         const editOrig = document.getElementById(`${item.id}_edit_orig`).value.trim();
         const editTrans = document.getElementById(`${item.id}_edit_trans`).value.trim();
         item.originalText = editOrig;
         item.translatedText = editTrans;
+        item.isTranslating = false;
         document.getElementById(`${item.id}_orig`).textContent = editOrig;
         document.getElementById(`${item.id}_trans`).textContent = editTrans;
         document.getElementById(`${item.id}_edit`).classList.remove('open');
@@ -3405,8 +4168,7 @@ class App {
         return;
       }
 
-      // Retry Translation
-      if (a === 'retry') {
+      if (action === 'retry') {
         item.isTranslating = true;
         document.getElementById(`${item.id}_trans`).textContent = '⏳ 再翻訳中...';
         this.hasUnsavedChanges = true;
@@ -3420,38 +4182,36 @@ class App {
           this.gasToken,
           item.id,
           (id, transResult) => this._onTranslationComplete(id, transResult),
-          this._getRecentContext(item.id)
+          () => this._getRecentContext(item.id),
+          this.translationCustomPrompt
         );
         this.showToast('再翻訳を開始しました。', 'info');
         return;
       }
 
-      // Delete Record
-      if (a === 'delete') {
-        if (confirm('この発話をタイムラインから削除しますか？')) {
-          this.records = this.records.filter((x) => x.id !== item.id);
-          card.remove();
-          this.hasUnsavedChanges = true;
-          this.elRecordCount.textContent = `${this.records.length} 件の発話`;
-          if (this.records.length === 0) {
-            this.elEmptyState.style.display = 'block';
-          }
-          this._updateUIState();
-          this.showToast('発話を削除しました。', 'info');
+      if (action === 'delete') {
+        if (!confirm('この発話をタイムラインから削除しますか？')) return;
+        this.records = this.records.filter((x) => x.id !== item.id);
+        card.remove();
+        this.hasUnsavedChanges = true;
+        this.elRecordCount.textContent = `${this.records.length} 件の発話`;
+        if (this.records.length === 0) {
+          this.elEmptyState.style.display = 'block';
         }
+        this._updateSummaryTargetPreview();
+        this._updateUIState();
+        this.showToast('発話を削除しました。', 'info');
         return;
       }
 
-      // Speaker Tag Click (Cycle Roles)
       const spkTarget = e.target.closest('.tag.speaker');
       if (spkTarget && spkTarget.id === `${item.id}_spk`) {
-        let currIdx = ROLES.indexOf(item.speaker);
+        const currIdx = ROLES.indexOf(item.speaker);
         item.speaker = ROLES[(currIdx + 1 + ROLES.length) % ROLES.length];
-        e.target.textContent = item.speaker;
-
-        e.target.className = 'tag speaker';
-        if (item.speaker.includes('Auditor')) e.target.classList.add('auditor');
-        else if (item.speaker.includes('Yard')) e.target.classList.add('yard');
+        spkTarget.textContent = item.speaker;
+        spkTarget.className = 'tag speaker';
+        if (item.speaker.includes('Auditor')) spkTarget.classList.add('auditor');
+        else if (item.speaker.includes('Yard')) spkTarget.classList.add('yard');
         this.hasUnsavedChanges = true;
         this._updateUIState();
       }
@@ -3462,33 +4222,47 @@ class App {
 
   _onTranslationComplete(recordId, transResult) {
     const record = this.records.find((r) => r.id === recordId);
-    if (record) {
-      record.translatedText = transResult.translated;
+    // 翻訳中にユーザーがカードを削除した場合は安全にスキップ
+    if (!record) return;
+
+    record.translatedText = transResult.translated;
+    if (transResult.speakerLang && transResult.speakerLang !== 'auto') {
       record.speakerLang = transResult.speakerLang;
-      record.isTranslating = false;
     }
+    record.isTranslating = false;
 
     const transEl = document.getElementById(`${recordId}_trans`);
-    if (transEl) {
-      transEl.textContent = transResult.translated;
+    if (transEl) transEl.textContent = transResult.translated;
+
+    const editTransEl = document.getElementById(`${recordId}_edit_trans`);
+    const editBox = document.getElementById(`${recordId}_edit`);
+    if (editTransEl && (!editBox || !editBox.classList.contains('open'))) {
+      editTransEl.value = transResult.translated;
+    }
+
+    const langEl = document.getElementById(`${recordId}_lang`);
+    if (langEl && record.speakerLang) {
+      langEl.className = `tag lang-badge lang-${record.speakerLang}`;
+      langEl.textContent = getLanguageBadge(record.speakerLang);
     }
 
     this.hasUnsavedChanges = true;
     this._updateUIState();
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
 
-    // 自動保存: 未保存の確定翻訳が10件に達した際に自動同期
     const finalizedCount = this.getFinalizedRecords().length;
-    const unsaved = finalizedCount - this.savedRecordCount;
-    if (this.autoSave && unsaved >= 10 && this.gasUrl) {
+    if (this.autoSave && (finalizedCount - this.savedRecordCount) >= 10 && this.gasUrl) {
       this.saveToDocs(true);
     }
   }
 
-  /**
-   * 確定翻訳をひとつのGoogleドキュメントとして保存・同期
-   */
+  // ---- Google Docs Sync ----
   async saveToDocs(isAuto = false) {
+    if (this.isSavingDocs) {
+      if (!isAuto) this.showToast('現在Googleドキュメントへ保存処理中です。完了までお待ちください。', 'info');
+      return;
+    }
+
     if (!this.gasUrl) {
       if (!isAuto) {
         this.showToast('GAS Web App URLが未設定です。設定画面から登録してください。', 'warning');
@@ -3497,78 +4271,74 @@ class App {
       return;
     }
 
-    // 未完了の翻訳ジョブの終了を待機（最大約5秒）
-    if (this.translationService.isProcessing || this.translationService.queue.length > 0) {
-      this.log('info', '進行中の翻訳処理の完了を待機しています...');
-      let waitLimit = 0;
-      while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 25) {
-        await new Promise((r) => setTimeout(r, 200));
-        waitLimit++;
-      }
-    }
-
-    const finalizedItems = this.getFinalizedRecords();
-
-    if (finalizedItems.length === 0) {
-      if (!isAuto) {
-        const hasPending = this.records.some((r) => r.isTranslating);
-        this.showToast(
-          hasPending
-            ? '現在翻訳処理中のため、完了後に保存してください。'
-            : '保存対象の確定翻訳がありません。録音・発話後に保存してください。',
-          'info'
-        );
-      }
-      return;
-    }
-
-    // 確定翻訳リストを整形
-    const recordsToSave = finalizedItems.map((r) => ({
-      timestamp: r.time,
-      speaker: r.speaker,
-      speakerLang: r.speakerLang,
-      original: r.originalText,
-      translated: r.translatedText,
-      engine: r.engine
-    }));
-
-    // 保存先ドキュメントIDの決定
-    const isExistingMode = this.docMode === 'existing';
-    let docId = isExistingMode ? (this.elInputDocId.value.trim() || this.lastDocId) : '';
-    docId = GasStorageClient.extractDocId(docId);
-    const title = this.elInputDocTitle.value.trim();
-    const folderId = this.elInputFolderId ? this.elInputFolderId.value.trim() : this.folderId;
-
-    this.elBtnSaveDocs.disabled = true;
-    this.elSaveDocsText.textContent = isExistingMode ? 'ドキュメント同期中...' : 'ドキュメント保存中...';
-    this.log(
-      'info',
-      `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
-    );
-
+    this.isSavingDocs = true;
     try {
+      if (this.translationService.isProcessing || this.translationService.queue.length > 0) {
+        this.log('info', '進行中の翻訳処理の完了を待機しています...');
+        let waitLimit = 0;
+        while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 25) {
+          await new Promise((r) => setTimeout(r, 200));
+          waitLimit++;
+        }
+      }
+
+      const finalizedItems = this.getFinalizedRecords();
+      if (finalizedItems.length === 0) {
+        if (!isAuto) {
+          const hasPending = this.records.some((r) => r.isTranslating);
+          this.showToast(
+            hasPending
+              ? '現在翻訳処理中のため、完了後に保存してください。'
+              : '保存対象の確定翻訳がありません。録音・発話後に保存してください。',
+            'info'
+          );
+        }
+        return;
+      }
+
+      const recordsToSave = finalizedItems.map((r) => ({
+        timestamp: r.time,
+        speaker: r.speaker,
+        speakerLang: r.speakerLang,
+        original: r.originalText,
+        translated: r.translatedText,
+        engine: r.engine
+      }));
+
+      const isExistingMode = this.docMode === 'existing';
+      let docId = isExistingMode ? (this.elInputDocId.value.trim() || this.lastDocId) : '';
+      docId = GasStorageClient.extractDocId(docId);
+      const title = this.elInputDocTitle.value.trim();
+      const folderId = this.elInputFolderId ? this.elInputFolderId.value.trim() : this.folderId;
+
+      this.elBtnSaveDocs.disabled = true;
+      this.elSaveDocsText.textContent = isExistingMode ? 'ドキュメント同期中...' : 'ドキュメント保存中...';
+      this.log(
+        'info',
+        `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
+      );
+
       let result;
       try {
         result = await GasStorageClient.saveTranscript(this.gasUrl, {
           token: this.gasToken,
           documentId: docId,
-          title: title,
-          folderId: folderId,
+          title,
+          folderId,
           records: recordsToSave,
           direction: this.direction,
           category: this.category,
           model: this.liveModel,
-          saveMode: 'sync' // 確定翻訳全体をひとつのドキュメントとして最新同期
+          saveMode: 'sync'
         });
       } catch (saveErr) {
-        // もし指定した既存Docが存在しなかった場合、自動的に新規作成にフォールバック
         if (saveErr.code === 'DOC_NOT_FOUND' && docId) {
           this.log('warn', `指定ドキュメント (ID: ${docId}) が開けなかったため、新規Googleドキュメントとして再作成します...`);
           result = await GasStorageClient.saveTranscript(this.gasUrl, {
             token: this.gasToken,
             documentId: '',
-            title: title,
-            folderId: folderId,
+            title,
+            folderId,
             records: recordsToSave,
             direction: this.direction,
             category: this.category,
@@ -3588,8 +4358,7 @@ class App {
         this.lastDocId = result.documentId;
         ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, this.lastDocId);
         this.elInputDocId.value = this.lastDocId;
-        
-        // 次回以降の保存は自動的にこの同一ドキュメントへ同期更新
+
         this.docMode = 'existing';
         ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, 'existing');
         for (const radio of this.elRadioDocModes) {
@@ -3607,8 +4376,8 @@ class App {
         this.elSavedFolderLink.href = result.folderUrl;
         this.elSavedFolderLink.textContent = `📁 ${result.folderName || '保存先フォルダ'} ↗`;
       }
-      this.log('success', `Google ドキュメント同期保存完了 (確定翻訳: 全${recordsToSave.length}件): ${result.documentUrl}`);
 
+      this.log('success', `Google ドキュメント同期保存完了 (確定翻訳: 全${recordsToSave.length}件): ${result.documentUrl}`);
       this.showToast(
         isAuto
           ? `確定翻訳 (全${recordsToSave.length}件) をGoogleドキュメントに自動同期しました。`
@@ -3620,18 +4389,18 @@ class App {
       this.log('error', `GAS保存失敗: ${err.message}`);
       this.showToast('保存に失敗しました: ' + err.message, 'error');
     } finally {
+      this.isSavingDocs = false;
       this.elBtnSaveDocs.disabled = false;
       this.elSaveDocsText.textContent = 'Google ドキュメントに保存';
       this._updateUIState();
     }
   }
 
+  // ---- Modals, Clipboard & QR Sync ----
   _openSettingsModal() {
     this.elModal.style.display = 'flex';
     document.body.classList.add('modal-open');
-    setTimeout(() => {
-      if (this.elInputApiKey) this.elInputApiKey.focus();
-    }, 50);
+    setTimeout(() => this.elInputApiKey?.focus(), 50);
   }
 
   _closeSettingsModal() {
@@ -3646,9 +4415,7 @@ class App {
 
   copyToClipboard(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text).catch(() => {
-        return this._fallbackCopyText(text);
-      });
+      return navigator.clipboard.writeText(text).catch(() => this._fallbackCopyText(text));
     }
     return this._fallbackCopyText(text);
   }
@@ -3663,15 +4430,11 @@ class App {
         textArea.style.left = '0';
         textArea.style.width = '2em';
         textArea.style.height = '2em';
-        textArea.style.padding = '0';
-        textArea.style.border = 'none';
-        textArea.style.outline = 'none';
-        textArea.style.boxShadow = 'none';
-        textArea.style.background = 'transparent';
+        textArea.style.opacity = '0';
         document.body.appendChild(textArea);
         textArea.focus();
         textArea.select();
-        textArea.setSelectionRange(0, 99999);
+        textArea.setSelectionRange(0, text.length);
         const successful = document.execCommand('copy');
         document.body.removeChild(textArea);
         if (successful) resolve();
@@ -3690,69 +4453,51 @@ class App {
 
     const clean = (s) => String(s || '').replace(/\n/g, '<br>').replace(/\|/g, '\\|');
     let md = `# 現地監査 議事録 (${this.category})\n\n`;
-    md += `| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n`;
+    md += '| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n';
     for (const t of this.records) {
-      const langName = getLanguageDisplayName(t.speakerLang);
-      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(langName)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
+      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(getLanguageDisplayName(t.speakerLang))} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
     }
 
-    this.copyToClipboard(md).then(() => {
-      this.showToast('全履歴をMarkdown表形式でコピーしました。', 'info');
-    }).catch((err) => {
-      this.showToast('コピーに失敗しました: ' + err.message, 'error');
-    });
+    this.copyToClipboard(md)
+      .then(() => this.showToast('全履歴をMarkdown表形式でコピーしました。', 'info'))
+      .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
   }
 
-  _updateStatus(state) {
-    this.elStatusBadge.className = 'status-badge';
-
-    switch (state) {
-      case 'recording':
-        this.elStatusBadge.classList.add('status-recording');
-        this.elStatusText.textContent = '録音中 (REC)';
-        break;
-      case 'connecting':
-        this.elStatusBadge.classList.add('status-connecting');
-        this.elStatusText.textContent = 'WS接続中...';
-        break;
-      case 'paused':
-        this.elStatusBadge.classList.add('status-connecting');
-        this.elStatusText.textContent = '一時停止中';
-        break;
-      case 'error':
-        this.elStatusBadge.classList.add('status-error');
-        this.elStatusText.textContent = 'エラー';
-        break;
-      case 'idle':
-      default:
-        this.elStatusBadge.classList.add('status-idle');
-        this.elStatusText.textContent = '待機中';
-        break;
-    }
+  _updateStatus(state, customLabel = null) {
+    const statusMap = {
+      recording: ['status-recording', '録音中 (REC)'],
+      connecting: ['status-connecting', 'WS接続中...'],
+      reconnecting: ['status-reconnecting', '再接続中...'],
+      paused: ['status-connecting', '一時停止中'],
+      error: ['status-error', 'エラー'],
+      idle: ['status-idle', '待機中']
+    };
+    const [cls, defaultLabel] = statusMap[state] || statusMap.idle;
+    this.elStatusBadge.className = `status-badge ${cls}`;
+    this.elStatusText.textContent = customLabel || defaultLabel;
   }
 
   _updateUIState() {
+    const recIcon = this.elBtnToggleRecord.querySelector('.btn-icon-symbol');
+    const recText = this.elBtnToggleRecord.querySelector('.btn-text');
+    const pauseIcon = this.elBtnPauseRecord.querySelector('.btn-icon-symbol');
+    const pauseText = this.elBtnPauseRecord.querySelector('.btn-text');
+
     if (this.isRecording) {
       this.elBtnToggleRecord.classList.add('is-recording');
-      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = '⏹️';
-      this.elBtnToggleRecord.querySelector('.btn-text').textContent = '録音停止';
+      recIcon.textContent = '⏹️';
+      recText.textContent = '録音停止';
       this.elBtnPauseRecord.disabled = false;
     } else {
       this.elBtnToggleRecord.classList.remove('is-recording');
       const isDisplay = this.audioSource === 'display';
-      this.elBtnToggleRecord.querySelector('.btn-icon-symbol').textContent = isDisplay ? '🖥️' : '🎤';
-      this.elBtnToggleRecord.querySelector('.btn-text').textContent = isDisplay ? 'PC音声共有開始' : '録音開始';
+      recIcon.textContent = isDisplay ? '🖥️' : '🎤';
+      recText.textContent = isDisplay ? 'PC音声共有開始' : '録音開始';
       this.elBtnPauseRecord.disabled = true;
-      this.elBtnPauseRecord.querySelector('.btn-text').textContent = '一時停止';
     }
 
-    if (this.isPaused) {
-      this.elBtnPauseRecord.querySelector('.btn-text').textContent = '再開';
-      this.elBtnPauseRecord.querySelector('.btn-icon-symbol').textContent = '▶️';
-    } else {
-      this.elBtnPauseRecord.querySelector('.btn-text').textContent = '一時停止';
-      this.elBtnPauseRecord.querySelector('.btn-icon-symbol').textContent = '⏸️';
-    }
+    pauseText.textContent = this.isPaused ? '再開' : '一時停止';
+    pauseIcon.textContent = this.isPaused ? '▶️' : '⏸️';
 
     const finalizedCount = this.getFinalizedRecords().length;
     const unsavedCount = Math.max(0, finalizedCount - this.savedRecordCount);
@@ -3780,31 +4525,37 @@ class App {
       direction: this.direction || 'auto',
       category: this.category || 'HKC',
       chunkMode: this.chunkMode || 'long',
+      contextWindow: String(this.contextWindow !== undefined ? this.contextWindow : 6),
+      summaryRange: this.summaryRange || '5',
+      summaryCustomMin: String(this.summaryCustomMin || 5),
       gain: this.gain || '2.5',
       engineMode: this.engineMode || 'auto',
-      liveModel: this.liveModel || 'models/gemini-3.5-transcribe-live',
+      liveModel: this.liveModel || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL,
       systemInstruction: this.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
+      translationCustomPrompt: this.translationCustomPrompt || '',
       autoSave: this.autoSave,
       docMode: this.docMode || 'new',
+      folderId: this.folderId || '',
       lastDocId: this.lastDocId || ''
     };
 
     try {
-      const jsonStr = JSON.stringify(config);
-      const b64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g, (match, p1) => String.fromCharCode('0x' + p1)));
-      
       const baseUrl = window.location.origin + window.location.pathname;
-      const shareUrl = `${baseUrl}#setup=${encodeURIComponent(b64)}`;
-
+      const buildShareUrl = (cfg) => `${baseUrl}#setup=${encodeURIComponent(encodeBase64Utf8(JSON.stringify(cfg)))}`;
+      let shareUrl = buildShareUrl(config);
       this.elInputShareUrl.value = shareUrl;
 
       if (window.QRCode && QRCode.renderCanvas && this.elQrCanvas) {
-        QRCode.renderCanvas(this.elQrCanvas, shareUrl, {
-          size: 240,
-          margin: 2,
-          dark: '#1b365d',
-          light: '#FFFFFF'
-        });
+        const renderOpts = { size: 240, margin: 2, dark: '#1b365d', light: '#FFFFFF' };
+        try {
+          QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
+        } catch (qrOverflowErr) {
+          delete config.translationCustomPrompt;
+          shareUrl = buildShareUrl(config);
+          this.elInputShareUrl.value = shareUrl;
+          QRCode.renderCanvas(this.elQrCanvas, shareUrl, renderOpts);
+          this.showToast('追記プロンプトが長いため、QRコードからは追記プロンプトのみ省略しました。', 'warning');
+        }
       }
 
       this.elQrModal.style.display = 'flex';
@@ -3818,38 +4569,46 @@ class App {
 
   _checkHashConfig() {
     const hash = window.location.hash;
-    if (hash && hash.startsWith('#setup=')) {
-      try {
-        const rawData = hash.substring(7);
-        const jsonStr = decodeURIComponent(Array.prototype.map.call(atob(decodeURIComponent(rawData)), (c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-        const config = JSON.parse(jsonStr);
+    if (!hash || !hash.startsWith('#setup=')) return;
 
-        if (config.apiKey) ConfigManager.set(ConfigManager.STORAGE_KEYS.API_KEY, config.apiKey);
-        if (config.gasUrl) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_URL, config.gasUrl);
-        if (config.gasToken) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAS_TOKEN, config.gasToken);
-        if (config.direction) ConfigManager.set(ConfigManager.STORAGE_KEYS.DIRECTION, config.direction);
-        if (config.category) ConfigManager.set(ConfigManager.STORAGE_KEYS.CATEGORY, config.category);
-        if (config.chunkMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.CHUNK_MODE, config.chunkMode);
-        if (config.gain) ConfigManager.set(ConfigManager.STORAGE_KEYS.GAIN, config.gain);
-        if (config.engineMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.ENGINE_MODE, config.engineMode);
-        if (config.liveModel) ConfigManager.set(ConfigManager.STORAGE_KEYS.LIVE_MODEL, config.liveModel);
-        if (config.systemInstruction) ConfigManager.set(ConfigManager.STORAGE_KEYS.SYSTEM_INSTRUCTION, config.systemInstruction);
-        if (config.autoSave !== undefined) ConfigManager.set(ConfigManager.STORAGE_KEYS.AUTO_SAVE, String(config.autoSave));
-        if (config.docMode) ConfigManager.set(ConfigManager.STORAGE_KEYS.DOC_MODE, config.docMode);
-        if (config.lastDocId) ConfigManager.set(ConfigManager.STORAGE_KEYS.LAST_DOC_ID, config.lastDocId);
-        if (config.folderId) ConfigManager.set(ConfigManager.STORAGE_KEYS.FOLDER_ID, config.folderId);
+    try {
+      const config = JSON.parse(decodeBase64Utf8(decodeURIComponent(hash.substring(7))));
+      const K = ConfigManager.STORAGE_KEYS;
 
-        if (window.history && window.history.replaceState) {
-          window.history.replaceState(null, '', window.location.pathname + window.location.search);
-        }
-
-        this._loadSettings();
-        this.log('success', 'スマホ連携: PC設定情報（APIキー・GAS設定）を即座にインポートしました！');
-        this.showToast('📱 PCからの設定をインポートしました！', 'success');
-      } catch (err) {
-        console.warn('Failed to parse setup hash:', err);
-        this.log('error', `設定インポート失敗: ${err.message}`);
+      const stringKeys = [
+        ['apiKey', K.API_KEY],
+        ['gasUrl', K.GAS_URL],
+        ['gasToken', K.GAS_TOKEN],
+        ['direction', K.DIRECTION],
+        ['category', K.CATEGORY],
+        ['chunkMode', K.CHUNK_MODE],
+        ['summaryRange', K.SUMMARY_RANGE],
+        ['gain', K.GAIN],
+        ['engineMode', K.ENGINE_MODE],
+        ['liveModel', K.LIVE_MODEL],
+        ['systemInstruction', K.SYSTEM_INSTRUCTION],
+        ['docMode', K.DOC_MODE],
+        ['lastDocId', K.LAST_DOC_ID],
+        ['folderId', K.FOLDER_ID]
+      ];
+      for (const [field, storageKey] of stringKeys) {
+        if (config[field]) ConfigManager.set(storageKey, String(config[field]));
       }
+      if (config.contextWindow !== undefined) ConfigManager.set(K.CONTEXT_WINDOW, String(config.contextWindow));
+      if (config.summaryCustomMin !== undefined) ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(config.summaryCustomMin));
+      if (config.translationCustomPrompt !== undefined) ConfigManager.set(K.TRANSLATION_CUSTOM_PROMPT, String(config.translationCustomPrompt));
+      if (config.autoSave !== undefined) ConfigManager.set(K.AUTO_SAVE, String(config.autoSave));
+
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+
+      this._loadSettings();
+      this.log('success', 'スマホ連携: PC設定情報（APIキー・GAS設定）を即座にインポートしました！');
+      this.showToast('📱 PCからの設定をインポートしました！', 'success');
+    } catch (err) {
+      console.warn('Failed to parse setup hash:', err);
+      this.log('error', `設定インポート失敗: ${err.message}`);
     }
   }
 
@@ -3857,20 +4616,15 @@ class App {
     if (!this.elToastContainer) return;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    
-    let icon = 'ℹ️';
-    if (type === 'success') icon = '✅';
-    if (type === 'error') icon = '⚠️';
-    if (type === 'warning') icon = '🔔';
-
-    toast.innerHTML = `<span>${icon}</span><span>${this._escapeHTML(message)}</span>`;
+    const iconMap = { success: '✅', error: '⚠️', warning: '🔔', info: 'ℹ️' };
+    toast.innerHTML = `<span>${iconMap[type] || 'ℹ️'}</span><span>${this._escapeHTML(message)}</span>`;
     this.elToastContainer.appendChild(toast);
 
     setTimeout(() => {
       toast.style.transition = 'opacity 0.3s, transform 0.3s';
       toast.style.opacity = '0';
       toast.style.transform = 'translateY(10px)';
-      setTimeout(() => { if (toast.remove) toast.remove(); else if (toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+      setTimeout(() => toast.remove(), 300);
     }, 4000);
   }
 
