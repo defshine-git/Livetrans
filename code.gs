@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Bilingual Translator
- * Version: 3.0.2 (4-Language Recognition, Single-Doc Sync & Bilingual Transcriber v3.0.2 Backend)
+ * Version: 3.1.1 (4-Language Recognition, Single-Doc Sync & Bilingual Transcriber v3.1.1 Backend)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および バックアップ翻訳 (action: 'translate')
@@ -131,7 +131,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '3.0.2',
+        version: '3.1.1',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -155,7 +155,7 @@ function doGet(e) {
   return createJsonResponse({
     status: 'ok',
     service: 'Bilingual Transcriber Backend',
-    version: '3.0.2',
+    version: '3.1.1',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),

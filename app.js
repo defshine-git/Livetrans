@@ -854,7 +854,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Bilingual Transcriber
- * Version: 3.0.2 (Refactored, Deduplicated & Audited Release)
+ * Version: 3.1.1 (Precision VAD [Pre-roll + Hangover + Adaptive Noise Floor] Release)
  *
  * Modules:
  *  1. Constants & Shared Utilities (Language detection, Base64 UTF-8, Timeout fetch)
@@ -873,7 +873,7 @@ global.QRCode = QRCode;
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.0.2';
+const APP_VERSION = '3.1.1';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -1046,7 +1046,8 @@ class ConfigManager {
     TRANSLATION_PROMPT_OPEN: 'glt_translation_prompt_open',
     CONTEXT_WINDOW: 'glt_context_window',
     SUMMARY_RANGE: 'glt_summary_range',
-    SUMMARY_CUSTOM_MIN: 'glt_summary_custom_min'
+    SUMMARY_CUSTOM_MIN: 'glt_summary_custom_min',
+    VAD_MODE: 'glt_vad_mode'
   });
 
   static get(key, defaultValue = '') {
@@ -1069,6 +1070,222 @@ class ConfigManager {
 }
 
 // ==========================================
+// 2.5. Voice Activity Detector (Pre-roll + Hangover + Adaptive Noise Floor)
+// ==========================================
+class VoiceActivityDetector {
+  // Pre-Gain（gainNode前段の生信号）基準のプリセット
+  static PRESETS = Object.freeze({
+    auto: {
+      label: '自動 (標準)',
+      preRollMs: 450,
+      hangoverMs: 1800,
+      minRms: 0.006,
+      onsetMult: 2.2,
+      sustainMult: 1.45,
+      onsetFrames: 1,
+      minVoiceRatio: 0.25,
+      maxNoiseFloor: 0.12
+    },
+    sensitive: {
+      label: '敏感 (小声・遠距離)',
+      preRollMs: 550,
+      hangoverMs: 2200,
+      minRms: 0.003,
+      onsetMult: 1.7,
+      sustainMult: 1.25,
+      onsetFrames: 1,
+      minVoiceRatio: 0.15,
+      maxNoiseFloor: 0.08
+    },
+    strong: {
+      label: '強め (騒音現場向け)',
+      preRollMs: 400,
+      hangoverMs: 1400,
+      minRms: 0.012,
+      onsetMult: 2.8,
+      sustainMult: 1.70,
+      onsetFrames: 2,
+      minVoiceRatio: 0.38,
+      maxNoiseFloor: 0.18
+    },
+    off: {
+      label: 'OFF (常時送信)',
+      preRollMs: 0,
+      hangoverMs: 0
+    }
+  });
+
+  constructor(mode = 'auto') {
+    this.mode = VoiceActivityDetector.PRESETS[mode] ? mode : 'auto';
+    this.reset(true);
+  }
+
+  setMode(mode) {
+    if (!VoiceActivityDetector.PRESETS[mode]) return;
+    const prevMode = this.mode;
+    this.mode = mode;
+    if (prevMode !== mode) {
+      this.preRollQueue = [];
+      this.onsetStreak = 0;
+      this.silenceElapsedMs = 0;
+      this._rmsWindow = [];
+      if (mode === 'off') {
+        this.isSpeaking = true;
+      } else if (prevMode === 'off') {
+        this.isSpeaking = false;
+      }
+    }
+  }
+
+  reset(resetStats = false) {
+    this.isSpeaking = this.mode === 'off';
+    this.onsetStreak = 0;
+    this.silenceElapsedMs = 0;
+    this.preRollQueue = [];
+    this.noiseFloor = 0.004;
+    this._noiseInitialized = false;
+    this._rmsWindow = [];
+    if (resetStats) {
+      this.totalFrames = 0;
+      this.transmittedFrames = 0;
+    }
+  }
+
+  getSavedPercent() {
+    if (this.mode === 'off' || this.totalFrames < 10) return 0;
+    const ratio = 1 - (this.transmittedFrames / this.totalFrames);
+    return Math.max(0, Math.min(99, Math.round(ratio * 100)));
+  }
+
+  /**
+   * 1音声フレームを評価し、送信すべきPCMチャンク群と状態遷移を返却
+   * Minimum Statistics 方式により、高騒音環境でも発話張り付きを構造的に防止
+   * @param {{ rms: number, voiceRatio: number|null, chunkDurationMs: number, base64Chunk: string }} frame
+   */
+  processFrame({ rms, voiceRatio, chunkDurationMs, base64Chunk }) {
+    this.totalFrames += 1;
+
+    if (this.mode === 'off') {
+      this.transmittedFrames += 1;
+      this.isSpeaking = true;
+      return {
+        chunksToSend: base64Chunk ? [base64Chunk] : [],
+        streamEnded: false,
+        isSpeaking: true,
+        state: 'off',
+        savedPct: 0,
+        noiseFloor: this.noiseFloor
+      };
+    }
+
+    const cfg = VoiceActivityDetector.PRESETS[this.mode] || VoiceActivityDetector.PRESETS.auto;
+    const frameMs = Math.max(10, chunkDurationMs || 42.67);
+    const maxPreRollFrames = Math.max(2, Math.ceil(cfg.preRollMs / frameMs));
+    const minWindowFrames = Math.max(20, Math.ceil(2800 / frameMs)); // 約2.8秒の最小値追跡窓
+
+    if (!this._noiseInitialized) {
+      this.noiseFloor = Math.min(cfg.maxNoiseFloor, Math.max(0.0015, rms));
+      this._noiseInitialized = true;
+    }
+
+    // スライディングウィンドウで直近約2.8秒の最小RMSを追跡（定常騒音のみ上向きに検出）
+    this._rmsWindow.push(rms);
+    while (this._rmsWindow.length > minWindowFrames) {
+      this._rmsWindow.shift();
+    }
+
+    if (this._rmsWindow.length >= minWindowFrames) {
+      let windowMin = this._rmsWindow[0];
+      for (let i = 1; i < this._rmsWindow.length; i++) {
+        if (this._rmsWindow[i] < windowMin) windowMin = this._rmsWindow[i];
+      }
+      // 2.8秒間一度も下がらなかった底値（定常騒音）に合わせてノイズフロアを適応
+      if (windowMin > this.noiseFloor * 1.1) {
+        this.noiseFloor = Math.min(cfg.maxNoiseFloor, this.noiseFloor * 0.85 + windowMin * 0.15);
+      } else if (windowMin < this.noiseFloor) {
+        this.noiseFloor = Math.max(0.0015, this.noiseFloor * 0.90 + windowMin * 0.10);
+      }
+    }
+
+    const onsetThreshold = Math.max(cfg.minRms, this.noiseFloor * cfg.onsetMult);
+    const sustainThreshold = Math.max(cfg.minRms * 0.65, this.noiseFloor * cfg.sustainMult);
+
+    const voiceBandOk =
+      voiceRatio === null ||
+      voiceRatio >= cfg.minVoiceRatio ||
+      rms >= onsetThreshold * 2.2;
+
+    let chunksToSend = [];
+    let streamEnded = false;
+
+    if (!this.isSpeaking) {
+      if (rms >= onsetThreshold && voiceBandOk) {
+        this.onsetStreak += 1;
+        if (this.onsetStreak >= cfg.onsetFrames) {
+          this.isSpeaking = true;
+          this.silenceElapsedMs = 0;
+          this.onsetStreak = 0;
+          if (this.preRollQueue.length > 0) {
+            chunksToSend = this.preRollQueue.slice();
+            this.preRollQueue = [];
+          }
+          if (base64Chunk) chunksToSend.push(base64Chunk);
+          this.transmittedFrames += chunksToSend.length;
+        } else if (base64Chunk) {
+          this.preRollQueue.push(base64Chunk);
+          while (this.preRollQueue.length > maxPreRollFrames) {
+            this.preRollQueue.shift();
+          }
+        }
+      } else {
+        this.onsetStreak = 0;
+        if (base64Chunk) {
+          this.preRollQueue.push(base64Chunk);
+          while (this.preRollQueue.length > maxPreRollFrames) {
+            this.preRollQueue.shift();
+          }
+        }
+        // 非発話区間での迅速なノイズフロア適応
+        if (rms < this.noiseFloor) {
+          this.noiseFloor = Math.max(0.0015, this.noiseFloor * 0.88 + rms * 0.12);
+        } else if (rms < onsetThreshold) {
+          this.noiseFloor = Math.min(cfg.maxNoiseFloor, this.noiseFloor * 0.96 + rms * 0.04);
+        }
+      }
+    } else {
+      if (base64Chunk) {
+        chunksToSend = [base64Chunk];
+        this.transmittedFrames += 1;
+      }
+
+      if (rms >= sustainThreshold && voiceBandOk) {
+        this.silenceElapsedMs = 0;
+      } else {
+        this.silenceElapsedMs += frameMs;
+        if (rms < this.noiseFloor) {
+          this.noiseFloor = Math.max(0.0015, this.noiseFloor * 0.95 + rms * 0.05);
+        }
+        if (this.silenceElapsedMs >= cfg.hangoverMs) {
+          this.isSpeaking = false;
+          this.silenceElapsedMs = 0;
+          this.onsetStreak = 0;
+          streamEnded = true;
+        }
+      }
+    }
+
+    return {
+      chunksToSend,
+      streamEnded,
+      isSpeaking: this.isSpeaking,
+      state: this.isSpeaking ? 'speaking' : 'silent',
+      savedPct: this.getSavedPercent(),
+      noiseFloor: this.noiseFloor
+    };
+  }
+}
+
+// ==========================================
 // 3. Audio Capture Service (Anti-Aliased 16kHz PCM - iPad/iOS Optimized)
 // ==========================================
 class AudioCaptureService {
@@ -1081,13 +1298,34 @@ class AudioCaptureService {
     this.compressorNode = null;
     this.filterNode = null;
     this.analyserNode = null;
+    this.vadAnalyserNode = null;
     this.processorNode = null;
     this.isRecording = false;
     this.isPaused = false;
     this.gainValue = 2.5;
+    this.vad = new VoiceActivityDetector('auto');
     this.onChunkCallback = null;
     this.onVolumeCallback = null;
+    this.onStreamEndCallback = null;
+    this.onVadStateCallback = null;
     this._cachedBuffer = null;
+    this._freqData = null;
+    this._vadTimeFloat = null;
+    this._vadTimeByte = null;
+    this._lastVadUiState = null;
+    this._lastVadUiUpdateAt = 0;
+  }
+
+  setVadMode(mode) {
+    this.vad.setMode(mode);
+    this._lastVadUiState = null;
+    if (this.onVadStateCallback) {
+      this.onVadStateCallback({
+        state: mode === 'off' ? 'off' : (this.vad.isSpeaking ? 'speaking' : 'silent'),
+        isSpeaking: this.vad.isSpeaking,
+        savedPct: this.vad.getSavedPercent()
+      });
+    }
   }
 
   setGain(val) {
@@ -1201,10 +1439,15 @@ class AudioCaptureService {
     throw new Error(`マイクの取得に失敗しました: ${lastError ? lastError.message : '利用可能なマイクが見つかりませんでした'}`);
   }
 
-  async start(onChunk, onVolume, sourceType = 'mic', onEnded = null) {
+  async start(onChunk, onVolume, sourceType = 'mic', onEnded = null, vadHooks = {}) {
     if (this.isRecording) return;
     this.onChunkCallback = onChunk;
     this.onVolumeCallback = onVolume;
+    this.onStreamEndCallback = vadHooks.onStreamEnd || null;
+    this.onVadStateCallback = vadHooks.onVadState || null;
+    this.vad.reset(true);
+    this._lastVadUiState = null;
+    this._lastVadUiUpdateAt = 0;
 
     this.unlockContext();
     await this.ensureContext();
@@ -1240,6 +1483,13 @@ class AudioCaptureService {
     this.gainNode.connect(this.compressorNode);
     this.compressorNode.connect(this.filterNode);
 
+    // ゲイン・コンプレッサー前段（highpass直後）からVAD専用アナライザーを分岐
+    // → マイク感度 (1.0x〜3.5x) を変更してもVAD判定が一切ブレない
+    this.vadAnalyserNode = this.audioContext.createAnalyser();
+    this.vadAnalyserNode.fftSize = 2048;
+    this.vadAnalyserNode.smoothingTimeConstant = 0.2;
+    this.highpassNode.connect(this.vadAnalyserNode);
+
     this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 256;
     this.filterNode.connect(this.analyserNode);
@@ -1256,6 +1506,7 @@ class AudioCaptureService {
         compressor: this.compressorNode,
         filter: this.filterNode,
         analyser: this.analyserNode,
+        vadAnalyser: this.vadAnalyserNode,
         processor: this.processorNode,
         stream: this.mediaStream
       };
@@ -1263,6 +1514,19 @@ class AudioCaptureService {
 
     const inputSampleRate = this.audioContext.sampleRate;
     const targetSampleRate = 16000;
+    const chunkDurationMs = (2048 / inputSampleRate) * 1000;
+
+    const vadFftSize = this.vadAnalyserNode.fftSize;
+    const freqBinCount = this.vadAnalyserNode.frequencyBinCount;
+    this._freqData = new Uint8Array(freqBinCount);
+    this._vadTimeFloat = typeof this.vadAnalyserNode.getFloatTimeDomainData === 'function'
+      ? new Float32Array(vadFftSize)
+      : null;
+    this._vadTimeByte = this._vadTimeFloat ? null : new Uint8Array(vadFftSize);
+
+    const binHz = inputSampleRate / vadFftSize;
+    const voiceStartBin = Math.max(1, Math.floor(200 / binHz));
+    const voiceEndBin = Math.min(freqBinCount - 1, Math.ceil(3600 / binHz));
 
     this.processorNode.onaudioprocess = (e) => {
       e.outputBuffer.getChannelData(0).fill(0);
@@ -1273,18 +1537,74 @@ class AudioCaptureService {
       }
 
       const inputBuffer = e.inputBuffer.getChannelData(0);
-      if (this.onVolumeCallback && this.analyserNode) {
-        let sum = 0;
-        for (let i = 0; i < inputBuffer.length; i++) {
-          sum += inputBuffer[i] * inputBuffer[i];
+      let meterSumSq = 0;
+      for (let i = 0; i < inputBuffer.length; i++) {
+        meterSumSq += inputBuffer[i] * inputBuffer[i];
+      }
+      const meterRms = Math.sqrt(meterSumSq / inputBuffer.length);
+
+      // VAD判定用RMSは Pre-Gain（gainNode前段）から算出
+      let vadRms = meterRms / Math.max(1.0, this.gainValue);
+      let voiceRatio = null;
+
+      if (this.vad.mode !== 'off' && this.vadAnalyserNode) {
+        if (this._vadTimeFloat) {
+          this.vadAnalyserNode.getFloatTimeDomainData(this._vadTimeFloat);
+          let vSumSq = 0;
+          for (let i = 0; i < vadFftSize; i++) {
+            const s = this._vadTimeFloat[i];
+            vSumSq += s * s;
+          }
+          vadRms = Math.sqrt(vSumSq / vadFftSize);
+        } else if (this._vadTimeByte) {
+          this.vadAnalyserNode.getByteTimeDomainData(this._vadTimeByte);
+          let vSumSq = 0;
+          for (let i = 0; i < vadFftSize; i++) {
+            const s = (this._vadTimeByte[i] - 128) / 128;
+            vSumSq += s * s;
+          }
+          vadRms = Math.sqrt(vSumSq / vadFftSize);
         }
-        this.onVolumeCallback(Math.sqrt(sum / inputBuffer.length));
+
+        if (this._freqData) {
+          this.vadAnalyserNode.getByteFrequencyData(this._freqData);
+          let voiceSum = 0;
+          let totalSum = 0;
+          for (let b = 1; b < freqBinCount; b++) {
+            const v = this._freqData[b];
+            totalSum += v;
+            if (b >= voiceStartBin && b <= voiceEndBin) voiceSum += v;
+          }
+          voiceRatio = totalSum > 20 ? (voiceSum / totalSum) : 0.5;
+        }
       }
 
       const downsampled = this._downsampleBuffer(inputBuffer, inputSampleRate, targetSampleRate);
       const base64Chunk = this._int16ToBase64(downsampled);
-      if (this.onChunkCallback && base64Chunk) {
-        this.onChunkCallback(base64Chunk);
+
+      const vadRes = this.vad.processFrame({ rms: vadRms, voiceRatio, chunkDurationMs, base64Chunk });
+
+      if (this.onVolumeCallback) {
+        this.onVolumeCallback(meterRms, vadRes.isSpeaking);
+      }
+
+      if (this.onChunkCallback && vadRes.chunksToSend.length > 0) {
+        for (let i = 0; i < vadRes.chunksToSend.length; i++) {
+          this.onChunkCallback(vadRes.chunksToSend[i]);
+        }
+      }
+
+      if (vadRes.streamEnded && this.onStreamEndCallback) {
+        this.onStreamEndCallback();
+      }
+
+      if (this.onVadStateCallback) {
+        const now = Date.now();
+        if (vadRes.state !== this._lastVadUiState || (now - this._lastVadUiUpdateAt) >= 1000) {
+          this._lastVadUiState = vadRes.state;
+          this._lastVadUiUpdateAt = now;
+          this.onVadStateCallback(vadRes);
+        }
       }
     };
 
@@ -1295,8 +1615,34 @@ class AudioCaptureService {
     this.isPaused = false;
   }
 
-  pause() { this.isPaused = true; }
-  resume() { this.isPaused = false; }
+  pause() {
+    this.isPaused = true;
+    const wasSpeaking = this.vad.mode !== 'off' && this.vad.isSpeaking;
+    this.vad.reset(false);
+    this._lastVadUiState = 'paused';
+    if (wasSpeaking && this.onStreamEndCallback) {
+      this.onStreamEndCallback();
+    }
+    if (this.onVadStateCallback) {
+      this.onVadStateCallback({
+        state: 'paused',
+        isSpeaking: false,
+        savedPct: this.vad.getSavedPercent()
+      });
+    }
+  }
+  resume() {
+    this.vad.reset(false);
+    this._lastVadUiState = null;
+    this.isPaused = false;
+    if (this.onVadStateCallback) {
+      this.onVadStateCallback({
+        state: this.vad.mode === 'off' ? 'off' : 'silent',
+        isSpeaking: this.vad.mode === 'off',
+        savedPct: this.vad.getSavedPercent()
+      });
+    }
+  }
 
   stop() {
     this.isRecording = false;
@@ -1305,7 +1651,7 @@ class AudioCaptureService {
       window._activeAudioSession = null;
     }
 
-    const nodes = ['processorNode', 'analyserNode', 'filterNode', 'compressorNode', 'gainNode', 'highpassNode', 'sourceNode'];
+    const nodes = ['processorNode', 'analyserNode', 'vadAnalyserNode', 'filterNode', 'compressorNode', 'gainNode', 'highpassNode', 'sourceNode'];
     for (const prop of nodes) {
       if (this[prop]) {
         try { this[prop].disconnect(); } catch (e) {}
@@ -1320,6 +1666,10 @@ class AudioCaptureService {
       this.audioContext.close().catch(() => {});
       this.audioContext = null;
     }
+    this.vad.reset(true);
+    this._freqData = null;
+    this._vadTimeFloat = null;
+    this._vadTimeByte = null;
   }
 
   _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
@@ -1681,14 +2031,9 @@ class GeminiLiveClient {
 
       socket.onerror = () => {
         if (this.ws !== socket) return;
-        this.log('error', 'WebSocket通信エラーが発生しました。');
-        this._cleanupTimeout();
-        if (this._connectReject) {
-          const pendingReject = this._connectReject;
-          this._connectResolve = null;
-          this._connectReject = null;
-          pendingReject(new Error('Gemini Live API への接続に失敗しました。'));
-        }
+        // ブラウザ仕様上 onerror の直後に onclose(event.code) が発火するため、
+        // ここではログ記録のみ行い、Close Code (1006/1007/1008等) の正確な判定を onclose へ委ねる
+        this.log('error', 'WebSocket通信エラーを検知しました（切断コードを確認中...）。');
       };
 
       socket.onclose = (event) => {
@@ -1953,6 +2298,18 @@ class GeminiLiveClient {
       }
     } catch (e) {
       console.warn('Failed to send audio chunk:', e);
+    }
+  }
+
+  sendAudioStreamEnd() {
+    if (this.manualDisconnect || !this.ws || this.ws.readyState !== WebSocket.OPEN || !this.isSetupComplete) {
+      return;
+    }
+    try {
+      this.ws.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+      this.log('info', 'VAD無音遷移: audioStreamEnd 送信（末尾認識を確定し無音送信を休止）');
+    } catch (e) {
+      console.warn('Failed to send audioStreamEnd:', e);
     }
   }
 
@@ -2949,6 +3306,7 @@ class App {
     this.summaryHistory = [];
     this.currentSummaryId = null;
     this.savedRecordCount = 0;
+    this.unsavedFinalizedDelta = 0;
 
     // State & concurrency locks
     this.hasUnsavedChanges = false;
@@ -2975,7 +3333,7 @@ class App {
     }
 
     this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
-    this.log('info', `初期化完了 (v${APP_VERSION})。最適化アーキテクチャ・通信量半減・自動再接続・前文脈連動・任意範囲サマリーが有効です。`);
+    this.log('info', `初期化完了 (v${APP_VERSION})。高精度VAD（プリロール＋余韻保持＋適応ノイズ追従）・通信量半減・自動再接続・前文脈連動・任意範囲サマリーが有効です。`);
   }
 
   log(type, message) {
@@ -3009,6 +3367,7 @@ class App {
     this.elSelectContextWindow = byId('select-context-window');
     this.elSelectAudioSource = byId('select-audio-source');
     this.elSelectGain = byId('select-gain');
+    this.elSelectVadMode = byId('select-vad-mode');
     this.elSelectDefaultGain = byId('select-default-gain');
     this.elBtnClearFeed = byId('btn-clear-feed');
     this.elBtnSaveDocs = byId('btn-save-docs');
@@ -3028,11 +3387,13 @@ class App {
     this.elLivePreview = byId('livePreview');
     this.elLiveText = byId('liveText');
     this.elLiveEngineTag = byId('liveEngineTag');
+    this.elLiveVadBadge = byId('liveVadBadge');
     this.elLiveBufferStatus = byId('liveBufferStatus');
     this.elBtnFlushNow = byId('btn-flush-now');
     this.elMeterBar = document.querySelector('.meter-bar');
 
     this.elToggleDiag = byId('toggle-diag');
+    this.elDiagToggleIcon = byId('diag-toggle-icon');
     this.elDiagLogContainer = byId('diag-log-container');
     this.elDiagLog = byId('diag-log');
 
@@ -3116,6 +3477,8 @@ class App {
     this.summaryCustomMin = (!isNaN(savedCustomMin) && savedCustomMin >= 1 && savedCustomMin <= 360) ? savedCustomMin : 5;
 
     this.gain = ConfigManager.get(K.GAIN, '2.5');
+    this.vadMode = ConfigManager.get(K.VAD_MODE, 'auto');
+    if (!VoiceActivityDetector.PRESETS[this.vadMode]) this.vadMode = 'auto';
     this.engineMode = ConfigManager.get(K.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(K.LIVE_MODEL, DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
     this.systemInstruction = ConfigManager.get(K.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
@@ -3140,6 +3503,7 @@ class App {
     if (this.elSelectContextWindow) this.elSelectContextWindow.value = String(this.contextWindow);
     if (this.elSelectGain) this.elSelectGain.value = this.gain;
     if (this.elSelectDefaultGain) this.elSelectDefaultGain.value = this.gain;
+    if (this.elSelectVadMode) this.elSelectVadMode.value = this.vadMode;
     this.elSelectEngineMode.value = this.engineMode;
     this.elSelectLiveModel.value = this.liveModel;
     if (this.elInputSystemInstruction) this.elInputSystemInstruction.value = this.systemInstruction;
@@ -3149,6 +3513,7 @@ class App {
     if (this.lastDocId) this.elInputDocId.value = this.lastDocId;
 
     this.audioService.setGain(this.gain);
+    this.audioService.setVadMode(this.vadMode);
     this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
 
     for (const radio of this.elRadioDocModes) {
@@ -3267,6 +3632,15 @@ class App {
       this.showToast(`マイク感度を ${this.gain}x に設定しました。`, 'info');
     });
 
+    this.elSelectVadMode?.addEventListener('change', (e) => {
+      this.vadMode = e.target.value;
+      ConfigManager.set(K.VAD_MODE, this.vadMode);
+      this.audioService.setVadMode(this.vadMode);
+      const label = VoiceActivityDetector.PRESETS[this.vadMode]?.label || this.vadMode;
+      this.log('info', `VAD（音声区間検出）モード変更: ${label}`);
+      this.showToast(`VAD を「${label}」に設定しました。`, 'info');
+    });
+
     this.elBtnClearFeed.addEventListener('click', () => {
       if (this.records.length === 0) return;
       if (!confirm('タイムラインの翻訳履歴を全消去しますか？')) return;
@@ -3275,6 +3649,7 @@ class App {
       this.summaryHistory = [];
       this.currentSummaryId = null;
       this.savedRecordCount = 0;
+      this.unsavedFinalizedDelta = 0;
       this.utteranceBuffer.reset();
       this.hasUnsavedChanges = false;
       this.elTranscriptList.innerHTML = '';
@@ -3310,8 +3685,11 @@ class App {
     this.elBtnCopyAll.addEventListener('click', () => this.copyAllTranscripts());
 
     this.elToggleDiag.addEventListener('click', () => {
-      const isHidden = this.elDiagLogContainer.style.display === 'none';
-      this.elDiagLogContainer.style.display = isHidden ? 'block' : 'none';
+      const willShow = this.elDiagLogContainer.style.display === 'none';
+      this.elDiagLogContainer.style.display = willShow ? 'block' : 'none';
+      if (this.elDiagToggleIcon) {
+        this.elDiagToggleIcon.textContent = willShow ? '▲ 非表示' : '▼ 表示';
+      }
     });
   }
 
@@ -3866,19 +4244,29 @@ class App {
           if (isDisplay) {
             this.showToast('共有ウィンドウで「タブの音声も共有」にチェックを入れてください。', 'info');
           }
+          this.audioService.setVadMode(this.vadMode);
           await this.audioService.start(
             (chunk) => this.geminiClient.sendAudioChunk(chunk),
-            (volume) => this._updateMeter(volume),
+            (volume, isSpeaking) => this._updateMeter(volume, isSpeaking),
             this.audioSource,
             () => {
               this.log('info', 'ユーザーにより画面・音声共有が停止されました。');
               this.stopRecording();
+            },
+            {
+              onStreamEnd: () => this.geminiClient.sendAudioStreamEnd(),
+              onVadState: (vadRes) => this._updateVadBadge(vadRes)
             }
           );
 
           this.activeEngine = 'gemini-live';
           this.elEngineBadge.textContent = 'Gemini Live';
           this.elLiveEngineTag.textContent = 'Gemini Live';
+          this._updateVadBadge({
+            state: this.vadMode === 'off' ? 'off' : 'silent',
+            isSpeaking: this.vadMode === 'off',
+            savedPct: 0
+          });
           liveConnected = true;
           this.log('success', 'Gemini Live WebSocket 音声認識がアクティブになりました。');
         } catch (liveErr) {
@@ -3912,6 +4300,7 @@ class App {
         this.activeEngine = 'web-speech';
         this.elEngineBadge.textContent = 'Web Speech';
         this.elLiveEngineTag.textContent = 'Web Speech';
+        this._updateVadBadge({ state: 'webspeech', isSpeaking: true, savedPct: 0 });
         this.log('success', 'ブラウザ標準音声認識 + Gemini翻訳パイプラインが起動しました。');
       }
 
@@ -3988,6 +4377,10 @@ class App {
         this.utteranceBuffer.flushAll('pause-recording');
       }
       this.isPaused = true;
+      this._updateMeter(0, false);
+      if (this.activeEngine === 'gemini-live') {
+        this._updateVadBadge({ state: 'paused', savedPct: this.audioService.vad.getSavedPercent() });
+      }
       this.utteranceBuffer._notifyDisplay();
       this._updateStatus('paused');
       this.showToast('翻訳を一時停止しました。', 'warning');
@@ -3995,9 +4388,31 @@ class App {
     this._updateUIState();
   }
 
-  _updateMeter(volume) {
+  _updateMeter(volume, isSpeaking = true) {
     if (!this.elMeterBar) return;
     this.elMeterBar.style.width = `${Math.min(100, Math.round(volume * 400))}%`;
+    this.elMeterBar.classList.toggle('is-muted', !isSpeaking && this.vadMode !== 'off');
+  }
+
+  _updateVadBadge({ state, savedPct = 0 } = {}) {
+    if (!this.elLiveVadBadge) return;
+    const savedStr = savedPct > 0 ? ` (-${savedPct}%)` : '';
+    if (state === 'webspeech') {
+      this.elLiveVadBadge.textContent = '🌐 ブラウザVAD';
+      this.elLiveVadBadge.className = 'tag vad-badge vad-off';
+    } else if (state === 'off') {
+      this.elLiveVadBadge.textContent = '📡 常時送信';
+      this.elLiveVadBadge.className = 'tag vad-badge vad-off';
+    } else if (state === 'paused') {
+      this.elLiveVadBadge.textContent = `⏸️ VAD一時停止${savedStr}`;
+      this.elLiveVadBadge.className = 'tag vad-badge vad-paused';
+    } else if (state === 'speaking') {
+      this.elLiveVadBadge.textContent = `🎙️ 発話送信中${savedStr}`;
+      this.elLiveVadBadge.className = 'tag vad-badge vad-speaking';
+    } else {
+      this.elLiveVadBadge.textContent = `💤 無音節約中${savedStr}`;
+      this.elLiveVadBadge.className = 'tag vad-badge vad-silent';
+    }
   }
 
   _renderLiveDisplay({ committed, interim, totalChars, targetLang, silenceSec }) {
@@ -4329,12 +4744,12 @@ class App {
       langEl.title = getLanguageDisplayName(record.speakerLang);
     }
 
+    this.unsavedFinalizedDelta += 1;
     this.hasUnsavedChanges = true;
     this._updateUIState();
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
 
-    const finalizedCount = this.getFinalizedRecords().length;
-    if (this.autoSave && (finalizedCount - this.savedRecordCount) >= 10 && this.gasUrl) {
+    if (this.autoSave && this.unsavedFinalizedDelta >= 10 && this.gasUrl) {
       this.saveToDocs(true);
     }
   }
@@ -4359,7 +4774,7 @@ class App {
       if (this.translationService.isProcessing || this.translationService.queue.length > 0) {
         this.log('info', '進行中の翻訳処理の完了を待機しています...');
         let waitLimit = 0;
-        while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 25) {
+        while ((this.translationService.isProcessing || this.translationService.queue.length > 0) && waitLimit < 110) {
           await new Promise((r) => setTimeout(r, 200));
           waitLimit++;
         }
@@ -4434,6 +4849,7 @@ class App {
       }
 
       this.savedRecordCount = recordsToSave.length;
+      this.unsavedFinalizedDelta = 0;
       this.hasUnsavedChanges = false;
       this._updateUIState();
 
@@ -4583,12 +4999,14 @@ class App {
     pauseIcon.textContent = this.isPaused ? '▶️' : '⏸️';
 
     const finalizedCount = this.getFinalizedRecords().length;
-    const unsavedCount = Math.max(0, finalizedCount - this.savedRecordCount);
+    const unsavedCount = this.unsavedFinalizedDelta;
 
     if (unsavedCount > 0 || (this.hasUnsavedChanges && finalizedCount > 0)) {
       this.elUnsavedBadge.style.display = 'inline-block';
-      this.elUnsavedBadge.textContent = unsavedCount > 0 ? unsavedCount : '未保存';
-      this.elUnsavedBadge.title = `${unsavedCount}件の未保存確定翻訳があります`;
+      this.elUnsavedBadge.textContent = unsavedCount > 0 ? String(unsavedCount) : '未保存';
+      this.elUnsavedBadge.title = unsavedCount > 0
+        ? `${unsavedCount}件の未保存確定翻訳があります`
+        : '編集・削除等の未保存の変更があります';
     } else {
       this.elUnsavedBadge.style.display = 'none';
     }
@@ -4616,6 +5034,7 @@ class App {
       compact.sm = Number(this.summaryCustomMin);
     }
     if (this.gain && this.gain !== '2.5') compact.g = this.gain;
+    if (this.vadMode && this.vadMode !== 'auto') compact.vm = this.vadMode;
     if (this.engineMode && this.engineMode !== 'auto') compact.em = this.engineMode;
     if (this.liveModel && this.liveModel !== DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL) compact.lm = this.liveModel;
     if (this.autoSave) compact.as = 1;
@@ -4711,7 +5130,7 @@ class App {
         if (c.k) ConfigManager.set(K.API_KEY, String(c.k));
         if (c.gd) ConfigManager.set(K.GAS_URL, `https://script.google.com/macros/s/${c.gd}/exec`);
         else if (c.gu) ConfigManager.set(K.GAS_URL, String(c.gu));
-        if (c.t !== undefined) ConfigManager.set(K.GAS_TOKEN, String(c.t));
+        ConfigManager.set(K.GAS_TOKEN, c.t ? String(c.t) : '');
 
         ConfigManager.set(K.DIRECTION, c.d || 'auto');
         ConfigManager.set(K.CATEGORY, c.c || 'HKC');
@@ -4720,6 +5139,7 @@ class App {
         ConfigManager.set(K.SUMMARY_RANGE, c.sr || '5');
         ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(c.sm !== undefined ? c.sm : 5));
         ConfigManager.set(K.GAIN, c.g || '2.5');
+        ConfigManager.set(K.VAD_MODE, c.vm || 'auto');
         ConfigManager.set(K.ENGINE_MODE, c.em || 'auto');
         ConfigManager.set(K.LIVE_MODEL, c.lm || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
         ConfigManager.set(K.AUTO_SAVE, String(Boolean(c.as)));
@@ -4750,6 +5170,7 @@ class App {
           ['chunkMode', K.CHUNK_MODE],
           ['summaryRange', K.SUMMARY_RANGE],
           ['gain', K.GAIN],
+          ['vadMode', K.VAD_MODE],
           ['engineMode', K.ENGINE_MODE],
           ['liveModel', K.LIVE_MODEL],
           ['systemInstruction', K.SYSTEM_INSTRUCTION],

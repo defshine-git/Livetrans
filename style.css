@@ -1,4 +1,4 @@
-/* style.css - Consolidated Responsive Stylesheet for Bilingual Transcriber (v3.0.2) */
+/* style.css - Consolidated Responsive Stylesheet for Bilingual Transcriber (v3.1.1) */
 
 :root {
   --primary: #1b365d;
@@ -664,7 +664,38 @@ body.modal-open {
   height: 100%;
   width: 0%;
   background: var(--success);
-  transition: width 0.05s ease-out;
+  transition: width 0.05s ease-out, background-color 0.15s ease;
+}
+.meter-bar.is-muted {
+  background: #95a5a6;
+}
+
+.tag.vad-badge {
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border-color);
+  background: #eaecee;
+  color: var(--text-secondary);
+}
+.tag.vad-badge.vad-speaking {
+  background: #d4efdf;
+  color: #196f3d;
+  border-color: #a9dfbf;
+}
+.tag.vad-badge.vad-silent {
+  background: #f4f6f9;
+  color: var(--text-secondary);
+  border-color: #d6dbdf;
+}
+.tag.vad-badge.vad-off {
+  background: #ebf3fb;
+  color: var(--blue);
+  border-color: rgba(42, 82, 190, 0.25);
+}
+.tag.vad-badge.vad-paused {
+  background: #fef9e7;
+  color: #b9770e;
+  border-color: rgba(243, 156, 18, 0.45);
 }
 
 /* ====================================================
