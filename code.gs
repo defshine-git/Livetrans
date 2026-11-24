@@ -1,14 +1,14 @@
 /**
- * code.gs - Google Apps Script Backend for Gemini Live Bilingual Translator
- * Version: 3.1.1 (4-Language Recognition, Single-Doc Sync & Bilingual Transcriber v3.1.1 Backend)
+ * code.gs - Google Apps Script Backend for Gemini Live Multilingual Transcriber
+ * Version: 3.2.0 (Multilingual + EN/JA Priority + Hindi/Urdu Code-Switching & Single-Doc Sync Backend)
  * 
  * 主な機能:
- * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および バックアップ翻訳 (action: 'translate')
+ * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および 多言語バックアップ翻訳 (action: 'translate')
  * 2. 確定翻訳の一元管理: 確定した全発話・翻訳レコードを「ひとつのGoogleドキュメント」として確実に同期・保存
  * 3. 指定フォルダへの自動格納 (OUTPUT_FOLDER_ID: 15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f)
  * 4. 専門用語データベース連携 (SPREADSHEET_ID: 1LaCapvqgu-qQUXuMyGNqiqvbSl5TjWhFt4EOllcvON0)
  * 5. 共有トークン認証 (SECRET_TOKEN)
- * 6. LanguageApp.translate によるバックアップ翻訳機能
+ * 6. LanguageApp.translate による全言語自動判別バックアップ翻訳機能
  */
 
 var DEFAULT_CONFIG = {
@@ -27,6 +27,25 @@ function getScriptConfig() {
     LIVE_TRANSCRIBE_MODEL: props.LIVE_TRANSCRIBE_MODEL || DEFAULT_CONFIG.LIVE_TRANSCRIBE_MODEL,
     TRANSLATE_MODEL: props.TRANSLATE_MODEL || DEFAULT_CONFIG.TRANSLATE_MODEL
   };
+}
+
+function detectScriptLangForFallback_(text) {
+  if (!text) return '';
+  if (/[\u3040-\u309f\u30a0-\u30ff]/.test(text)) return 'ja';
+  var hasLatinWord = /[A-Za-z]{2,}/.test(text);
+  // 英語とヒンディー語/ウルドゥー語/ベンガル語等の混在発話は空文字 ('') で LanguageApp の自動判別に委ねる
+  if (hasLatinWord && /[\u0600-\u06ff\u0750-\u077f\u0900-\u09ff]/.test(text)) return '';
+  if (/[\u0679\u0688\u0691\u06ba\u06be\u06d2\u06d3\u06d4]/.test(text)) return 'ur';
+  if (/[\u0600-\u06ff\u0750-\u077f\ufb50-\ufdff\ufe70-\ufeff]/.test(text)) return ''; // auto-detect ur/ar/fa
+  if (/[\u0980-\u09ff]/.test(text)) return 'bn';
+  if (/[\u0900-\u097f]/.test(text)) return 'hi';
+  if (/[\uac00-\ud7af]/.test(text)) return 'ko';
+  if (/[\u0e00-\u0e7f]/.test(text)) return 'th';
+  if (/[\u1000-\u109f]/.test(text)) return 'my';
+  if (/[\u0400-\u04ff]/.test(text)) return 'ru';
+  if (/[这们么个还进话说请谢现开关门问间时动车机东两没吗呢吧們嗎這沒]/.test(text)) return 'zh-CN';
+  if (/[\u3400-\u4dbf\u4e00-\u9fff]/.test(text)) return 'ja';
+  return '';
 }
 
 function doPost(e) {
@@ -71,37 +90,42 @@ function doPost(e) {
       var result = handleSaveTranscript(payload, config);
       return createJsonResponse(result);
     } 
-    // 3. バックアップ翻訳API (LanguageApp)
+    // 3. 多言語バックアップ翻訳API (LanguageApp)
     else if (action === 'translate') {
       var text = payload.text ? String(payload.text).trim() : '';
       if (!text) {
         return createJsonResponse({ status: 'error', message: '翻訳対象テキストが空です。' });
       }
 
-      var srcLang = payload.srcLang ? String(payload.srcLang).trim().toLowerCase() : '';
+      var rawSrc = (payload.srcLang || payload.sourceLang) ? String(payload.srcLang || payload.sourceLang).trim().toLowerCase() : '';
       var targetLang = payload.targetLang ? String(payload.targetLang).trim().toLowerCase() : '';
+      if (targetLang === 'tl') targetLang = 'tl';
+      if (targetLang === 'zh') targetLang = 'zh-CN';
 
-      if (!srcLang || srcLang === 'auto') {
-        if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/.test(text)) {
-          srcLang = 'ja';
-        } else if (/[\u0980-\u09FF]/.test(text)) {
-          srcLang = 'bn';
-        } else if (/[\u0900-\u097F]/.test(text)) {
-          srcLang = 'hi';
-        } else {
-          srcLang = 'en';
-        }
+      var detectedScriptLang = detectScriptLangForFallback_(text);
+      var apiSrcLang = '';
+      if (rawSrc && rawSrc !== 'auto' && rawSrc.indexOf('+') === -1) {
+        apiSrcLang = (rawSrc === 'zh') ? 'zh-CN' : rawSrc;
+      } else {
+        apiSrcLang = detectedScriptLang; // 空文字の場合は LanguageApp 側の全言語自動判別を利用
       }
+
       if (!targetLang || targetLang === 'auto') {
-        targetLang = (srcLang === 'ja') ? 'en' : 'ja';
+        targetLang = (apiSrcLang === 'ja' || detectedScriptLang === 'ja') ? 'en' : 'ja';
       }
 
       try {
-        var translated = LanguageApp.translate(text, srcLang, targetLang);
+        var translated;
+        try {
+          translated = LanguageApp.translate(text, apiSrcLang, targetLang);
+        } catch (primaryTransErr) {
+          // 特定コード不一致時は自動言語判別 ('') で再試行
+          translated = LanguageApp.translate(text, '', targetLang);
+        }
         return createJsonResponse({
           status: 'success',
           translated: translated,
-          speakerLang: srcLang
+          speakerLang: rawSrc || detectedScriptLang || 'auto'
         });
       } catch (transErr) {
         return createJsonResponse({
@@ -131,7 +155,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '3.1.1',
+        version: '3.2.0',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -154,8 +178,8 @@ function doGet(e) {
   var config = getScriptConfig();
   return createJsonResponse({
     status: 'ok',
-    service: 'Bilingual Transcriber Backend',
-    version: '3.1.1',
+    service: 'Multilingual Transcriber Backend',
+    version: '3.2.0',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
@@ -202,13 +226,16 @@ function handleSaveTranscript(payload, config) {
   var rawFolderId = payload.folderId || payload.outputFolderId || '';
   var folderId = extractFolderId(rawFolderId) || config.OUTPUT_FOLDER_ID;
 
-  var defaultTitle = 'Audit_Transcript_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
+  var category = payload.category || 'Common';
+  var titlePrefix = (category === 'Common' || category === 'Casual') ? 'Meeting_Transcript_' : 'Audit_Transcript_';
+  var defaultTitle = titlePrefix + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmm');
   var title = (payload.title && String(payload.title).trim() !== '') ? String(payload.title).trim() : defaultTitle;
   
   var records = Array.isArray(payload.records) ? payload.records : (Array.isArray(payload.transcriptList) ? payload.transcriptList : []);
   var modelName = payload.model || config.LIVE_TRANSCRIBE_MODEL;
-  var direction = payload.direction || 'AUTO';
-  var category = payload.category || 'HKC';
+  var direction = payload.direction || 'auto';
+  var partnerLang = payload.partnerLang ? String(payload.partnerLang).toUpperCase() : 'EN';
+  var recognitionProfile = payload.recognitionProfile || 'ja-en-hi-ur';
 
   if (records.length === 0) {
     return {
@@ -251,14 +278,18 @@ function handleSaveTranscript(payload, config) {
   body.setMarginBottom(40);
 
   var dirMap = {
-    'auto': '自動切替 (日⇄英・ベンガル・ヒンディー➔日)',
+    'auto': '自動双方向 (日⇄' + partnerLang + ' / 多言語➔日)',
+    'all-to-ja': '全言語 ➔ 日本語 (集約)',
+    'all-to-partner': '全言語 ➔ ' + partnerLang + ' (集約)',
+    'ja-to-partner': '日本語 ➔ ' + partnerLang,
     'ja-to-en': '日本語 ➔ 英語',
     'en-to-ja': '英語 ➔ 日本語',
     'bn-to-ja': 'ベンガル語 ➔ 日本語',
-    'hi-to-ja': 'ヒンディー語 ➔ 日本語'
+    'hi-to-ja': 'ヒンディー語 ➔ 日本語',
+    'ur-to-ja': 'ウルドゥー語 ➔ 日本語'
   };
   var dirKey = String(direction || 'auto').toLowerCase();
-  var dirLabel = dirMap[dirKey] || '自動切替 (4言語対応)';
+  var dirLabel = dirMap[dirKey] || '自動双方向 (多言語対応)';
 
   if (isNew || saveMode === 'sync') {
     // 【ひとつのGoogleドキュメント同期保存】: 既存内容をクリアし、最新の確定翻訳全件で完全同期
@@ -278,7 +309,7 @@ function handleSaveTranscript(payload, config) {
     titleP.setForegroundColor('#1b365d');
 
     var timeLabel = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss') + ' (JST)';
-    var metaStr = '■ 最終更新: ' + timeLabel + '  |  確定発話数: ' + records.length + '件  |  分野: ' + category + '  |  翻訳設定: ' + dirLabel;
+    var metaStr = '■ 最終更新: ' + timeLabel + '  |  確定発話数: ' + records.length + '件  |  分野: ' + category + '  |  認識: ' + recognitionProfile + '  |  翻訳設定: ' + dirLabel;
     var metaP = body.appendParagraph(metaStr);
     metaP.setForegroundColor('#57606a');
     metaP.setFontSize(9.5);
@@ -408,7 +439,7 @@ function readSheetTerms_(sheet, termsList) {
 
 function refreshGlossaryCache() {
   var cache = CacheService.getScriptCache();
-  ['HKC', 'EU-SRR', 'HSE', 'IHM', 'Common'].forEach(function(c) {
+  ['Common', 'Casual', 'HKC', 'EU-SRR', 'HSE', 'IHM'].forEach(function(c) {
     cache.remove('GLOSSARY_V3_' + c);
   });
   return { success: true, message: '用語集キャッシュをリフレッシュしました。' };

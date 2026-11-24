@@ -1,4 +1,4 @@
-/* style.css - Consolidated Responsive Stylesheet for Bilingual Transcriber (v3.1.1) */
+/* style.css - Consolidated Responsive Stylesheet for Multilingual Transcriber (v3.2.0) */
 
 :root {
   --primary: #1b365d;
@@ -18,7 +18,7 @@
   --text-primary: #2c3e50;
   --text-secondary: #57606a;
   --text-muted: #7f8c8d;
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans JP", Arial, sans-serif;
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans JP", "Noto Sans Devanagari", "Noto Nastaliq Urdu", "Noto Naskh Arabic", "Noto Sans Bengali", "Noto Sans SC", "Malgun Gothic", Arial, sans-serif;
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.12);
   --radius-sm: 6px;
@@ -631,6 +631,8 @@ body.modal-open {
   overflow-y: auto;
   word-break: break-word;
   padding-right: 4px;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .live-text.live-placeholder {
@@ -1025,6 +1027,28 @@ body.modal-open {
   color: #ba4a00;
   border-color: #f5cba7;
 }
+.tag.lang-badge.lang-ur,
+.tag.lang-badge.lang-ar,
+.tag.lang-badge.lang-fa {
+  background: #e8f6ef;
+  color: #146c43;
+  border-color: #a3cfbb;
+}
+.tag.lang-badge.lang-zh {
+  background: #fdedec;
+  color: #b03a2e;
+  border-color: #f5b7b1;
+}
+.tag.lang-badge.lang-ko {
+  background: #eef2ff;
+  color: #3730a3;
+  border-color: #c7d2fe;
+}
+.tag.lang-badge.lang-mixed {
+  background: linear-gradient(135deg, #ebf5fb 0%, #fef5e7 100%);
+  color: #1f4e78;
+  border-color: #9bb7d4;
+}
 
 .card-actions {
   display: flex;
@@ -1125,8 +1149,10 @@ body.modal-open {
 
 .original, .translation {
   font-size: 0.95rem;
-  line-height: 1.5;
+  line-height: 1.55;
   word-break: break-word;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 
 .original {
@@ -1162,6 +1188,8 @@ body.modal-open {
   color: var(--text-primary);
   outline: none;
   resize: vertical;
+  unicode-bidi: plaintext;
+  text-align: start;
 }
 .edit textarea:focus {
   border-color: var(--blue);
@@ -1305,6 +1333,55 @@ body.modal-open {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.custom-langs-presets {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.custom-langs-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  background: #f8fafc;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  max-height: 176px;
+  overflow-y: auto;
+}
+
+.custom-lang-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--border-subtle);
+  background: #FFFFFF;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-lang-chip:hover {
+  border-color: var(--blue);
+  background: #f0f6ff;
+}
+
+.custom-lang-chip input[type="checkbox"] {
+  flex-shrink: 0;
+  margin: 0;
 }
 
 .textarea-instruction {
@@ -1486,8 +1563,15 @@ body.modal-open {
   .action-spacer {
     display: none;
   }
-  .control-group.direction-group {
+  .control-group {
     justify-content: space-between;
+  }
+  .control-group .select-input {
+    flex: 1;
+    max-width: 72%;
+  }
+  .custom-langs-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .prompt-toggle-btn {
     flex-wrap: wrap;

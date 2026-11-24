@@ -853,31 +853,36 @@ global.QRCode = QRCode;
 })(typeof window !== 'undefined' ? window : (typeof global !== 'undefined' ? global : this));
 
 /**
- * app.js - Optimized Frontend Architecture for Bilingual Transcriber
- * Version: 3.1.1 (Precision VAD [Pre-roll + Hangover + Adaptive Noise Floor] Release)
+ * app.js - Optimized Frontend Architecture for Multilingual Transcriber
+ * Version: 3.2.0 (Complete Multilingual + EN/JA Top Priority + Hindi/Urdu Code-Switching Edition)
  *
  * Modules:
- *  1. Constants & Shared Utilities (Language detection, Base64 UTF-8, Timeout fetch)
+ *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Base64 UTF-8, Timeout fetch)
  *  2. ConfigManager (localStorage persistence)
+ *  2.5. VoiceActivityDetector (Pre-Gain VAD with Minimum Statistics noise floor)
  *  3. AudioCaptureService (Anti-aliased 16kHz PCM, far-field boost, iPad/iOS unlock)
- *  4. WebSpeechService (Native Web Speech API fallback)
- *  5. GeminiLiveClient (Single `audio` stream, language-lock setup, auto-reconnect x5)
+ *  4. WebSpeechService (Multilingual Web Speech API fallback)
+ *  5. GeminiLiveClient (Tiered EN/JA + HI/UR & 85+ multilingual setup, single `audio` stream, auto-reconnect x5)
  *  6. GeminiTextClient (Shared Gemini REST cascade client for Translation & Summary)
- *  7. TranslationService (FIFO queue, dynamic prior-context continuity, custom nuance prompt)
- *  8. SummaryService (On-demand lookback structured summarizer)
- *  9. GasStorageClient (Google Docs single-document sync & GAS fallback)
- * 10. LongFormUtteranceBuffer (Real-time original display + cohesive Japanese chunking)
+ *  7. TranslationService (FIFO queue, multilingual & Hinglish/Urdu code-switching nuance, prior-context continuity)
+ *  8. SummaryService (On-demand lookback structured Japanese summarizer)
+ *  9. GasStorageClient (Google Docs single-document sync & GAS multilingual fallback)
+ * 10. LongFormUtteranceBuffer (Real-time original display + code-switch-safe chunking + Urdu/RTL punctuation)
  * 11. App (Modular UI controller with concurrency locks & DOM bounds)
  */
 
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.1.1';
+const APP_VERSION = '3.2.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
   DEFAULT_LIVE_MODEL: 'models/gemini-3.5-transcribe-live',
+  DEFAULT_CATEGORY: 'Common',
+  DEFAULT_RECOGNITION_PROFILE: 'ja-en-hi-ur',
+  DEFAULT_PARTNER_LANG: 'en',
+  DEFAULT_CUSTOM_LANGS: Object.freeze(['ja', 'en', 'hi', 'ur', 'bn']),
   GEMINI_TEXT_MODELS: Object.freeze([
     'gemini-3.5-flash-lite',
     'gemini-2.5-flash',
@@ -887,19 +892,56 @@ const DEFAULT_SETTINGS = Object.freeze({
   MAX_LOG_LINES: 300
 });
 
-const LANGUAGE_META = Object.freeze({
-  ja: { name: '日本語', englishName: 'Japanese', badge: '🇯🇵' },
-  en: { name: '英語', englishName: 'English', badge: '🇺🇸' },
-  bn: { name: 'ベンガル語', englishName: 'Bengali (বাংলা)', badge: '🇧🇩' },
-  hi: { name: 'ヒンディー語', englishName: 'Hindi (हिन्दी)', badge: '🇮🇳' }
+const LANGUAGE_REGISTRY = Object.freeze({
+  ja: { code: 'ja', name: '日本語', englishName: 'Japanese', badge: '🇯🇵', bcp47: ['ja-JP'], speechLang: 'ja-JP', rtl: false },
+  en: { code: 'en', name: '英語', englishName: 'English', badge: '🇺🇸', bcp47: ['en-US', 'en-IN'], speechLang: 'en-US', rtl: false },
+  hi: { code: 'hi', name: 'ヒンディー語', englishName: 'Hindi (हिन्दी)', badge: '🇮🇳', bcp47: ['hi-IN'], speechLang: 'hi-IN', rtl: false },
+  ur: { code: 'ur', name: 'ウルドゥー語', englishName: 'Urdu (اردو)', badge: '🇵🇰', bcp47: ['ur-PK'], speechLang: 'ur-PK', rtl: true },
+  bn: { code: 'bn', name: 'ベンガル語', englishName: 'Bengali (বাংলা)', badge: '🇧🇩', bcp47: ['bn-BD', 'bn-IN'], speechLang: 'bn-BD', rtl: false },
+  zh: { code: 'zh', name: '中国語', englishName: 'Chinese (中文)', badge: '🇨🇳', bcp47: ['cmn-Hans-CN', 'zh-TW'], speechLang: 'zh-CN', rtl: false },
+  ko: { code: 'ko', name: '韓国語', englishName: 'Korean (한국어)', badge: '🇰🇷', bcp47: ['ko-KR'], speechLang: 'ko-KR', rtl: false },
+  vi: { code: 'vi', name: 'ベトナム語', englishName: 'Vietnamese (Tiếng Việt)', badge: '🇻🇳', bcp47: ['vi-VN'], speechLang: 'vi-VN', rtl: false },
+  id: { code: 'id', name: 'インドネシア語', englishName: 'Indonesian (Bahasa Indonesia)', badge: '🇮🇩', bcp47: ['id-ID'], speechLang: 'id-ID', rtl: false },
+  tl: { code: 'tl', name: 'タガログ語', englishName: 'Filipino / Tagalog', badge: '🇵🇭', bcp47: ['fil-PH'], speechLang: 'fil-PH', rtl: false },
+  th: { code: 'th', name: 'タイ語', englishName: 'Thai (ไทย)', badge: '🇹🇭', bcp47: ['th-TH'], speechLang: 'th-TH', rtl: false },
+  my: { code: 'my', name: 'ミャンマー語', englishName: 'Burmese (မြန်မာ)', badge: '🇲🇲', bcp47: ['my-MM'], speechLang: 'my-MM', rtl: false },
+  ar: { code: 'ar', name: 'アラビア語', englishName: 'Arabic (العربية)', badge: '🇸🇦', bcp47: ['ar-SA'], speechLang: 'ar-SA', rtl: true },
+  fa: { code: 'fa', name: 'ペルシア語', englishName: 'Persian (فارسی)', badge: '🇮🇷', bcp47: ['fa-IR'], speechLang: 'fa-IR', rtl: true },
+  tr: { code: 'tr', name: 'トルコ語', englishName: 'Turkish (Türkçe)', badge: '🇹🇷', bcp47: ['tr-TR'], speechLang: 'tr-TR', rtl: false },
+  es: { code: 'es', name: 'スペイン語', englishName: 'Spanish (Español)', badge: '🇪🇸', bcp47: ['es-ES'], speechLang: 'es-ES', rtl: false },
+  fr: { code: 'fr', name: 'フランス語', englishName: 'French (Français)', badge: '🇫🇷', bcp47: ['fr-FR'], speechLang: 'fr-FR', rtl: false },
+  de: { code: 'de', name: 'ドイツ語', englishName: 'German (Deutsch)', badge: '🇩🇪', bcp47: ['de-DE'], speechLang: 'de-DE', rtl: false },
+  pt: { code: 'pt', name: 'ポルトガル語', englishName: 'Portuguese (Português)', badge: '🇧🇷', bcp47: ['pt-BR'], speechLang: 'pt-BR', rtl: false },
+  ru: { code: 'ru', name: 'ロシア語', englishName: 'Russian (Русский)', badge: '🇷🇺', bcp47: ['ru-RU'], speechLang: 'ru-RU', rtl: false },
+  it: { code: 'it', name: 'イタリア語', englishName: 'Italian (Italiano)', badge: '🇮🇹', bcp47: ['it-IT'], speechLang: 'it-IT', rtl: false }
 });
 
-const DIRECTION_LANGUAGE_CODES = Object.freeze({
-  'ja-to-en': ['ja-JP'],
-  'en-to-ja': ['en-US'],
-  'bn-to-ja': ['bn-BD', 'bn-IN', 'en-US'],
-  'hi-to-ja': ['hi-IN', 'en-US'],
-  'auto': ['ja-JP', 'en-US', 'bn-BD', 'bn-IN', 'hi-IN']
+// 後方互換エイリアス
+const LANGUAGE_META = LANGUAGE_REGISTRY;
+
+const RECOGNITION_PROFILES = Object.freeze({
+  'ja-en-hi-ur': {
+    label: '日英最優先 ＋ ヒンディー/ウルドゥー補足',
+    languageCodes: Object.freeze(['ja-JP', 'en-US', 'en-IN', 'hi-IN', 'ur-PK'])
+  },
+  'multilingual-auto': {
+    label: '完全多言語 (85+言語自動判別・日英優先)',
+    languageCodes: Object.freeze([])
+  },
+  'multilingual-custom': {
+    label: 'カスタム言語セット',
+    languageCodes: null
+  },
+  'strict-ja-en': {
+    label: '日英2言語のみ厳密ロック',
+    languageCodes: Object.freeze(['ja-JP', 'en-US', 'en-IN'])
+  }
+});
+
+const CUSTOM_LANG_PRESETS = Object.freeze({
+  'south-asia': Object.freeze(['ja', 'en', 'hi', 'ur', 'bn']),
+  'asia': Object.freeze(['ja', 'en', 'zh', 'ko', 'vi', 'id', 'tl', 'th', 'my', 'hi', 'ur', 'bn']),
+  'global': Object.freeze(['ja', 'en', 'hi', 'ur', 'zh', 'ko', 'es', 'fr', 'de', 'ar'])
 });
 
 const ROLES = Object.freeze([
@@ -916,14 +958,29 @@ const ROLE_SHORT_LABELS = Object.freeze({
   'Other (その他)': 'Other'
 });
 
-const DEFAULT_SYSTEM_INSTRUCTION =
+const LEGACY_V311_SYSTEM_INSTRUCTION =
   'You are a speech transcription engine for maritime and safety audits. ' +
   'You must ONLY transcribe speech into one of these four languages: Japanese (日本語), English, Bengali (বাংলা), or Hindi (हिन्दी). ' +
   'Do not transcribe speech into Korean, Swahili, or any other unlisted language. ' +
   'In shipyard contexts (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing). ' +
   'If audio resembles Japanese phonetics, strictly transcribe it in Japanese characters.';
 
+const DEFAULT_SYSTEM_INSTRUCTION =
+  'You are a high-precision real-time speech transcription engine. ' +
+  '1. TOP PRIORITY (ENGLISH & JAPANESE): Give highest priority to accurate English and Japanese (日本語) transcription. ' +
+  'Whenever speech can reasonably be understood as English (including Indian, Pakistani, Japanese, or other non-native accents, technical terms, and abbreviations) or Japanese, ALWAYS transcribe it in standard English or natural Japanese characters. ' +
+  '2. HINDI & URDU IN ENGLISH CONVERSATION (CODE-SWITCHING): Speakers chatting in English may occasionally mix in casual Hindi (हिन्दी) or Urdu (اردو) words, greetings, fillers, or short side-remarks (Hinglish / Urdu-English code-switching, such as "accha", "theek hai", "bhai", "yaar", "inshallah", "shukriya", "nahi", "chalo"). ' +
+  'Pick up and transcribe clear Hindi or Urdu segments faithfully without forcing nonsensical English homophones, and immediately return to English for English words. ' +
+  '3. NOISE & HALLUCINATION GUARD: Never hallucinate unrelated scripts or languages from background noise, breathing, or unclear audio; default ambiguous phonetics to English or Japanese.';
+
+function isDefaultOrLegacySystemInstruction(text) {
+  const trimmed = String(text || '').trim();
+  return !trimmed || trimmed === DEFAULT_SYSTEM_INSTRUCTION.trim() || trimmed === LEGACY_V311_SYSTEM_INSTRUCTION.trim();
+}
+
 const TRANSLATION_PROMPT_PRESETS = Object.freeze({
+  hinglish:
+    '【テーマ・ニュアンス: 英語雑談＋ヒンディー/ウルドゥー混在】英語ベースの会話・雑談の中に混じるヒンディー語やウルドゥー語の相槌・慣用表現・口語フレーズ（Hinglish / Roman Urdu 含む）のニュアンスや空気感も自然に汲み取り、会話の流れが違和感なく伝わるこなれた日本語に翻訳してください。',
   audit:
     '【テーマ・ニュアンス: 監査・法令厳密】規制要件、認証基準、不適合・是正措置、責任範囲のニュアンスを正確に翻訳してください。推測や過度な意訳は避け、専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC等）は原語または定訳を維持してください。',
   business:
@@ -941,34 +998,368 @@ function isIPadOrIOS() {
          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 }
 
+let _intlDisplayJa = null;
+let _intlDisplayEn = null;
+try {
+  if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function') {
+    _intlDisplayJa = new Intl.DisplayNames(['ja'], { type: 'language' });
+    _intlDisplayEn = new Intl.DisplayNames(['en'], { type: 'language' });
+  }
+} catch (e) {}
+
 /**
- * 4言語（日本語・英語・ベンガル語・ヒンディー語）の高精度自動判別
+ * 任意のBCP-47 / ISO言語コードを正規化された短コードへ変換
+ */
+function normalizeLangCode(rawCode) {
+  if (!rawCode) return '';
+  const lower = String(rawCode).trim().toLowerCase().replace(/_/g, '-');
+  if (!lower || lower === 'auto' || lower === 'und') return '';
+  const primary = lower.split('-')[0];
+  const aliasMap = {
+    cmn: 'zh',
+    yue: 'zh',
+    zho: 'zh',
+    chi: 'zh',
+    fil: 'tl',
+    tgl: 'tl',
+    in: 'id',
+    iw: 'he',
+    ji: 'yi',
+    jw: 'jv',
+    nb: 'no',
+    nn: 'no',
+    jpn: 'ja',
+    eng: 'en',
+    hin: 'hi',
+    urd: 'ur',
+    ben: 'bn',
+    kor: 'ko',
+    vie: 'vi',
+    ind: 'id',
+    tha: 'th',
+    mya: 'my',
+    ara: 'ar',
+    fas: 'fa',
+    per: 'fa',
+    tur: 'tr',
+    spa: 'es',
+    fra: 'fr',
+    deu: 'de',
+    por: 'pt',
+    rus: 'ru',
+    ita: 'it'
+  };
+  return aliasMap[primary] || primary;
+}
+
+/**
+ * 静的レジストリ＋Intl.DisplayNamesによる85+全言語メタ情報解決
+ */
+function resolveLanguageMeta(langCode) {
+  const norm = normalizeLangCode(langCode) || 'en';
+  if (LANGUAGE_REGISTRY[norm]) return LANGUAGE_REGISTRY[norm];
+
+  let jaName = norm.toUpperCase();
+  let enName = norm.toUpperCase();
+  try {
+    if (_intlDisplayJa) {
+      const resolvedJa = _intlDisplayJa.of(norm);
+      if (resolvedJa && resolvedJa.toLowerCase() !== norm) jaName = resolvedJa;
+    }
+    if (_intlDisplayEn) {
+      const resolvedEn = _intlDisplayEn.of(norm);
+      if (resolvedEn && resolvedEn.toLowerCase() !== norm) enName = resolvedEn;
+    }
+  } catch (e) {}
+
+  const rtlSet = new Set(['ur', 'ar', 'fa', 'he', 'ps', 'sd', 'ug', 'yi', 'ckb', 'dv']);
+  return {
+    code: norm,
+    name: jaName,
+    englishName: enName,
+    badge: norm.toUpperCase().slice(0, 3),
+    bcp47: [langCode && String(langCode).includes('-') ? String(langCode) : norm],
+    speechLang: langCode && String(langCode).includes('-') ? String(langCode) : norm,
+    rtl: rtlSet.has(norm)
+  };
+}
+
+// 英語一般語彙や技術略語（MATLAB等）と衝突しない厳選Hinglish / Roman Urdu口語表現パターン
+const COLLOQUIAL_HI_UR_REGEX = new RegExp(
+  '\\b(' +
+    'theek\\s+hai|thik\\s+hai|kya\\s+baat|kya\\s+haal|koi\\s+baat\\s+nahi|pata\\s+nahi|maloom\\s+nahi|' +
+    'dekhte\\s+hain|karte\\s+hain|kar\\s+denge|kar\\s+lenge|ho\\s+gaya|ho\\s+jayega|kal\\s+subah|ek\\s+minute|' +
+    'iska\\s+matlab|matlab\\s+yeh|thoda\\s+sa|' +
+    'inshallah|inshaallah|mashallah|alhamdulillah|shukriya|meherbani|namaste|assalamu|walaikum|' +
+    'accha|achha|bilkul|zaroor|shayad|lekin|kyunki|isliye|abhi|jaldi|chalo|dekho|suno|samjhe|samajh|' +
+    'bhai|bhaiya|yaar|nahi|nahin' +
+  ')\\b',
+  'i'
+);
+
+// 日本語の新字体・常用漢字には存在しない中国語固有簡体字・語気助詞
+const CHINESE_SIMPLIFIED_MARKERS_REGEX = /[这们么个还进话说请谢现开关门问间时动车机东两没吗呢吧們嗎這沒]/;
+
+/**
+ * 多言語＆コードスイッチング（英語＋ヒンディー語／ウルドゥー語混在含む）高精度判定
  * @param {string} text
  * @param {string|null} hintedLangCode
- * @returns {'ja'|'en'|'bn'|'hi'}
+ * @param {string} recognitionProfile
+ * @returns {{ primaryLang: string, mixedSubLangs: string[], colloquialMix: string|null, isRtl: boolean }}
  */
-function detectLanguage4(text, hintedLangCode = null) {
-  if (hintedLangCode) {
-    const code = String(hintedLangCode).toLowerCase();
-    if (code.startsWith('ja')) return 'ja';
-    if (code.startsWith('bn')) return 'bn';
-    if (code.startsWith('hi')) return 'hi';
-    if (code.startsWith('en')) return 'en';
+function detectLanguageInfo(text, hintedLangCode = null, recognitionProfile = 'ja-en-hi-ur') {
+  const clean = String(text || '').trim();
+  const hintLang = normalizeLangCode(hintedLangCode);
+
+  if (!clean) {
+    const fallback = hintLang || 'en';
+    return {
+      primaryLang: fallback,
+      mixedSubLangs: [],
+      colloquialMix: null,
+      isRtl: resolveLanguageMeta(fallback).rtl
+    };
   }
-  if (!text) return 'en';
-  if (/[\u3040-\u309F\u30A0-\u30FF]/.test(text)) return 'ja';
-  if (/[\u0980-\u09FF]/.test(text)) return 'bn';
-  if (/[\u0900-\u097F]/.test(text)) return 'hi';
-  if (/[\u4E00-\u9FFF\u3400-\u4DBF]/.test(text)) return 'ja';
-  return 'en';
+
+  const kanaCount = (clean.match(/[\u3040-\u309F\u30A0-\u30FF\uFF66-\uFF9F]/g) || []).length;
+  const hanCount = (clean.match(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/g) || []).length;
+  const hangulCount = (clean.match(/[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/g) || []).length;
+  const devanagariCount = (clean.match(/[\u0900-\u097F]/g) || []).length;
+  const bengaliCount = (clean.match(/[\u0980-\u09FF]/g) || []).length;
+  const persoArabicCount = (clean.match(/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length;
+  // ウルドゥー語固有文字（ٹ ڈ ڑ ں ہ ھ ے ۓ گ پ چ ژ ی ۔）
+  const urduSpecificCount = (clean.match(/[\u0679\u0688\u0691\u06BA\u06C1\u06BE\u06D2\u06D3\u06AF\u067E\u0686\u0698\u06CC\u06D4]/g) || []).length;
+  const strictlyUrduOnlyCount = (clean.match(/[\u0679\u0688\u0691\u06BA\u06BE\u06D2\u06D3\u06D4]/g) || []).length;
+  const thaiCount = (clean.match(/[\u0E00-\u0E7F]/g) || []).length;
+  const myanmarCount = (clean.match(/[\u1000-\u109F]/g) || []).length;
+  const cyrillicCount = (clean.match(/[\u0400-\u04FF]/g) || []).length;
+  const tamilCount = (clean.match(/[\u0B80-\u0BFF]/g) || []).length;
+  const teluguCount = (clean.match(/[\u0C00-\u0C7F]/g) || []).length;
+  const gujaratiCount = (clean.match(/[\u0A80-\u0AFF]/g) || []).length;
+  const gurmukhiCount = (clean.match(/[\u0A00-\u0A7F]/g) || []).length;
+  const malayalamCount = (clean.match(/[\u0D00-\u0D7F]/g) || []).length;
+  const greekCount = (clean.match(/[\u0370-\u03FF]/g) || []).length;
+  const hebrewCount = (clean.match(/[\u0590-\u05FF]/g) || []).length;
+
+  const latinWords = clean.match(/[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]{2,}/g) || [];
+  const latinCharCount = (clean.match(/[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]/g) || []).length;
+
+  // 1. かな文字が含まれれば最優先で日本語（英語略語混じりも日本語発話として保護）
+  if (kanaCount > 0) {
+    return { primaryLang: 'ja', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  }
+
+  // 2. 漢字のみ（かな無し）：日英優先プロファイルや日本語熟語を中国語と誤認しないよう保護
+  if (hanCount > 0 && hangulCount === 0 && devanagariCount === 0 && persoArabicCount === 0) {
+    if (hintLang === 'zh' || CHINESE_SIMPLIFIED_MARKERS_REGEX.test(clean)) {
+      return { primaryLang: 'zh', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+    }
+    if (
+      recognitionProfile === 'multilingual-auto' &&
+      hintLang !== 'ja' &&
+      hanCount >= 5 &&
+      /[的了在是不我你他她]/.test(clean)
+    ) {
+      return { primaryLang: 'zh', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+    }
+    return { primaryLang: 'ja', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  }
+
+  // Perso-Arabic 文字域の言語特定（ウルドゥー語 vs アラビア語 vs ペルシア語）
+  const resolvePersoArabicLang = () => {
+    if (strictlyUrduOnlyCount > 0 || hintLang === 'ur') return 'ur';
+    if (hintLang === 'ar' && urduSpecificCount === 0) return 'ar';
+    if (hintLang === 'fa') return 'fa';
+    if (urduSpecificCount > 0 || recognitionProfile === 'ja-en-hi-ur') return 'ur';
+    return 'ar';
+  };
+
+  // 3. 英語＋南アジア諸語（ヒンディー語／ウルドゥー語／ベンガル語）の異種スクリプト混在（コードスイッチング）
+  const southAsianScriptCount = devanagariCount + persoArabicCount + bengaliCount;
+  if (southAsianScriptCount > 0) {
+    const detectedSub = [];
+    if (devanagariCount > 0) detectedSub.push('hi');
+    if (persoArabicCount > 0) detectedSub.push(resolvePersoArabicLang());
+    if (bengaliCount > 0) detectedSub.push('bn');
+
+    // 英語単語が2語以上あり、ラテン文字量が一定比率以上なら「英語ベース＋雑談混在」と判定
+    if (latinWords.length >= 2 && latinCharCount >= southAsianScriptCount * 0.55) {
+      return {
+        primaryLang: 'en',
+        mixedSubLangs: detectedSub,
+        colloquialMix: null,
+        isRtl: false
+      };
+    }
+
+    // 南アジアスクリプト主体の発話（英語単語が混じる場合も記録）
+    let mainLang = detectedSub[0] || 'hi';
+    if (persoArabicCount > devanagariCount && persoArabicCount >= bengaliCount) {
+      mainLang = resolvePersoArabicLang();
+    } else if (bengaliCount > devanagariCount && bengaliCount > persoArabicCount) {
+      mainLang = 'bn';
+    }
+    const extraSub = detectedSub.filter((l) => l !== mainLang);
+    if (latinWords.length >= 2) extraSub.push('en');
+    return {
+      primaryLang: mainLang,
+      mixedSubLangs: extraSub,
+      colloquialMix: null,
+      isRtl: resolveLanguageMeta(mainLang).rtl
+    };
+  }
+
+  // 4. その他の固有文字スクリプト判定
+  if (hangulCount > 0) return { primaryLang: 'ko', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (thaiCount > 0) return { primaryLang: 'th', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (myanmarCount > 0) return { primaryLang: 'my', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (cyrillicCount > 0) {
+    const cyrLang = hintLang && ['uk', 'bg', 'sr', 'kk', 'MN', 'be'].includes(hintLang) ? hintLang : 'ru';
+    return { primaryLang: cyrLang, mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  }
+  if (tamilCount > 0) return { primaryLang: 'ta', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (teluguCount > 0) return { primaryLang: 'te', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (gujaratiCount > 0) return { primaryLang: 'gu', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (gurmukhiCount > 0) return { primaryLang: 'pa', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (malayalamCount > 0) return { primaryLang: 'ml', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (greekCount > 0) return { primaryLang: 'el', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  if (hebrewCount > 0) return { primaryLang: 'he', mixedSubLangs: [], colloquialMix: null, isRtl: true };
+
+  // 5. ラテン文字系（英語・ローマ字Hinglish/Roman Urdu・ベトナム語・欧州/東南アジア諸言語）
+  if (/[ăâđêôơưĂÂĐÊÔƠƯảẩẫậắằẳẵặẻểễệỉịỏổỗộởỡợủửữựỳỷỹỵ]/.test(clean)) {
+    return { primaryLang: 'vi', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  }
+
+  // ローマ字表記のヒンディー語・ウルドゥー語（Hinglish / Roman Urdu）混在検出
+  if (recognitionProfile !== 'strict-ja-en' && COLLOQUIAL_HI_UR_REGEX.test(clean)) {
+    // エンジンが明確に hi / ur ヒントを返しており英語要素がほぼ無い場合を除き、英語ベース＋口語混在として扱う
+    if ((hintLang === 'hi' || hintLang === 'ur') && latinWords.length <= 3) {
+      return { primaryLang: hintLang, mixedSubLangs: [], colloquialMix: 'hi-ur', isRtl: false };
+    }
+    return { primaryLang: 'en', mixedSubLangs: [], colloquialMix: 'hi-ur', isRtl: false };
+  }
+
+  if (/[ğĞşŞıİ]/.test(clean) && (hintLang === 'tr' || recognitionProfile === 'multilingual-auto')) {
+    return { primaryLang: 'tr', mixedSubLangs: [], colloquialMix: null, isRtl: false };
+  }
+
+  // Gemini Live や Web Speech から信頼できるラテン系他言語ヒントが付与された場合（日英厳密ロック時を除く）
+  if (
+    hintLang &&
+    hintLang !== 'en' &&
+    hintLang !== 'ja' &&
+    recognitionProfile !== 'strict-ja-en' &&
+    recognitionProfile !== 'ja-en-hi-ur'
+  ) {
+    // 非ラテン文字言語コード（ko, zh, hi, ur, ar, ru等）がラテン文字英語に誤付与された場合は英語優先で保護
+    const nonLatinCodes = new Set(['ja', 'zh', 'ko', 'hi', 'ur', 'bn', 'ar', 'fa', 'th', 'my', 'ru', 'uk', 'el', 'he', 'ta', 'te', 'gu', 'pa', 'ml']);
+    if (!nonLatinCodes.has(hintLang)) {
+      return { primaryLang: hintLang, mixedSubLangs: [], colloquialMix: null, isRtl: resolveLanguageMeta(hintLang).rtl };
+    }
+  }
+
+  return { primaryLang: 'en', mixedSubLangs: [], colloquialMix: null, isRtl: false };
 }
 
-function getLanguageDisplayName(langCode) {
-  return LANGUAGE_META[langCode]?.name || String(langCode || '英語').toUpperCase();
+function detectLanguage(text, hintedLangCode = null, recognitionProfile = 'ja-en-hi-ur') {
+  return detectLanguageInfo(text, hintedLangCode, recognitionProfile).primaryLang;
 }
 
-function getLanguageBadge(langCode) {
-  return LANGUAGE_META[langCode]?.badge || '🌐';
+// 旧関数名の後方互換維持
+function detectLanguage4(text, hintedLangCode = null) {
+  return detectLanguage(text, hintedLangCode);
+}
+
+/**
+ * 翻訳ルーティング解決（LongFormUtteranceBuffer と TranslationService で共通利用）
+ */
+function resolveTranslationRoute(text, direction = 'auto', partnerLang = 'en', hintedLangCode = null, recognitionProfile = 'ja-en-hi-ur') {
+  const effectivePartner = normalizeLangCode(partnerLang) || 'en';
+  const effectiveProfile = direction === 'en-to-ja' ? 'strict-ja-en' : recognitionProfile;
+  const langInfo = detectLanguageInfo(text, hintedLangCode, effectiveProfile);
+  const hasCodeSwitch = (langInfo.mixedSubLangs && langInfo.mixedSubLangs.length > 0) || Boolean(langInfo.colloquialMix);
+
+  if (direction === 'en-to-ja') {
+    return { srcLang: 'en', targetLang: 'ja', langInfo: { ...langInfo, primaryLang: 'en' }, skipTranslation: false };
+  }
+  if (direction === 'ja-to-partner' || direction === 'ja-to-en') {
+    const target = direction === 'ja-to-en' ? 'en' : effectivePartner;
+    return { srcLang: 'ja', targetLang: target, langInfo: { ...langInfo, primaryLang: 'ja' }, skipTranslation: target === 'ja' };
+  }
+  if (direction === 'bn-to-ja' || direction === 'hi-to-ja' || direction === 'ur-to-ja') {
+    const fixedSrc = direction.split('-')[0];
+    return { srcLang: fixedSrc, targetLang: 'ja', langInfo, skipTranslation: false };
+  }
+  if (direction === 'all-to-ja') {
+    const src = langInfo.primaryLang;
+    return {
+      srcLang: src,
+      targetLang: 'ja',
+      langInfo,
+      skipTranslation: src === 'ja' && !hasCodeSwitch
+    };
+  }
+  if (direction === 'all-to-partner') {
+    const src = langInfo.primaryLang;
+    return {
+      srcLang: src,
+      targetLang: effectivePartner,
+      langInfo,
+      skipTranslation: src === effectivePartner && !hasCodeSwitch
+    };
+  }
+
+  // 'auto': 日本語発話 ➔ 相手言語 (既定: 英語) / その他すべての外国語・混在発話 ➔ 日本語
+  if (langInfo.primaryLang === 'ja') {
+    return {
+      srcLang: 'ja',
+      targetLang: effectivePartner,
+      langInfo,
+      skipTranslation: effectivePartner === 'ja'
+    };
+  }
+  return {
+    srcLang: langInfo.primaryLang,
+    targetLang: 'ja',
+    langInfo,
+    skipTranslation: false
+  };
+}
+
+function getLanguageDisplayName(langCode, mixedSubLangs = [], colloquialMix = null) {
+  const baseName = resolveLanguageMeta(langCode).name;
+  if (Array.isArray(mixedSubLangs) && mixedSubLangs.length > 0) {
+    const subNames = mixedSubLangs.map((c) => resolveLanguageMeta(c).name).join('・');
+    return `${baseName} (${subNames}混在)`;
+  }
+  if (colloquialMix === 'hi-ur') {
+    return `${baseName} (ヒンディー/ウルドゥー口語混在)`;
+  }
+  return baseName;
+}
+
+function getLanguageBadge(langCode, mixedSubLangs = [], colloquialMix = null) {
+  const baseBadge = resolveLanguageMeta(langCode).badge || '🌐';
+  if (Array.isArray(mixedSubLangs) && mixedSubLangs.length > 0) {
+    const firstSubBadge = resolveLanguageMeta(mixedSubLangs[0]).badge;
+    return `${baseBadge}·${firstSubBadge}`;
+  }
+  if (colloquialMix === 'hi-ur') {
+    return `${baseBadge}+`;
+  }
+  return baseBadge;
+}
+
+function formatDocLanguageLabel(langCode, mixedSubLangs = [], colloquialMix = null) {
+  const base = (normalizeLangCode(langCode) || 'auto').toUpperCase();
+  if (Array.isArray(mixedSubLangs) && mixedSubLangs.length > 0) {
+    const subs = mixedSubLangs.map((c) => (normalizeLangCode(c) || c).toUpperCase()).join('+');
+    return `${base}+${subs}`;
+  }
+  if (colloquialMix === 'hi-ur') {
+    return `${base}+HI/UR`;
+  }
+  return base;
 }
 
 function getSpeakerShortLabel(speaker) {
@@ -1030,7 +1421,10 @@ class ConfigManager {
     API_KEY: 'glt_gemini_api_key',
     GAS_URL: 'glt_gas_web_app_url',
     GAS_TOKEN: 'glt_gas_token',
+    RECOGNITION_PROFILE: 'glt_recognition_profile',
     DIRECTION: 'glt_translation_direction',
+    PARTNER_LANG: 'glt_partner_lang',
+    CUSTOM_LANGS: 'glt_custom_langs',
     CATEGORY: 'glt_category',
     AUTO_SAVE: 'glt_auto_save_enabled',
     DOC_MODE: 'glt_doc_mode',
@@ -1725,7 +2119,7 @@ class AudioCaptureService {
 }
 
 // ==========================================
-// 4. Web Speech API Service (Native Fallback)
+// 4. Web Speech API Service (Multilingual Fallback)
 // ==========================================
 class WebSpeechService {
   constructor() {
@@ -1736,6 +2130,8 @@ class WebSpeechService {
     this.onFinalCallback = null;
     this.onErrorCallback = null;
     this.direction = 'auto';
+    this.partnerLang = 'en';
+    this.recognitionProfile = 'ja-en-hi-ur';
     this.restartTimer = null;
   }
 
@@ -1743,22 +2139,34 @@ class WebSpeechService {
     return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   }
 
-  _resolveSpeechLang(direction) {
+  _resolveSpeechLang(direction = this.direction, partnerLang = this.partnerLang) {
     if (direction === 'en-to-ja') return 'en-US';
-    if (direction === 'bn-to-ja') return 'bn-BD';
-    if (direction === 'hi-to-ja') return 'hi-IN';
+    if (direction === 'ja-to-partner' || direction === 'ja-to-en') return 'ja-JP';
+    if (direction === 'bn-to-ja' || direction === 'hi-to-ja' || direction === 'ur-to-ja') {
+      return resolveLanguageMeta(direction.split('-')[0]).speechLang;
+    }
+    if (direction === 'all-to-ja') {
+      return partnerLang && partnerLang !== 'ja' ? resolveLanguageMeta(partnerLang).speechLang : 'en-US';
+    }
     return 'ja-JP';
   }
 
-  setDirection(direction) {
-    this.direction = direction;
+  updateSettings({ direction, partnerLang, recognitionProfile } = {}) {
+    if (direction !== undefined) this.direction = direction;
+    if (partnerLang !== undefined) this.partnerLang = partnerLang;
+    if (recognitionProfile !== undefined) this.recognitionProfile = recognitionProfile;
+
     if (this.recognition && this.isListening) {
-      const targetLang = this._resolveSpeechLang(direction);
+      const targetLang = this._resolveSpeechLang(this.direction, this.partnerLang);
       if (this.recognition.lang !== targetLang) {
         this.recognition.lang = targetLang;
         try { this.recognition.stop(); } catch (e) {}
       }
     }
+  }
+
+  setDirection(direction) {
+    this.updateSettings({ direction });
   }
 
   _initRecognition() {
@@ -1769,7 +2177,7 @@ class WebSpeechService {
     rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
-    rec.lang = this._resolveSpeechLang(this.direction);
+    rec.lang = this._resolveSpeechLang(this.direction, this.partnerLang);
 
     rec.onresult = (event) => {
       if (!this.isListening || this.isPaused) return;
@@ -1780,7 +2188,8 @@ class WebSpeechService {
         if (item.isFinal) {
           const finalTranscript = item[0].transcript.trim();
           if (finalTranscript.length > 0 && this.onFinalCallback) {
-            this.onFinalCallback(finalTranscript, detectLanguage4(finalTranscript, rec.lang));
+            const detected = detectLanguage(finalTranscript, null, this.recognitionProfile);
+            this.onFinalCallback(finalTranscript, detected);
           }
         } else {
           interim += item[0].transcript;
@@ -1824,7 +2233,7 @@ class WebSpeechService {
     return rec;
   }
 
-  start(direction, onInterim, onFinal, onError) {
+  start(direction, onInterim, onFinal, onError, extraOptions = {}) {
     if (!this.isSupported()) {
       const msg = isIPadOrIOS()
         ? 'お使いのブラウザでは音声認識APIが利用できません。iPad/iPhoneでは「Safari」をご利用いただくか、Gemini Liveモードをご利用ください。'
@@ -1833,6 +2242,8 @@ class WebSpeechService {
     }
 
     this.direction = direction;
+    if (extraOptions.partnerLang) this.partnerLang = extraOptions.partnerLang;
+    if (extraOptions.recognitionProfile) this.recognitionProfile = extraOptions.recognitionProfile;
     this.onInterimCallback = onInterim;
     this.onFinalCallback = onFinal;
     this.onErrorCallback = onError;
@@ -1876,7 +2287,7 @@ class WebSpeechService {
 }
 
 // ==========================================
-// 5. Gemini Live WebSocket Client (Bandwidth-Optimized & Auto-Reconnect)
+// 5. Gemini Live WebSocket Client (Tiered Multilingual Bias & Auto-Reconnect)
 // ==========================================
 class GeminiLiveClient {
   static WS_URL = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -1889,6 +2300,9 @@ class GeminiLiveClient {
     this.ws = null;
     this.apiKey = null;
     this.direction = 'auto';
+    this.recognitionProfile = DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE;
+    this.partnerLang = DEFAULT_SETTINGS.DEFAULT_PARTNER_LANG;
+    this.customLangs = [...DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS];
     this.modelName = DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL;
     this.isConnected = false;
     this.isSetupComplete = false;
@@ -1897,6 +2311,7 @@ class GeminiLiveClient {
     this.reconnectAttempt = 0;
     this.chunkQueue = [];
     this.systemInstruction = null;
+    this._fallbackEmptyLangCodes = false;
 
     this._connectResolve = null;
     this._connectReject = null;
@@ -1921,24 +2336,50 @@ class GeminiLiveClient {
     }
   }
 
-  setDirection(direction) {
-    const changed = this.direction !== direction;
-    this.direction = direction;
-    this.log('info', `Gemini Live 認識言語設定を更新: ${direction}`);
+  _getSetupSignature() {
+    return JSON.stringify({
+      codes: this._resolveLanguageCodes(),
+      inst: this._buildEffectiveSystemInstruction()
+    });
+  }
 
-    if (changed && this.isConnected && this.ws && !this.isReconnecting) {
-      this.log('info', `翻訳方向変更 (${direction}) を認識エンジンへ即時反映するためシームレス再接続します...`);
+  updateRecognitionSettings({ direction, recognitionProfile, partnerLang, customLangs, systemInstruction } = {}) {
+    const prevSig = this._getSetupSignature();
+    if (direction !== undefined) this.direction = direction;
+    if (recognitionProfile !== undefined && RECOGNITION_PROFILES[recognitionProfile]) {
+      this.recognitionProfile = recognitionProfile;
+      this._fallbackEmptyLangCodes = false;
+    }
+    if (partnerLang !== undefined) this.partnerLang = normalizeLangCode(partnerLang) || 'en';
+    if (Array.isArray(customLangs) && customLangs.length > 0) {
+      this.customLangs = customLangs.map((c) => normalizeLangCode(c)).filter(Boolean);
+      this._fallbackEmptyLangCodes = false;
+    }
+    if (systemInstruction !== undefined) {
+      this.systemInstruction = systemInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+    }
+
+    const nextSig = this._getSetupSignature();
+    if (prevSig !== nextSig && this.isConnected && this.ws && !this.isReconnecting) {
+      this.log(
+        'info',
+        `認識設定変更 (プロファイル: ${this.recognitionProfile} / 方向: ${this.direction}) をエンジンへ即時反映するためシームレス再接続します...`
+      );
       this._seamlessReconnect()
         .then(() => {
-          this.log('success', `認識言語を ${direction} へ切り替え完了しました。`);
+          this.log('success', `認識言語設定の再適用が完了しました。`);
         })
         .catch((err) => {
-          this.log('warn', `翻訳方向切替に伴う再接続失敗: ${err.message}`);
+          this.log('warn', `設定切替に伴う再接続失敗: ${err.message}`);
           if (!this.manualDisconnect) {
             this._startAutoReconnectLoop(err.closeCode || 1006, err.message);
           }
         });
     }
+  }
+
+  setDirection(direction) {
+    this.updateRecognitionSettings({ direction });
   }
 
   _normalizeModelName(model) {
@@ -1960,6 +2401,18 @@ class GeminiLiveClient {
 
   connect(apiKey, direction, modelName, systemInstruction = null, options = {}) {
     const preserveQueue = !!options.preserveQueue;
+    if (options.recognitionProfile && RECOGNITION_PROFILES[options.recognitionProfile]) {
+      this.recognitionProfile = options.recognitionProfile;
+    }
+    if (options.partnerLang) {
+      this.partnerLang = normalizeLangCode(options.partnerLang) || 'en';
+    }
+    if (Array.isArray(options.customLangs) && options.customLangs.length > 0) {
+      this.customLangs = options.customLangs.map((c) => normalizeLangCode(c)).filter(Boolean);
+    }
+    if (!preserveQueue && !options._retryingEmptyLangCodes) {
+      this._fallbackEmptyLangCodes = false;
+    }
 
     return new Promise((resolve, reject) => {
       this.apiKey = apiKey;
@@ -2031,8 +2484,6 @@ class GeminiLiveClient {
 
       socket.onerror = () => {
         if (this.ws !== socket) return;
-        // ブラウザ仕様上 onerror の直後に onclose(event.code) が発火するため、
-        // ここではログ記録のみ行い、Close Code (1006/1007/1008等) の正確な判定を onclose へ委ねる
         this.log('error', 'WebSocket通信エラーを検知しました（切断コードを確認中...）。');
       };
 
@@ -2048,6 +2499,29 @@ class GeminiLiveClient {
         this.ws = null;
 
         if (this._connectReject) {
+          // 特定のBCP-47言語コードがサーバー側で拒否された場合 (1007)、自動言語識別 (languageCodes: []) で1回だけ自動リトライ
+          if (
+            event.code === 1007 &&
+            !this._fallbackEmptyLangCodes &&
+            this._resolveLanguageCodes().length > 0 &&
+            !this.manualDisconnect
+          ) {
+            this.log(
+              'warn',
+              '指定BCP-47言語コードの一部が非対応のため (Code: 1007)、自動言語識別 (languageCodes: []) に切り替えて即時再接続します...'
+            );
+            this._fallbackEmptyLangCodes = true;
+            const pendingResolve = this._connectResolve;
+            const pendingReject = this._connectReject;
+            this._connectResolve = null;
+            this._connectReject = null;
+            this.connect(this.apiKey, this.direction, this.modelName, this.systemInstruction, {
+              preserveQueue,
+              _retryingEmptyLangCodes: true
+            }).then(pendingResolve, pendingReject);
+            return;
+          }
+
           let errorMsg = `接続が切断されました (Code: ${event.code})`;
           if (event.code === 1006) {
             errorMsg = 'Gemini Live APIに接続できませんでした (Code: 1006)。通信状態・APIキーまたはモデル権限を確認してください。';
@@ -2313,41 +2787,127 @@ class GeminiLiveClient {
     }
   }
 
+  _resolveLanguageCodes() {
+    if (this._fallbackEmptyLangCodes) return [];
+
+    // 1. 翻訳方向の厳密単一言語ロック
+    if (this.direction === 'en-to-ja') return ['en-US', 'en-IN'];
+    if (this.direction === 'ja-to-partner' || this.direction === 'ja-to-en') return ['ja-JP'];
+    if (this.direction === 'bn-to-ja') return ['bn-BD', 'bn-IN', 'en-US'];
+    if (this.direction === 'hi-to-ja') return ['hi-IN', 'en-US'];
+    if (this.direction === 'ur-to-ja') return ['ur-PK', 'en-US'];
+
+    // 2. 認識プロファイル別のBCP-47音響バイアス解決
+    if (this.recognitionProfile === 'strict-ja-en') {
+      return ['ja-JP', 'en-US', 'en-IN'];
+    }
+    if (this.recognitionProfile === 'multilingual-auto') {
+      // 空配列により Gemini 3.5 Transcribe Live の85+言語自動識別＆コードスイッチングを有効化
+      return [];
+    }
+    if (this.recognitionProfile === 'multilingual-custom') {
+      const codes = new Set();
+      const selected = Array.isArray(this.customLangs) && this.customLangs.length > 0
+        ? this.customLangs
+        : DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS;
+      for (const lang of selected) {
+        const meta = resolveLanguageMeta(lang);
+        for (const c of meta.bcp47) codes.add(c);
+      }
+      if ((this.direction === 'auto' || this.direction === 'all-to-partner') && this.partnerLang) {
+        for (const c of resolveLanguageMeta(this.partnerLang).bcp47) codes.add(c);
+      }
+      return codes.size > 0 ? Array.from(codes) : ['ja-JP', 'en-US'];
+    }
+
+    // 既定: 'ja-en-hi-ur'（日英最優先 ＋ 英語雑談内のヒンディー語・ウルドゥー語補足）
+    const baseCodes = new Set(RECOGNITION_PROFILES['ja-en-hi-ur'].languageCodes);
+    // 相手言語が明示的に別の言語（ベンガル語・ベトナム語・スペイン語等）へ変更されている場合は認識候補にも自動追加
+    if (
+      (this.direction === 'auto' || this.direction === 'all-to-partner') &&
+      this.partnerLang &&
+      !['ja', 'en', 'hi', 'ur'].includes(this.partnerLang)
+    ) {
+      for (const c of resolveLanguageMeta(this.partnerLang).bcp47) {
+        baseCodes.add(c);
+      }
+    }
+    return Array.from(baseCodes);
+  }
+
   _buildEffectiveSystemInstruction() {
     const rawUserInstruction = (this.systemInstruction || '').trim();
-    const isDefault = !rawUserInstruction || rawUserInstruction === DEFAULT_SYSTEM_INSTRUCTION.trim();
+    const isDefault = isDefaultOrLegacySystemInstruction(rawUserInstruction);
 
-    const lockRules = {
+    const directionLocks = {
       'en-to-ja':
-        'STRICT LANGUAGE LOCK (ENGLISH ONLY): You are transcribing spoken English for maritime and safety audits. ' +
+        'STRICT LANGUAGE LOCK (ENGLISH ONLY): You are transcribing spoken English. ' +
         'Transcribe ALL speech STRICTLY in English using standard Latin alphabet characters ONLY. ' +
-        'Even if the speaker has a South Asian (Indian/Bangladeshi), Japanese, or other non-native accent, or if audio is noisy, ' +
+        'Even if the speaker has a South Asian (Indian/Pakistani/Bangladeshi), Japanese, or other non-native accent, or if audio is noisy, ' +
         'ALWAYS transcribe it as English words in the Latin alphabet. ' +
-        'NEVER output Hindi (Devanagari script), Bengali script, Japanese, Korean, or any non-Latin characters.',
+        'NEVER output Hindi (Devanagari), Urdu/Arabic, Bengali, Japanese, Korean, or any non-Latin characters.',
+      'ja-to-partner':
+        'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese. ' +
+        'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard English technical abbreviations). ' +
+        'NEVER output Hindi, Urdu, Bengali, Korean, or other foreign scripts.',
       'ja-to-en':
-        'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese for maritime and safety audits. ' +
-        'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard maritime abbreviations like HKC/IHM/EU-SRR). ' +
-        'NEVER output Hindi (Devanagari), Bengali, Korean, or Swahili characters.',
+        'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese. ' +
+        'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard English technical abbreviations). ' +
+        'NEVER output Hindi, Urdu, Bengali, Korean, or other foreign scripts.',
       'bn-to-ja':
-        'STRICT LANGUAGE LOCK (BENGALI & ENGLISH ONLY): Transcribe speech ONLY in Bengali (বাংলা) and/or English (for code-mixing/technical terms). ' +
-        'NEVER output Hindi (Devanagari script), Korean, or other unlisted languages.',
+        'STRICT LANGUAGE LOCK (BENGALI & ENGLISH ONLY): Transcribe speech ONLY in Bengali (বাংলা) and/or English (for code-mixing/technical terms).',
       'hi-to-ja':
-        'STRICT LANGUAGE LOCK (HINDI & ENGLISH ONLY): Transcribe speech ONLY in Hindi (हिन्दी) and/or English (for code-mixing/technical terms). ' +
-        'NEVER output Bengali script, Korean, or other unlisted languages.'
+        'STRICT LANGUAGE LOCK (HINDI & ENGLISH ONLY): Transcribe speech ONLY in Hindi (हिन्दी) and/or English (for code-mixing/technical terms).',
+      'ur-to-ja':
+        'STRICT LANGUAGE LOCK (URDU & ENGLISH ONLY): Transcribe speech ONLY in Urdu (اردو) and/or English (for code-mixing/technical terms).'
     };
 
-    const lock = lockRules[this.direction];
-    if (lock) {
-      return isDefault ? lock : `${rawUserInstruction}\n\n[HIGHEST PRIORITY OVERRIDE - ${lock}]`;
+    const dirLock = directionLocks[this.direction];
+    if (dirLock) {
+      return isDefault ? dirLock : `${rawUserInstruction}\n\n[HIGHEST PRIORITY OVERRIDE - ${dirLock}]`;
     }
-    return rawUserInstruction || DEFAULT_SYSTEM_INSTRUCTION;
+
+    let profileInstruction = DEFAULT_SYSTEM_INSTRUCTION;
+    if (this.recognitionProfile === 'strict-ja-en') {
+      profileInstruction =
+        'STRICT BILINGUAL LOCK (JAPANESE & ENGLISH ONLY): Transcribe speech ONLY into natural Japanese (日本語) or English (Latin alphabet). ' +
+        'Even if speakers have strong regional accents or background noise is present, ALWAYS transcribe as English or Japanese. ' +
+        'NEVER output Devanagari, Urdu/Arabic, Bengali, Korean, Cyrillic, or any other scripts.';
+    } else if (this.recognitionProfile === 'multilingual-auto') {
+      profileInstruction =
+        'MULTILINGUAL SPEECH TRANSCRIPTION (85+ LANGUAGES WITH EN/JA TOP PRIORITY): ' +
+        '1. Give top priority to English and Japanese (日本語) whenever speech is accented English, Japanese, or ambiguous short technical phrases. ' +
+        '2. Accurately transcribe any clearly spoken global language (including Japanese, English, Hindi, Urdu, Bengali, Chinese, Korean, Vietnamese, Indonesian, Filipino/Tagalog, Thai, Burmese, Arabic, Persian, Turkish, Spanish, French, German, Portuguese, Russian, Italian, etc.) in its natural script, including Hindi/Urdu casual phrases mixed into English conversation (code-switching). ' +
+        '3. Do not hallucinate text or random scripts during silence or background noise.';
+    } else if (this.recognitionProfile === 'multilingual-custom') {
+      const activeCodes = new Set(this.customLangs.length > 0 ? this.customLangs : DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS);
+      if ((this.direction === 'auto' || this.direction === 'all-to-partner') && this.partnerLang) {
+        activeCodes.add(this.partnerLang);
+      }
+      const langNames = Array.from(activeCodes).map((c) => resolveLanguageMeta(c).englishName).join(', ');
+      profileInstruction =
+        `CUSTOM MULTILINGUAL TRANSCRIPTION: Only transcribe speech into the following enabled languages: ${langNames}. ` +
+        'Give highest priority to English and Japanese when enabled, and naturally handle code-switching (such as Hindi/Urdu words mixed in English). ' +
+        'Do not transcribe into any unlisted languages.';
+    } else if (
+      (this.direction === 'auto' || this.direction === 'all-to-partner') &&
+      this.partnerLang &&
+      !['ja', 'en', 'hi', 'ur'].includes(this.partnerLang)
+    ) {
+      const partnerName = resolveLanguageMeta(this.partnerLang).englishName;
+      profileInstruction =
+        `${DEFAULT_SYSTEM_INSTRUCTION} Additionally, ${partnerName} is enabled as an active conversation language—transcribe clearly spoken ${partnerName} accurately in its standard script.`;
+    }
+
+    if (isDefault) return profileInstruction;
+    return `${rawUserInstruction}\n\n[ACTIVE PROFILE GUIDANCE]: ${profileInstruction}`;
   }
 
   _sendSetupMessage(targetSocket = null) {
     const sock = targetSocket || this.ws;
     if (!sock || sock.readyState !== WebSocket.OPEN) return;
 
-    const languageCodes = DIRECTION_LANGUAGE_CODES[this.direction] || DIRECTION_LANGUAGE_CODES.auto;
+    const languageCodes = this._resolveLanguageCodes();
     const effectiveInstruction = this._buildEffectiveSystemInstruction();
 
     const setupPayload = {
@@ -2359,7 +2919,8 @@ class GeminiLiveClient {
       }
     };
 
-    this.log('info', `Setup送信 (方向: ${this.direction} | 言語指定: ${languageCodes.join(', ')})`);
+    const langLabel = languageCodes.length > 0 ? languageCodes.join(', ') : 'AUTO (85+多言語自動識別)';
+    this.log('info', `Setup送信 (プロファイル: ${this.recognitionProfile} | 方向: ${this.direction} | 言語指定: ${langLabel})`);
     sock.send(JSON.stringify(setupPayload));
   }
 
@@ -2486,7 +3047,7 @@ class GeminiTextClient {
 }
 
 // ==========================================
-// 7. Translation Service & Resilient FIFO Queue
+// 7. Translation Service & Resilient FIFO Queue (Multilingual + Code-Switch Nuance)
 // ==========================================
 class TranslationService {
   constructor(geminiTextClient) {
@@ -2502,8 +3063,34 @@ class TranslationService {
     }
   }
 
-  enqueue(text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextProvider = null, customPrompt = '') {
-    this.queue.push({ text, direction, category, apiKey, gasUrl, gasToken, recordId, onComplete, contextProvider, customPrompt });
+  enqueue(
+    text,
+    direction,
+    category,
+    apiKey,
+    gasUrl,
+    gasToken,
+    recordId,
+    onComplete,
+    contextProvider = null,
+    customPrompt = '',
+    extraOptions = {}
+  ) {
+    this.queue.push({
+      text,
+      direction,
+      category,
+      apiKey,
+      gasUrl,
+      gasToken,
+      recordId,
+      onComplete,
+      contextProvider,
+      customPrompt,
+      partnerLang: extraOptions.partnerLang || 'en',
+      recognitionProfile: extraOptions.recognitionProfile || 'ja-en-hi-ur',
+      hintedLangCode: extraOptions.hintedLangCode || null
+    });
     this._processNext();
   }
 
@@ -2545,18 +3132,25 @@ class TranslationService {
     return clean.length <= maxChars ? clean : '…' + clean.slice(-maxChars).trim();
   }
 
-  _resolveLanguagePair(text, direction) {
-    if (direction === 'ja-to-en') return { srcLang: 'ja', targetLang: 'en' };
-    if (direction === 'en-to-ja') return { srcLang: 'en', targetLang: 'ja' };
-    if (direction === 'bn-to-ja') return { srcLang: 'bn', targetLang: 'ja' };
-    if (direction === 'hi-to-ja') return { srcLang: 'hi', targetLang: 'ja' };
-    const srcLang = detectLanguage4(text);
-    return { srcLang, targetLang: srcLang === 'ja' ? 'en' : 'ja' };
+  _resolveLanguagePair(text, direction, partnerLang = 'en', hintedLangCode = null, recognitionProfile = 'ja-en-hi-ur') {
+    return resolveTranslationRoute(text, direction, partnerLang, hintedLangCode, recognitionProfile);
   }
 
-  _buildPrompt({ text, direction, category, srcLang, targetLang, validContext, customPrompt }) {
-    const srcName = LANGUAGE_META[srcLang]?.englishName || 'the source language';
-    const targetName = LANGUAGE_META[targetLang]?.englishName || 'Japanese';
+  _buildDomainHint(category) {
+    if (!category || category === 'Common') {
+      return ' Domain context: General international business meeting, technical discussion, and workplace communication.';
+    }
+    if (category === 'Casual') {
+      return ' Domain context: Casual workplace conversation, informal small talk, and everyday team discussion.';
+    }
+    return ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate regulatory and technical terminology.`;
+  }
+
+  _buildPrompt({ text, direction, category, srcLang, targetLang, langInfo, recognitionProfile, validContext, customPrompt }) {
+    const srcMeta = resolveLanguageMeta(srcLang);
+    const targetMeta = resolveLanguageMeta(targetLang);
+    const srcName = srcMeta.englishName || 'the source language';
+    const targetName = targetMeta.englishName || 'Japanese';
 
     let contextBlock = '';
     if (validContext.length > 0) {
@@ -2590,13 +3184,11 @@ class TranslationService {
         sections.join('\n\n') + '\n\n';
     }
 
-    const domainHint = category
-      ? ` Domain context: Maritime Ship Recycling / Safety Audit (${category}). Use accurate technical terminology.`
-      : '';
+    const domainHint = this._buildDomainHint(category);
 
     const longFormInstruction = targetLang === 'ja'
       ? '5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.\n'
-      : '5. Produce fluent, natural, and accurate business English preserving the speaker\'s complete meaning.\n';
+      : `5. Produce fluent, natural, and well-structured ${targetName} preserving the speaker's complete meaning, tone, and logical flow.\n`;
 
     const contextUsageInstruction = validContext.length > 0
       ? (targetLang === 'ja'
@@ -2606,36 +3198,57 @@ class TranslationService {
           '   - If the preceding turn was a question or remark by another speaker, phrase the Japanese naturally as a response or follow-up to it.\n' +
           '   - Keep technical terminology, proper nouns, abbreviations, and register/politeness consistent with the previous Japanese translations.\n' +
           '   - If ASR misheard a technical term in [Text to Translate], disambiguate it using the topic established in the prior context.\n'
-        : '6. CONTEXT-AWARE TRANSLATION: Use [Previous Conversation Context] to resolve pronouns, omitted subjects, and domain terminology consistently with previous turns, ensuring natural continuity without re-translating prior turns.\n')
+        : `6. CONTEXT-AWARE TRANSLATION: Use [Previous Conversation Context] to resolve pronouns, omitted subjects, and domain terminology consistently with previous turns in ${targetName}, ensuring natural continuity without re-translating prior turns.\n`)
       : '';
 
     const isStrictEnglishToJa = direction === 'en-to-ja';
-    const isStrictJaToEnglish = direction === 'ja-to-en';
+    const isStrictJaSource = direction === 'ja-to-partner' || direction === 'ja-to-en';
+    const hasHiUrMix =
+      (Array.isArray(langInfo?.mixedSubLangs) && langInfo.mixedSubLangs.some((l) => l === 'hi' || l === 'ur')) ||
+      langInfo?.colloquialMix === 'hi-ur';
 
-    const culturalContextLine = isStrictEnglishToJa
-      ? 'Context: The speaker is speaking English (possibly with a non-native accent). If minor speech-recognition artifacts or misrecognized characters appear, infer the intended English meaning from the surrounding maritime audit context.\n'
-      : isStrictJaToEnglish
-      ? 'Context: The speaker is speaking Japanese during a maritime/safety audit.\n'
-      : 'Context: In shipyard audits (e.g. Bangladesh / India), local personnel often speak in English with Bengali or Hindi words mixed in (code-mixing/Benglish).\n';
+    let culturalContextLine = '';
+    let constraint3And4 = '';
 
-    const constraint3And4 = isStrictEnglishToJa
-      ? '3. Treat the input strictly as English speech to be translated into natural Japanese.\n' +
-        '4. Do not leave stray foreign words untranslated; express the complete intended meaning clearly in natural Japanese.\n'
-      : isStrictJaToEnglish
-      ? '3. Treat the input strictly as Japanese speech to be translated into natural, professional English.\n' +
-        '4. Preserve maritime/regulatory abbreviations (e.g., HKC, IHM, EU-SRR, SRFP, HSE) accurately.\n'
-      : '3. The input must ONLY be interpreted within Japanese, English, Bengali, or Hindi. Never interpret as Korean, Swahili, or any other language.\n' +
-        '4. If the speaker speaks English mixed with Bengali or Hindi terms, seamlessly translate the complete intended meaning into natural Japanese.\n';
+    if (isStrictEnglishToJa) {
+      culturalContextLine =
+        'Context: The speaker is speaking English (possibly with a non-native accent). If minor speech-recognition artifacts appear, infer the intended English meaning from surrounding context.\n';
+      constraint3And4 =
+        '3. Treat the input strictly as English speech to be translated into natural Japanese.\n' +
+        '4. Do not leave stray foreign words untranslated; express the complete intended meaning clearly in natural Japanese.\n';
+    } else if (isStrictJaSource) {
+      culturalContextLine =
+        'Context: The speaker is speaking Japanese.\n';
+      constraint3And4 =
+        `3. Treat the input strictly as Japanese speech to be translated into natural, idiomatic ${targetName}.\n` +
+        '4. Preserve technical abbreviations and proper nouns (e.g., HKC, IHM, EU-SRR, HSE) accurately.\n';
+    } else if (hasHiUrMix || recognitionProfile === 'ja-en-hi-ur') {
+      culturalContextLine =
+        'Context: Primary priority is accurate English and Japanese comprehension. However, in casual English conversation, speakers may mix in Hindi (हिन्दी) or Urdu (اردو) words, greetings, fillers, or side-remarks (either in Devanagari/Urdu script or Romanized Hinglish/Roman Urdu such as "accha", "theek hai", "bhai", "yaar", "inshallah", "shukriya", "nahi", "chalo", "lekin", "abhi", "kal").\n';
+      constraint3And4 =
+        '3. Prioritize standard English and Japanese meanings first whenever phrasing is standard English/Japanese or technical terminology.\n' +
+        `4. When Hindi or Urdu words/phrases are mixed into English speech (code-switching), do NOT leave them untranslated or misread them as English typos—seamlessly integrate their conversational meaning and nuance (agreement, hesitation, friendliness, timing) into natural ${targetName}.\n`;
+    } else {
+      culturalContextLine =
+        'Context: Multilingual conversation where speakers may use any global language or code-switch (including English mixed with Hindi, Urdu, Bengali, or other local languages).\n';
+      constraint3And4 =
+        `3. Accurately interpret ${srcName} as well as any code-switched English, Hindi, Urdu, or other phrases within [Text to Translate], giving priority to English/Japanese accuracy on technical acronyms.\n` +
+        `4. Express the complete intended meaning seamlessly in natural ${targetName} without leaving untranslated fragments.\n`;
+    }
 
     const trimmedCustomPrompt = String(customPrompt || '').trim();
     const customPromptBlock = trimmedCustomPrompt
       ? `[Additional Theme & Nuance Instructions — Follow these tone, domain, and terminology preferences while STRICTLY obeying constraints 1 and 2 (output ONLY the translation with no commentary)]:\n${trimmedCustomPrompt}\n\n`
       : '';
 
+    const sourceLabel = hasHiUrMix
+      ? `${srcName} (with code-switched Hindi/Urdu phrases)`
+      : srcName;
+
     return (
-      `You are a professional consecutive/simultaneous interpreter specializing in maritime audit and safety.${domainHint}\n` +
+      `You are an expert multilingual consecutive/simultaneous interpreter.${domainHint}\n` +
       culturalContextLine +
-      `Translate ONLY the [Text to Translate] from ${srcName} into fluent, natural, and accurate ${targetName}.\n` +
+      `Translate ONLY the [Text to Translate] from ${sourceLabel} into fluent, natural, and accurate ${targetName}.\n` +
       'STRICT CONSTRAINTS:\n' +
       '1. Return ONLY the direct translation of [Text to Translate].\n' +
       '2. Do not include quotes, explanations, language labels, prefixes, or notes.\n' +
@@ -2648,16 +3261,56 @@ class TranslationService {
     );
   }
 
-  async _executeTranslation({ text, direction, category, apiKey, gasUrl, gasToken, contextRecords = [], customPrompt = '' }) {
-    if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja' };
+  async _executeTranslation({
+    text,
+    direction,
+    category,
+    apiKey,
+    gasUrl,
+    gasToken,
+    contextRecords = [],
+    customPrompt = '',
+    partnerLang = 'en',
+    recognitionProfile = 'ja-en-hi-ur',
+    hintedLangCode = null
+  }) {
+    if (!text || text.trim() === '') return { translated: '', speakerLang: 'ja', mixedSubLangs: [], colloquialMix: null };
 
-    const { srcLang, targetLang } = this._resolveLanguagePair(text, direction);
+    const { srcLang, targetLang, langInfo, skipTranslation } = this._resolveLanguagePair(
+      text,
+      direction,
+      partnerLang,
+      hintedLangCode,
+      recognitionProfile
+    );
+
+    if (skipTranslation) {
+      this.log('info', `原文と翻訳先が同一言語 (${getLanguageDisplayName(srcLang)}) のため翻訳APIをスキップして確定しました。`);
+      return {
+        translated: text.trim(),
+        speakerLang: srcLang,
+        mixedSubLangs: langInfo.mixedSubLangs || [],
+        colloquialMix: langInfo.colloquialMix || null,
+        skipped: true
+      };
+    }
+
     const validContext = Array.isArray(contextRecords)
       ? contextRecords.filter((c) => c && (c.original || c.translated))
       : [];
 
     const trimmedCustomPrompt = String(customPrompt || '').trim();
-    const prompt = this._buildPrompt({ text, direction, category, srcLang, targetLang, validContext, customPrompt: trimmedCustomPrompt });
+    const prompt = this._buildPrompt({
+      text,
+      direction,
+      category,
+      srcLang,
+      targetLang,
+      langInfo,
+      recognitionProfile,
+      validContext,
+      customPrompt: trimmedCustomPrompt
+    });
 
     // Layer 1: Shared Gemini REST Client
     if (apiKey && apiKey.trim() !== '') {
@@ -2671,9 +3324,18 @@ class TranslationService {
           logTag: 'Translation'
         });
         const ctxNote = validContext.length > 0 ? ` / 文脈${validContext.length}件参照` : '';
+        const mixNote = (langInfo.mixedSubLangs?.length || langInfo.colloquialMix) ? ' / 混在補完' : '';
         const customNote = trimmedCustomPrompt ? ' / 追記プロンプト適用' : '';
-        this.log('success', `Gemini (${res.model}) 長文翻訳完了 (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${customNote})`);
-        return { translated: res.text, speakerLang: srcLang };
+        this.log(
+          'success',
+          `Gemini (${res.model}) 翻訳完了 [${srcLang.toUpperCase()}➔${targetLang.toUpperCase()}] (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${mixNote}${customNote})`
+        );
+        return {
+          translated: res.text,
+          speakerLang: srcLang,
+          mixedSubLangs: langInfo.mixedSubLangs || [],
+          colloquialMix: langInfo.colloquialMix || null
+        };
       } catch (err) {
         this.log('warn', `Gemini 翻訳全モデル失敗 (${err.message})`);
       }
@@ -2684,6 +3346,7 @@ class TranslationService {
     // Layer 2: GAS Web App (LanguageApp) Fallback
     if (gasUrl && gasUrl.trim() !== '') {
       this.log('info', 'GAS (LanguageApp) による自動フォールバック翻訳を実行中...');
+      const hasMix = (langInfo.mixedSubLangs && langInfo.mixedSubLangs.length > 0) || Boolean(langInfo.colloquialMix);
       try {
         const gasRes = await fetchWithTimeout(gasUrl.trim(), {
           method: 'POST',
@@ -2694,7 +3357,7 @@ class TranslationService {
             action: 'translate',
             token: gasToken || '',
             text,
-            srcLang,
+            srcLang: hasMix ? 'auto' : srcLang,
             targetLang
           })
         }, 20000);
@@ -2703,7 +3366,12 @@ class TranslationService {
           const gasData = await gasRes.json();
           if (gasData.status === 'success' && gasData.translated) {
             this.log('success', `GAS翻訳完了: "${gasData.translated}"`);
-            return { translated: gasData.translated.trim(), speakerLang: srcLang };
+            return {
+              translated: gasData.translated.trim(),
+              speakerLang: srcLang,
+              mixedSubLangs: langInfo.mixedSubLangs || [],
+              colloquialMix: langInfo.colloquialMix || null
+            };
           }
           if (gasData.message) this.log('warn', `GAS翻訳応答エラー: ${gasData.message}`);
         } else {
@@ -2717,13 +3385,15 @@ class TranslationService {
 
     return {
       translated: '【翻訳取得失敗: APIキーまたはGAS設定を確認してください】',
-      speakerLang: srcLang
+      speakerLang: srcLang,
+      mixedSubLangs: langInfo.mixedSubLangs || [],
+      colloquialMix: langInfo.colloquialMix || null
     };
   }
 }
 
 // ==========================================
-// 8. Summary Service (On-Demand Lookback Summarizer)
+// 8. Summary Service (On-Demand Lookback Japanese Summarizer)
 // ==========================================
 class SummaryService {
   constructor(geminiTextClient) {
@@ -2747,6 +3417,7 @@ class SummaryService {
       for (const r of records) {
         const timeStr = r.time || '--:--:--';
         const spk = r.speaker || '発話';
+        const langTag = formatDocLanguageLabel(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
         const orig = String(r.originalText || '').trim();
         const hasValidTrans =
           !r.isTranslating &&
@@ -2756,7 +3427,7 @@ class SummaryService {
         const trans = hasValidTrans ? r.translatedText.trim() : '';
 
         if (orig || trans) {
-          let entry = `[${timeStr}] (${spk})`;
+          let entry = `[${timeStr}] (${spk} / ${langTag})`;
           if (trans && orig && trans !== orig) {
             entry += `\n  訳文: ${trans}\n  原文: ${orig}`;
           } else {
@@ -2782,18 +3453,21 @@ class SummaryService {
       transcriptText = '…(古い一部発話を省略)…\n\n' + transcriptText.slice(-MAX_INPUT_CHARS);
     }
 
-    const domainHint = category
-      ? `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）は正確に保持してください。`
-      : '';
+    let domainHint = '対象分野: 一般ビジネス会議・国際打ち合わせ。専門用語や固有名詞・略称は正確に保持してください。';
+    if (category === 'Casual') {
+      domainHint = '対象分野: 一般会議・ビジネス雑談・日常対話。英語の雑談中に混じるヒンディー語やウルドゥー語等の発言意図も含めて自然に整理してください。';
+    } else if (category && category !== 'Common') {
+      domainHint = `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）は正確に保持してください。`;
+    }
 
     const customThemeHint = String(customPrompt || '').trim()
       ? `\n【ユーザー指定のテーマ・ニュアンス方針】\n${String(customPrompt).trim()}\n`
       : '';
 
     const prompt =
-      'あなたは海事・現地監査および国際会議に精通した優秀な議事録作成・要約アシスタントです。\n' +
+      'あなたは多言語会議・現地監査・国際コミュニケーションに精通した優秀な議事録作成・要約アシスタントです。\n' +
       `${domainHint}\n` +
-      `以下の会話ログ（対象範囲: ${rangeLabel}）を読み、日本語で簡潔かつ実務にすぐ使える構造化サマリーを作成してください。\n` +
+      `以下の多言語会話ログ（対象範囲: ${rangeLabel}）を読み、日本語で簡潔かつ実務にすぐ使える構造化サマリーを作成してください。\n` +
       customThemeHint +
       '\n【出力ルール】\n' +
       '1. 必ず以下のMarkdown見出し構成で日本語出力すること（該当内容が全く無い見出しは省略可）：\n' +
@@ -2804,7 +3478,7 @@ class SummaryService {
       '### 確認事項・合意・今後のアクション / 課題\n' +
       '- 決定事項、宿題、懸念点、未解決の課題があれば箇条書きで整理\n\n' +
       '2. ログに含まれていない事実・数値・結論を推測や創作で補わないこと。\n' +
-      '3. 音声認識の軽微な誤字・言い直しは前後文脈から自然に補正してまとめること。\n' +
+      '3. 多言語発話や英語に混じるヒンディー語・ウルドゥー語等のコードスイッチング、および音声認識の軽微な誤字・言い直しは前後文脈から自然に補正して日本語でまとめること。\n' +
       '4. 前置き（「以下がサマリーです」等）や締めの挨拶は書かず、最初の「### 要点サマリー」から直接出力すること。\n\n' +
       `【会話ログ（時系列順）】\n${transcriptText}`;
 
@@ -2888,7 +3562,10 @@ class GasStorageClient {
     }
   }
 
-  static async saveTranscript(gasUrl, { documentId, title, folderId, records, direction, category, model, token, saveMode = 'sync' }) {
+  static async saveTranscript(
+    gasUrl,
+    { documentId, title, folderId, records, direction, partnerLang, recognitionProfile, category, model, token, saveMode = 'sync' }
+  ) {
     const trimmedUrl = GasStorageClient._validateGasUrl(gasUrl);
     if (!records || records.length === 0) throw new Error('保存対象の確定翻訳レコードがありません。');
 
@@ -2901,8 +3578,10 @@ class GasStorageClient {
       folderId: extractedFolderId,
       outputFolderId: extractedFolderId,
       model: model || DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL,
-      direction: direction || 'AUTO',
-      category: category || 'HKC',
+      direction: direction || 'auto',
+      partnerLang: partnerLang || 'en',
+      recognitionProfile: recognitionProfile || DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE,
+      category: category || DEFAULT_SETTINGS.DEFAULT_CATEGORY,
       saveMode,
       records
     };
@@ -2938,21 +3617,21 @@ class GasStorageClient {
 }
 
 // ==========================================
-// 10. LongFormUtteranceBuffer (Real-time Original + Long-Form Japanese Aggregator)
+// 10. LongFormUtteranceBuffer (Code-Switch-Safe & Multilingual Punctuation Aggregator)
 // ==========================================
 class LongFormUtteranceBuffer {
   static PRESETS = Object.freeze({
     'long': {
       ja: { silenceMs: 4000, minCharsForSentenceEnd: 260, hardMaxChars: 520, maxWaitMs: 28000 },
-      en: { silenceMs: 2000, minCharsForSentenceEnd: 80, hardMaxChars: 200, maxWaitMs: 15000 }
+      other: { silenceMs: 2000, minCharsForSentenceEnd: 85, hardMaxChars: 220, maxWaitMs: 15000 }
     },
     'extra-long': {
       ja: { silenceMs: 6000, minCharsForSentenceEnd: 420, hardMaxChars: 800, maxWaitMs: 45000 },
-      en: { silenceMs: 2800, minCharsForSentenceEnd: 130, hardMaxChars: 300, maxWaitMs: 20000 }
+      other: { silenceMs: 2800, minCharsForSentenceEnd: 135, hardMaxChars: 320, maxWaitMs: 20000 }
     },
     'balanced': {
       ja: { silenceMs: 2200, minCharsForSentenceEnd: 120, hardMaxChars: 280, maxWaitMs: 16000 },
-      en: { silenceMs: 1500, minCharsForSentenceEnd: 45, hardMaxChars: 150, maxWaitMs: 12000 }
+      other: { silenceMs: 1500, minCharsForSentenceEnd: 50, hardMaxChars: 160, maxWaitMs: 12000 }
     }
   });
 
@@ -2963,23 +3642,40 @@ class LongFormUtteranceBuffer {
 
     this.mode = 'long';
     this.direction = 'auto';
+    this.partnerLang = 'en';
+    this.recognitionProfile = DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE;
 
     this.committedText = '';
     this.currentInterim = '';
     this.bufferLangHint = null;
+    this.bufferPrimaryLang = null;
     this.bufferTargetLang = 'ja';
+    this.bufferSkipTranslation = false;
     this._afterTurnComplete = false;
 
     this.silenceTimer = null;
     this.maxWaitTimer = null;
   }
 
-  setConfig({ mode, direction }) {
+  setConfig({ mode, direction, partnerLang, recognitionProfile } = {}) {
     if (mode && LongFormUtteranceBuffer.PRESETS[mode]) {
       this.mode = mode;
     }
-    if (direction) {
+    if (direction !== undefined) {
       this.direction = direction;
+    }
+    if (partnerLang !== undefined) {
+      this.partnerLang = normalizeLangCode(partnerLang) || 'en';
+    }
+    if (recognitionProfile !== undefined && RECOGNITION_PROFILES[recognitionProfile]) {
+      this.recognitionProfile = recognitionProfile;
+    }
+    if (!this.hasPendingText()) {
+      const isJaSourceFixed = this.direction === 'ja-to-partner' || this.direction === 'ja-to-en';
+      this.bufferTargetLang = isJaSourceFixed
+        ? (this.direction === 'ja-to-en' ? 'en' : this.partnerLang)
+        : (this.direction === 'all-to-partner' ? this.partnerLang : 'ja');
+      this.bufferSkipTranslation = false;
     }
     this._notifyDisplay();
   }
@@ -3000,7 +3696,12 @@ class LongFormUtteranceBuffer {
     this.committedText = '';
     this.currentInterim = '';
     this.bufferLangHint = null;
-    this.bufferTargetLang = this.direction === 'ja-to-en' ? 'en' : 'ja';
+    this.bufferPrimaryLang = null;
+    const isJaSourceFixed = this.direction === 'ja-to-partner' || this.direction === 'ja-to-en';
+    this.bufferTargetLang = isJaSourceFixed
+      ? (this.direction === 'ja-to-en' ? 'en' : this.partnerLang)
+      : (this.direction === 'all-to-partner' ? this.partnerLang : 'ja');
+    this.bufferSkipTranslation = false;
     this._afterTurnComplete = false;
     this._notifyDisplay();
   }
@@ -3022,32 +3723,70 @@ class LongFormUtteranceBuffer {
 
   _getPresetConfig(targetLang) {
     const preset = LongFormUtteranceBuffer.PRESETS[this.mode] || LongFormUtteranceBuffer.PRESETS.long;
-    return targetLang === 'en' ? preset.en : preset.ja;
+    return targetLang === 'ja' ? preset.ja : preset.other;
   }
 
-  _resolveTargetLang(text, langCode) {
-    if (this.direction === 'ja-to-en') return 'en';
-    if (this.direction === 'en-to-ja' || this.direction === 'bn-to-ja' || this.direction === 'hi-to-ja') return 'ja';
-    return detectLanguage4(text, langCode) === 'ja' ? 'en' : 'ja';
+  _resolveRoute(text, langCode) {
+    return resolveTranslationRoute(text, this.direction, this.partnerLang, langCode, this.recognitionProfile);
   }
 
+  /**
+   * 話者交代に伴う言語グループ切替判定
+   * 重要: 英語雑談中にヒンディー語・ウルドゥー語等が混ざるケース（ともに targetLang === 'ja' かつ skipTranslation === false）は
+   * 分断せず1つの長文チャンクに保持し、日本語話者 ⇄ 外国語話者 の交代時のみ即座にフラッシュ分離する。
+   */
   _isClearLanguageGroupSwitch(incomingText, langCode) {
-    if (this.direction !== 'auto' || !this.committedText.trim()) return false;
+    if (!this.committedText.trim()) return false;
+    if (this.direction === 'en-to-ja' || this.direction === 'ja-to-partner' || this.direction === 'ja-to-en') {
+      return false;
+    }
+
     const clean = incomingText.trim();
     if (!clean) return false;
 
-    const kanaCount = (clean.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
-    const indicCount = (clean.match(/[\u0900-\u097F\u0980-\u09FF]/g) || []).length;
-    const latinWords = clean.match(/[A-Za-z]{2,}/g) || [];
-    const latinLetters = (clean.match(/[A-Za-z]/g) || []).length;
+    const incomingRoute = this._resolveRoute(clean, langCode);
+    const routeChanged =
+      incomingRoute.targetLang !== this.bufferTargetLang ||
+      incomingRoute.skipTranslation !== this.bufferSkipTranslation;
 
-    if (this.bufferTargetLang === 'ja') {
+    if (!routeChanged) return false;
+
+    const kanaCount = (clean.match(/[\u3040-\u309F\u30A0-\u30FF\uFF66-\uFF9F]/g) || []).length;
+    const nonJaForeignScriptCount = (
+      clean.match(/[\u0900-\u097F\u0980-\u09FF\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF\uAC00-\uD7AF\u0E00-\u0E7F\u1000-\u109F\u0400-\u04FF]/g) || []
+    ).length;
+    const latinWords = clean.match(/[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]{2,}/g) || [];
+    const latinLetters = (clean.match(/[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]/g) || []).length;
+
+    // 外国語バッファ蓄積中に日本語話者が話し始めた場合
+    if (incomingRoute.langInfo.primaryLang === 'ja') {
       if (kanaCount >= 2) return true;
-      if (langCode && String(langCode).toLowerCase().startsWith('ja') && /[\u4E00-\u9FFF]/.test(clean)) return true;
+      if (normalizeLangCode(langCode) === 'ja' && /[\u3400-\u9FFF]/.test(clean) && clean.length >= 2) return true;
       return false;
     }
-    if (indicCount >= 2) return true;
-    return kanaCount === 0 && (latinWords.length >= 3 || latinLetters >= 18);
+
+    // 日本語バッファ蓄積中に外国語話者が話し始めた場合（"HKC" 等の短い英語略語1語では分割しない）
+    if (this.bufferPrimaryLang === 'ja') {
+      if (nonJaForeignScriptCount >= 2) return true;
+      if (CHINESE_SIMPLIFIED_MARKERS_REGEX.test(clean) && clean.length >= 2) return true;
+      return kanaCount === 0 && (latinWords.length >= 3 || latinLetters >= 16);
+    }
+
+    // all-to-partner 等で相手言語と第3言語が切り替わった場合
+    return nonJaForeignScriptCount >= 2 || latinWords.length >= 3;
+  }
+
+  _charScriptBucket(ch) {
+    if (!ch) return 'other';
+    if (/[\u3000-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/.test(ch)) return 'cjk';
+    if (/[\u0E00-\u0E7F\u1000-\u109F]/.test(ch)) return 'thai-my';
+    if (/[A-Za-z0-9\u00C0-\u024F\u1E00-\u1EFF]/.test(ch)) return 'latin';
+    if (/[\u0900-\u097F]/.test(ch)) return 'devanagari';
+    if (/[\u0980-\u09FF]/.test(ch)) return 'bengali';
+    if (/[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/.test(ch)) return 'perso-arabic';
+    if (/[\uAC00-\uD7AF]/.test(ch)) return 'hangul';
+    if (/[\u0400-\u04FF]/.test(ch)) return 'cyrillic';
+    return 'other';
   }
 
   _joinText(base, addition, forceSpaceIfNonCJK = false) {
@@ -3066,15 +3805,30 @@ class LongFormUtteranceBuffer {
 
     const lastChar = base.slice(-1);
     const firstChar = addition.charAt(0);
-    const isCJK = (ch) => /[\u3000-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]/.test(ch);
-    const startsWithClosingPunct = /^[.,?!;:)\]'""’”）。、！？\u0964\u0965]/.test(firstChar);
+    const lastBucket = this._charScriptBucket(lastChar);
+    const firstBucket = this._charScriptBucket(firstChar);
 
-    if (startsWithClosingPunct || (isCJK(lastChar) && isCJK(firstChar))) {
+    const startsWithClosingPunct = /^[.,?!;:)\]'""’”）。、，！？\u0964\u0965\u06D4\u061F\u060C\u061B]/.test(firstChar);
+    if (startsWithClosingPunct) {
       return base + addition;
     }
 
-    const endsWithPunct = /[.?!,;:\u0964\u0965]$/.test(lastChar);
-    if (endsWithPunct || forceSpaceIfNonCJK) {
+    if (
+      (lastBucket === 'cjk' && firstBucket === 'cjk') ||
+      (lastBucket === 'thai-my' && firstBucket === 'thai-my')
+    ) {
+      return base + addition;
+    }
+
+    const endsWithPunct = /[.?!,;:\u0964\u0965\u06D4\u061F\u060C\u061B]$/.test(lastChar);
+    // 異なる文字スクリプト間（例: 英語ラテン文字 ⇄ ウルドゥー文字／デーヴァナーガリー文字）は必ず空白を補う
+    const crossSpaceScriptSwitch =
+      lastBucket !== 'other' &&
+      firstBucket !== 'other' &&
+      lastBucket !== firstBucket &&
+      !(lastBucket === 'cjk' || firstBucket === 'cjk');
+
+    if (endsWithPunct || forceSpaceIfNonCJK || crossSpaceScriptSwitch) {
       return base + ' ' + addition;
     }
     return base + addition;
@@ -3095,6 +3849,7 @@ class LongFormUtteranceBuffer {
       this._emitText(this.committedText, this.bufferLangHint, 'language-switch');
       this.committedText = '';
       this.bufferLangHint = null;
+      this.bufferPrimaryLang = null;
       this._clearTimers();
     }
 
@@ -3106,8 +3861,11 @@ class LongFormUtteranceBuffer {
     this.committedText = this._joinText(this.committedText, rawText, forceSpace);
 
     if (wasEmpty && this.committedText.trim().length > 0) {
-      this.bufferLangHint = langCode || detectLanguage4(this.committedText);
-      this.bufferTargetLang = this._resolveTargetLang(this.committedText, langCode);
+      const route = this._resolveRoute(this.committedText, langCode);
+      this.bufferLangHint = langCode || route.srcLang;
+      this.bufferPrimaryLang = route.langInfo.primaryLang;
+      this.bufferTargetLang = route.targetLang;
+      this.bufferSkipTranslation = route.skipTranslation;
       this._scheduleMaxWaitTimer();
     } else if (!this.bufferLangHint && langCode) {
       this.bufferLangHint = langCode;
@@ -3149,12 +3907,16 @@ class LongFormUtteranceBuffer {
 
       if (!remainder) {
         this.bufferLangHint = null;
+        this.bufferPrimaryLang = null;
         this._clearTimers();
         break;
       }
 
-      this.bufferLangHint = detectLanguage4(remainder);
-      this.bufferTargetLang = this._resolveTargetLang(remainder, null);
+      const nextRoute = this._resolveRoute(remainder, null);
+      this.bufferLangHint = nextRoute.srcLang;
+      this.bufferPrimaryLang = nextRoute.langInfo.primaryLang;
+      this.bufferTargetLang = nextRoute.targetLang;
+      this.bufferSkipTranslation = nextRoute.skipTranslation;
       if (this.maxWaitTimer) {
         clearTimeout(this.maxWaitTimer);
         this.maxWaitTimer = null;
@@ -3166,7 +3928,8 @@ class LongFormUtteranceBuffer {
   _findSplitIndex(text, minIdx, maxIdx, sentenceOnly) {
     const slice = text.slice(0, Math.min(text.length, maxIdx));
 
-    const sentenceRegex = /([.?!](?=\s|$)|[。！？\u0964\u0965])/g;
+    // 欧文 (.?!)、日中 (。！？)、デーヴァナーガリー (।॥)、ウルドゥー/アラビア文字 (۔؟) の文末記号に対応
+    const sentenceRegex = /([.?!](?=\s|$)|[。！？\u0964\u0965\u06D4\u061F])/g;
     let lastSentenceEnd = -1;
     let m;
     while ((m = sentenceRegex.exec(slice)) !== null) {
@@ -3176,7 +3939,8 @@ class LongFormUtteranceBuffer {
     if (lastSentenceEnd !== -1) return lastSentenceEnd;
     if (sentenceOnly) return -1;
 
-    const clauseRegex = /([,;](?=\s|$)|[、：；])/g;
+    // 節区切り（欧文 ,;: / 日中 、，：； / ウルドゥー・アラビア ،؛）
+    const clauseRegex = /([,;:](?=\s|$)|[、，：；\u060C\u061B])/g;
     let lastClauseEnd = -1;
     while ((m = clauseRegex.exec(slice)) !== null) {
       const endPos = m.index + m[0].length;
@@ -3225,6 +3989,7 @@ class LongFormUtteranceBuffer {
         this.committedText = remainder;
         if (!remainder) {
           this.bufferLangHint = null;
+          this.bufferPrimaryLang = null;
           this._clearTimers();
         } else {
           this._scheduleMaxWaitTimer();
@@ -3242,11 +4007,12 @@ class LongFormUtteranceBuffer {
       combined = this._joinText(combined, this.currentInterim.trim(), true);
     }
     const finalChunk = combined.trim();
-    const langHint = this.bufferLangHint || (finalChunk ? detectLanguage4(finalChunk) : null);
+    const langHint = this.bufferLangHint || (finalChunk ? detectLanguage(finalChunk, null, this.recognitionProfile) : null);
 
     this.committedText = '';
     this.currentInterim = '';
     this.bufferLangHint = null;
+    this.bufferPrimaryLang = null;
     this._afterTurnComplete = false;
 
     if (finalChunk.length > 0) {
@@ -3273,6 +4039,7 @@ class LongFormUtteranceBuffer {
       interim: this.currentInterim.trim(),
       totalChars: (this.committedText + this.currentInterim).trim().length,
       targetLang: this.bufferTargetLang,
+      skipTranslation: this.bufferSkipTranslation,
       silenceSec: (cfg.silenceMs / 1000).toFixed(1)
     });
   }
@@ -3318,6 +4085,7 @@ class App {
     this.summaryBodyCollapsed = false;
 
     this._initElements();
+    this._initCustomLangCheckboxes();
     this._loadSettings();
     this._bindAllEvents();
     this._checkHashConfig();
@@ -3333,7 +4101,10 @@ class App {
     }
 
     this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
-    this.log('info', `初期化完了 (v${APP_VERSION})。高精度VAD（プリロール＋余韻保持＋適応ノイズ追従）・通信量半減・自動再接続・前文脈連動・任意範囲サマリーが有効です。`);
+    this.log(
+      'info',
+      `初期化完了 (v${APP_VERSION})。日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応・高精度VAD・前文脈連動・任意範囲サマリーが有効です。`
+    );
   }
 
   log(type, message) {
@@ -3361,7 +4132,10 @@ class App {
 
     this.elBtnToggleRecord = byId('btn-toggle-record');
     this.elBtnPauseRecord = byId('btn-pause-record');
+    this.elSelectRecognitionProfile = byId('select-recognition-profile');
     this.elSelectDirection = byId('select-direction');
+    this.elGroupPartnerLang = byId('group-partner-lang');
+    this.elSelectPartnerLang = byId('select-partner-lang');
     this.elSelectCategory = byId('select-category');
     this.elSelectChunkMode = byId('select-chunk-mode');
     this.elSelectContextWindow = byId('select-context-window');
@@ -3433,6 +4207,8 @@ class App {
     this.elBtnToggleKeyVis = byId('btn-toggle-key-vis');
     this.elSelectEngineMode = byId('select-engine-mode');
     this.elSelectLiveModel = byId('select-live-model');
+    this.elCustomLangsGrid = byId('custom-langs-grid');
+    this.elCustomLangPresetBtns = document.querySelectorAll('.custom-lang-preset-btn');
     this.elInputSystemInstruction = byId('input-system-instruction');
     this.elBtnResetInstruction = byId('btn-reset-instruction');
     this.elInputGasUrl = byId('input-gas-url');
@@ -3456,14 +4232,71 @@ class App {
     this.elBtnCopyShareUrl = byId('btn-copy-share-url');
   }
 
+  _initCustomLangCheckboxes() {
+    if (!this.elCustomLangsGrid) return;
+    this.elCustomLangsGrid.innerHTML = '';
+    for (const [code, meta] of Object.entries(LANGUAGE_REGISTRY)) {
+      const label = document.createElement('label');
+      label.className = 'custom-lang-chip';
+      label.title = `${meta.name} (${meta.englishName})`;
+      label.innerHTML = `<input type="checkbox" value="${this._escapeHTML(code)}"><span>${meta.badge} ${this._escapeHTML(meta.name)}</span>`;
+      this.elCustomLangsGrid.appendChild(label);
+    }
+  }
+
+  _syncCustomLangCheckboxesUI() {
+    if (!this.elCustomLangsGrid) return;
+    const selectedSet = new Set(this.customLangs || DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS);
+    const inputs = this.elCustomLangsGrid.querySelectorAll('input[type="checkbox"]');
+    inputs.forEach((chk) => {
+      chk.checked = selectedSet.has(chk.value);
+    });
+  }
+
+  _readCustomLangCheckboxes() {
+    if (!this.elCustomLangsGrid) return [...DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS];
+    const checked = Array.from(this.elCustomLangsGrid.querySelectorAll('input[type="checkbox"]:checked'))
+      .map((chk) => normalizeLangCode(chk.value))
+      .filter(Boolean);
+    return checked.length > 0 ? checked : ['ja', 'en'];
+  }
+
   _loadSettings() {
     const K = ConfigManager.STORAGE_KEYS;
     this.apiKey = ConfigManager.get(K.API_KEY, '');
     this.gasUrl = ConfigManager.get(K.GAS_URL, '');
     this.gasToken = ConfigManager.get(K.GAS_TOKEN, '');
     this.audioSource = ConfigManager.get(K.AUDIO_SOURCE, 'mic');
-    this.direction = ConfigManager.get(K.DIRECTION, 'auto');
-    this.category = ConfigManager.get(K.CATEGORY, 'HKC');
+
+    const savedProfile = ConfigManager.get(K.RECOGNITION_PROFILE, DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE);
+    this.recognitionProfile = RECOGNITION_PROFILES[savedProfile]
+      ? savedProfile
+      : DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE;
+
+    let rawDirection = ConfigManager.get(K.DIRECTION, 'auto');
+    let savedPartner = normalizeLangCode(ConfigManager.get(K.PARTNER_LANG, DEFAULT_SETTINGS.DEFAULT_PARTNER_LANG)) || 'en';
+    if (!LANGUAGE_REGISTRY[savedPartner]) savedPartner = 'en';
+
+    // 旧バージョン 'ja-to-en' 保存値とのシームレス互換
+    if (rawDirection === 'ja-to-en') {
+      rawDirection = 'ja-to-partner';
+      if (!ConfigManager.get(K.PARTNER_LANG, '')) savedPartner = 'en';
+    }
+    const validDirections = new Set(['auto', 'all-to-ja', 'all-to-partner', 'ja-to-partner', 'en-to-ja']);
+    this.direction = validDirections.has(rawDirection) ? rawDirection : 'auto';
+    this.partnerLang = savedPartner;
+
+    const rawCustomStr = ConfigManager.get(K.CUSTOM_LANGS, DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS.join(','));
+    const parsedCustom = String(rawCustomStr || '')
+      .split(',')
+      .map((s) => normalizeLangCode(s))
+      .filter((c) => c && LANGUAGE_REGISTRY[c]);
+    this.customLangs = parsedCustom.length > 0 ? parsedCustom : [...DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS];
+
+    const validCategories = new Set(['Common', 'Casual', 'HKC', 'EU-SRR', 'HSE', 'IHM']);
+    const savedCategory = ConfigManager.get(K.CATEGORY, DEFAULT_SETTINGS.DEFAULT_CATEGORY);
+    this.category = validCategories.has(savedCategory) ? savedCategory : DEFAULT_SETTINGS.DEFAULT_CATEGORY;
+
     this.chunkMode = ConfigManager.get(K.CHUNK_MODE, 'long');
 
     const savedCtxWin = parseInt(ConfigManager.get(K.CONTEXT_WINDOW, '6'), 10);
@@ -3481,7 +4314,16 @@ class App {
     if (!VoiceActivityDetector.PRESETS[this.vadMode]) this.vadMode = 'auto';
     this.engineMode = ConfigManager.get(K.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(K.LIVE_MODEL, DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
-    this.systemInstruction = ConfigManager.get(K.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
+
+    // v3.1.1 既定の4言語制限プロンプトが localStorage に残っている場合は v3.2.0 既定へ自動マイグレーション
+    const rawSystemInstruction = ConfigManager.get(K.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
+    if (!rawSystemInstruction.trim() || rawSystemInstruction.trim() === LEGACY_V311_SYSTEM_INSTRUCTION.trim()) {
+      this.systemInstruction = DEFAULT_SYSTEM_INSTRUCTION;
+      ConfigManager.set(K.SYSTEM_INSTRUCTION, DEFAULT_SYSTEM_INSTRUCTION);
+    } else {
+      this.systemInstruction = rawSystemInstruction;
+    }
+
     this.autoSave = ConfigManager.get(K.AUTO_SAVE, 'false') === 'true';
     this.docMode = ConfigManager.get(K.DOC_MODE, 'new');
     this.folderId = ConfigManager.get(K.FOLDER_ID, DEFAULT_SETTINGS.DEFAULT_FOLDER_ID);
@@ -3497,7 +4339,9 @@ class App {
     this.elInputGasUrl.value = this.gasUrl;
     this.elInputGasToken.value = this.gasToken;
     if (this.elSelectAudioSource) this.elSelectAudioSource.value = this.audioSource;
+    if (this.elSelectRecognitionProfile) this.elSelectRecognitionProfile.value = this.recognitionProfile;
     this.elSelectDirection.value = this.direction;
+    if (this.elSelectPartnerLang) this.elSelectPartnerLang.value = this.partnerLang;
     if (this.elSelectCategory) this.elSelectCategory.value = this.category;
     if (this.elSelectChunkMode) this.elSelectChunkMode.value = this.chunkMode;
     if (this.elSelectContextWindow) this.elSelectContextWindow.value = String(this.contextWindow);
@@ -3512,9 +4356,29 @@ class App {
     if (this.elInputDefaultFolderId) this.elInputDefaultFolderId.value = this.folderId;
     if (this.lastDocId) this.elInputDocId.value = this.lastDocId;
 
+    this._syncCustomLangCheckboxesUI();
+    this._syncTranslationControlsUI();
+
     this.audioService.setGain(this.gain);
     this.audioService.setVadMode(this.vadMode);
-    this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+    this.geminiClient.updateRecognitionSettings({
+      direction: this.direction,
+      recognitionProfile: this.recognitionProfile,
+      partnerLang: this.partnerLang,
+      customLangs: this.customLangs,
+      systemInstruction: this.systemInstruction
+    });
+    this.webSpeechService.updateSettings({
+      direction: this.direction,
+      partnerLang: this.partnerLang,
+      recognitionProfile: this.recognitionProfile
+    });
+    this.utteranceBuffer.setConfig({
+      mode: this.chunkMode,
+      direction: this.direction,
+      partnerLang: this.partnerLang,
+      recognitionProfile: this.recognitionProfile
+    });
 
     for (const radio of this.elRadioDocModes) {
       if (radio.value === this.docMode) radio.checked = true;
@@ -3577,30 +4441,73 @@ class App {
       }
     });
 
+    this.elSelectRecognitionProfile?.addEventListener('change', (e) => {
+      if (this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('profile-change');
+      }
+      this.recognitionProfile = e.target.value;
+      ConfigManager.set(K.RECOGNITION_PROFILE, this.recognitionProfile);
+      this.geminiClient.updateRecognitionSettings({ recognitionProfile: this.recognitionProfile });
+      this.webSpeechService.updateSettings({ recognitionProfile: this.recognitionProfile });
+      this.utteranceBuffer.setConfig({ recognitionProfile: this.recognitionProfile });
+
+      const profileLabel = RECOGNITION_PROFILES[this.recognitionProfile]?.label || this.recognitionProfile;
+      const customDetail = this.recognitionProfile === 'multilingual-custom'
+        ? ` (${this.customLangs.map((c) => resolveLanguageMeta(c).name).join('・')})`
+        : '';
+      this.log('info', `認識プロファイル変更: ${profileLabel}${customDetail}`);
+      this.showToast(`認識モードを「${profileLabel}${customDetail}」に設定しました。`, 'info');
+    });
+
     this.elSelectDirection.addEventListener('change', (e) => {
       if (this.utteranceBuffer.hasPendingText()) {
         this.utteranceBuffer.flushAll('direction-change');
       }
       this.direction = e.target.value;
       ConfigManager.set(K.DIRECTION, this.direction);
-      this.geminiClient.setDirection(this.direction);
-      this.webSpeechService.setDirection(this.direction);
-      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
-      this.log('info', `翻訳方向変更: ${this.direction}`);
+      this._syncTranslationControlsUI();
+      this.geminiClient.updateRecognitionSettings({ direction: this.direction });
+      this.webSpeechService.updateSettings({ direction: this.direction });
+      this.utteranceBuffer.setConfig({
+        mode: this.chunkMode,
+        direction: this.direction,
+        partnerLang: this.partnerLang,
+        recognitionProfile: this.recognitionProfile
+      });
+      this.log('info', `翻訳モード変更: ${this.direction} (相手言語: ${getLanguageDisplayName(this.partnerLang)})`);
       if (this.isRecording) {
         this.showToast(
           this.activeEngine === 'gemini-live'
-            ? '翻訳方向を変更し、認識言語設定を即時再適用しました。'
-            : '翻訳方向が変更されました。次回発話から適用されます。',
+            ? '翻訳モードを変更し、認識設定を即時反映しました。'
+            : '翻訳モードが変更されました。次回発話から適用されます。',
           'info'
         );
       }
     });
 
+    this.elSelectPartnerLang?.addEventListener('change', (e) => {
+      if (this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('partner-lang-change');
+      }
+      this.partnerLang = normalizeLangCode(e.target.value) || 'en';
+      ConfigManager.set(K.PARTNER_LANG, this.partnerLang);
+      this.geminiClient.updateRecognitionSettings({ partnerLang: this.partnerLang });
+      this.webSpeechService.updateSettings({ partnerLang: this.partnerLang });
+      this.utteranceBuffer.setConfig({ partnerLang: this.partnerLang });
+      const langName = getLanguageDisplayName(this.partnerLang);
+      this.log('info', `相手言語を変更: ${langName} (${this.partnerLang})`);
+      this.showToast(`相手言語を「${langName}」に設定しました。`, 'info');
+    });
+
     this.elSelectChunkMode?.addEventListener('change', (e) => {
       this.chunkMode = e.target.value;
       ConfigManager.set(K.CHUNK_MODE, this.chunkMode);
-      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+      this.utteranceBuffer.setConfig({
+        mode: this.chunkMode,
+        direction: this.direction,
+        partnerLang: this.partnerLang,
+        recognitionProfile: this.recognitionProfile
+      });
       this.log('info', `翻訳区切りモード変更: ${this.chunkMode}`);
       this.showToast('翻訳の区切り設定を変更しました。', 'info');
     });
@@ -3621,7 +4528,7 @@ class App {
     this.elSelectCategory?.addEventListener('change', (e) => {
       this.category = e.target.value;
       ConfigManager.set(K.CATEGORY, this.category);
-      this.log('info', `監査分野変更: ${this.category}`);
+      this.log('info', `分野変更: ${this.category}`);
     });
 
     this.elSelectGain?.addEventListener('change', (e) => {
@@ -3809,6 +4716,18 @@ class App {
       this.elBtnToggleKeyVis.textContent = isHidden ? '非表示' : '表示';
     });
 
+    this.elCustomLangPresetBtns?.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const preset = CUSTOM_LANG_PRESETS[btn.dataset.langPreset];
+        if (!preset || !this.elCustomLangsGrid) return;
+        const set = new Set(preset);
+        this.elCustomLangsGrid.querySelectorAll('input[type="checkbox"]').forEach((chk) => {
+          chk.checked = set.has(chk.value);
+        });
+        this.showToast(`カスタム言語プリセット（${preset.length}言語）を選択しました。`, 'info');
+      });
+    });
+
     this.elBtnResetInstruction?.addEventListener('click', () => {
       if (this.elInputSystemInstruction) {
         this.elInputSystemInstruction.value = DEFAULT_SYSTEM_INSTRUCTION;
@@ -3823,6 +4742,10 @@ class App {
       this.engineMode = this.elSelectEngineMode.value;
       this.liveModel = this.elSelectLiveModel.value;
       this.autoSave = this.elCheckAutoSave.checked;
+
+      this.customLangs = this._readCustomLangCheckboxes();
+      this._syncCustomLangCheckboxesUI();
+      ConfigManager.set(K.CUSTOM_LANGS, this.customLangs.join(','));
 
       if (this.elSelectDefaultGain) {
         this.gain = this.elSelectDefaultGain.value;
@@ -3847,8 +4770,13 @@ class App {
       ConfigManager.set(K.LIVE_MODEL, this.liveModel);
       ConfigManager.set(K.AUTO_SAVE, String(this.autoSave));
 
+      this.geminiClient.updateRecognitionSettings({
+        customLangs: this.customLangs,
+        systemInstruction: this.systemInstruction
+      });
+
       this._closeSettingsModal();
-      this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}`);
+      this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}, カスタム言語=${this.customLangs.join(',')}`);
       this.showToast('設定を保存しました。', 'success');
     });
 
@@ -3951,6 +4879,20 @@ class App {
   }
 
   // ---- UI Sync Helpers ----
+  _syncTranslationControlsUI() {
+    const usesPartner = ['auto', 'all-to-partner', 'ja-to-partner'].includes(this.direction);
+    if (this.elGroupPartnerLang) {
+      this.elGroupPartnerLang.style.display = usesPartner ? 'flex' : 'none';
+    }
+    const isStrictSingleSource = this.direction === 'en-to-ja' || this.direction === 'ja-to-partner';
+    if (this.elSelectRecognitionProfile) {
+      this.elSelectRecognitionProfile.disabled = isStrictSingleSource;
+      this.elSelectRecognitionProfile.title = isStrictSingleSource
+        ? '固定翻訳モード中は発話元の単一言語ロックが優先適用されます'
+        : '音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）';
+    }
+  }
+
   _syncDocModeUI() {
     const isExisting = this.docMode === 'existing';
     this.elInputDocTitle.style.display = isExisting ? 'none' : 'block';
@@ -4237,7 +5179,11 @@ class App {
       if (this.engineMode === 'auto' || this.engineMode === 'gemini-live') {
         try {
           this.log('info', 'Gemini Live WebSocket へ接続試行中...');
-          await this.geminiClient.connect(this.apiKey, this.direction, this.liveModel, this.systemInstruction);
+          await this.geminiClient.connect(this.apiKey, this.direction, this.liveModel, this.systemInstruction, {
+            recognitionProfile: this.recognitionProfile,
+            partnerLang: this.partnerLang,
+            customLangs: this.customLangs
+          });
 
           const isDisplay = this.audioSource === 'display';
           this.log('info', isDisplay ? '🖥️ タブ・PC音声キャプチャ開始 (16kHz PCM)...' : '🎤 マイク音声取得開始 (Anti-Aliased 16kHz)...');
@@ -4294,6 +5240,10 @@ class App {
           (err) => {
             this.log('error', `WebSpeechエラー: ${err.message}`);
             this.showToast(err.message, 'error');
+          },
+          {
+            partnerLang: this.partnerLang,
+            recognitionProfile: this.recognitionProfile
           }
         );
 
@@ -4307,7 +5257,12 @@ class App {
       this.isRecording = true;
       this.isPaused = false;
       this.elLivePreview.style.display = 'flex';
-      this.utteranceBuffer.setConfig({ mode: this.chunkMode, direction: this.direction });
+      this.utteranceBuffer.setConfig({
+        mode: this.chunkMode,
+        direction: this.direction,
+        partnerLang: this.partnerLang,
+        recognitionProfile: this.recognitionProfile
+      });
       this.utteranceBuffer.reset();
       this._updateStatus('recording');
       this._updateUIState();
@@ -4415,7 +5370,7 @@ class App {
     }
   }
 
-  _renderLiveDisplay({ committed, interim, totalChars, targetLang, silenceSec }) {
+  _renderLiveDisplay({ committed, interim, totalChars, targetLang, skipTranslation = false, silenceSec }) {
     if (!this.elLiveText) return;
     const hasText = Boolean(committed || interim);
 
@@ -4427,11 +5382,15 @@ class App {
       if (!hasText) {
         this.elLiveBufferStatus.textContent = this.isPaused ? '一時停止中' : '発話待機中';
         this.elLiveBufferStatus.className = 'tag buffer-status';
+      } else if (skipTranslation) {
+        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒でそのまま確定）`;
+        this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
       } else if (targetLang === 'ja') {
         this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒 or 文末で長文日本語訳）`;
         this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
       } else {
-        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒で英訳）`;
+        const targetLabel = getLanguageDisplayName(targetLang);
+        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒で${targetLabel}訳）`;
         this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
       }
     }
@@ -4447,8 +5406,8 @@ class App {
 
     this.elLiveText.className = 'live-text';
     const parts = [];
-    if (committed) parts.push(`<span class="live-committed">${this._escapeHTML(committed)}</span>`);
-    if (interim) parts.push(`<span class="live-interim">${this._escapeHTML(interim)}</span>`);
+    if (committed) parts.push(`<bdi class="live-committed">${this._escapeHTML(committed)}</bdi>`);
+    if (interim) parts.push(`<bdi class="live-interim">${this._escapeHTML(interim)}</bdi>`);
     this.elLiveText.innerHTML = parts.join(committed && interim ? ' ' : '');
     this.elLiveText.scrollTop = this.elLiveText.scrollHeight;
     this._updateSummaryTargetPreview();
@@ -4490,14 +5449,26 @@ class App {
     return this.records.filter((r) => !r.isTranslating && r.translatedText && r.translatedText.trim() !== '');
   }
 
+  _getLangBadgeClass(record) {
+    const base = record.speakerLang || 'en';
+    const isMixed = (Array.isArray(record.mixedSubLangs) && record.mixedSubLangs.length > 0) || Boolean(record.colloquialMix);
+    return `tag lang-badge lang-${base}${isMixed ? ' lang-mixed' : ''}`;
+  }
+
   _handleFinalSpeech(finalText, langCode) {
     if (!finalText || finalText.trim() === '') return;
 
     const timestamp = new Date().toLocaleTimeString('ja-JP', { hour12: false });
     const recordId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    const fixedLangMap = { 'en-to-ja': 'en', 'ja-to-en': 'ja', 'bn-to-ja': 'bn', 'hi-to-ja': 'hi' };
-    const detectedLang = fixedLangMap[this.direction] || detectLanguage4(finalText, langCode);
+    const route = resolveTranslationRoute(
+      finalText,
+      this.direction,
+      this.partnerLang,
+      langCode,
+      this.recognitionProfile
+    );
+    const detectedLang = route.srcLang;
     const initialSpeaker = detectedLang === 'ja' ? ROLES[0] : ROLES[1];
     const engineLabel = this.activeEngine === 'gemini-live' ? 'Gemini Live' : 'Web Speech';
 
@@ -4507,10 +5478,15 @@ class App {
       createdAt: Date.now(),
       speaker: initialSpeaker,
       speakerLang: detectedLang,
+      mixedSubLangs: route.langInfo.mixedSubLangs || [],
+      colloquialMix: route.langInfo.colloquialMix || null,
+      hintedLangCode: langCode || null,
       originalText: finalText,
       translatedText: '',
       engine: engineLabel,
       direction: this.direction,
+      partnerLang: this.partnerLang,
+      recognitionProfile: this.recognitionProfile,
       category: this.category,
       isTranslating: true
     };
@@ -4521,7 +5497,7 @@ class App {
     this._updateSummaryTargetPreview();
     this._updateUIState();
 
-    this.log('info', `確定発話をFIFOキューに投入: "${finalText}"`);
+    this.log('info', `確定発話をFIFOキューに投入 [${formatDocLanguageLabel(record.speakerLang, record.mixedSubLangs, record.colloquialMix)}]: "${finalText}"`);
 
     this.translationService.enqueue(
       finalText,
@@ -4533,7 +5509,12 @@ class App {
       recordId,
       (id, transResult) => this._onTranslationComplete(id, transResult),
       () => this._getRecentContext(recordId),
-      this.translationCustomPrompt
+      this.translationCustomPrompt,
+      {
+        partnerLang: this.partnerLang,
+        recognitionProfile: this.recognitionProfile,
+        hintedLangCode: langCode || null
+      }
     );
   }
 
@@ -4562,7 +5543,9 @@ class App {
       ? 'yard'
       : '';
     const speakerShort = getSpeakerShortLabel(item.speaker);
-    const langFullName = getLanguageDisplayName(item.speakerLang);
+    const langFullName = getLanguageDisplayName(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
+    const langBadgeText = getLanguageBadge(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
+    const langBadgeClass = this._getLangBadgeClass(item);
     const engineFull = item.engine || 'Gemini Live';
     const engineShort = getEngineShortLabel(engineFull);
 
@@ -4571,7 +5554,7 @@ class App {
         <div class="meta-left">
           <span class="card-time"><span class="time-icon">🕒 </span>${this._escapeHTML(item.time)}</span>
           <span id="${item.id}_spk" class="tag speaker ${speakerClass}" title="${this._escapeHTML(item.speaker || '発話')}（クリックで話者切替）">${this._escapeHTML(speakerShort)}</span>
-          <span id="${item.id}_lang" class="tag lang-badge lang-${item.speakerLang}" title="${this._escapeHTML(langFullName)}">${getLanguageBadge(item.speakerLang)}</span>
+          <span id="${item.id}_lang" class="${this._escapeHTML(langBadgeClass)}" title="${this._escapeHTML(langFullName)}">${this._escapeHTML(langBadgeText)}</span>
           <span class="tag engine" title="${this._escapeHTML(engineFull)}"><span class="engine-full">${this._escapeHTML(engineFull)}</span><span class="engine-short">${this._escapeHTML(engineShort)}</span></span>
         </div>
         <div class="card-actions card-menu">
@@ -4587,17 +5570,17 @@ class App {
       <div id="${item.id}_view" class="body-grid">
         <div class="column">
           <span class="label">原文</span>
-          <div id="${item.id}_orig" class="original">${this._escapeHTML(item.originalText)}</div>
+          <div id="${item.id}_orig" class="original" dir="auto">${this._escapeHTML(item.originalText)}</div>
         </div>
         <div class="column">
           <span class="label">訳文</span>
-          <div id="${item.id}_trans" class="translation">${item.isTranslating ? '⏳ 翻訳中...' : this._escapeHTML(item.translatedText)}</div>
+          <div id="${item.id}_trans" class="translation" dir="auto">${item.isTranslating ? '⏳ 翻訳中...' : this._escapeHTML(item.translatedText)}</div>
         </div>
       </div>
       <div id="${item.id}_edit" class="edit">
         <div class="edit-grid">
-          <textarea id="${item.id}_edit_orig" placeholder="原文">${this._escapeHTML(item.originalText)}</textarea>
-          <textarea id="${item.id}_edit_trans" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
+          <textarea id="${item.id}_edit_orig" dir="auto" placeholder="原文">${this._escapeHTML(item.originalText)}</textarea>
+          <textarea id="${item.id}_edit_trans" dir="auto" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
         </div>
         <div class="edit-actions">
           <button type="button" class="btn btn-sm btn-outline" data-a="cancel">キャンセル</button>
@@ -4621,7 +5604,8 @@ class App {
 
       if (action === 'copy') {
         this._closeAllCardMenus();
-        const textToCopy = `[${item.time}] (${item.speaker})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
+        const langNote = getLanguageDisplayName(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
+        const textToCopy = `[${item.time}] (${item.speaker} / ${langNote})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
         this.copyToClipboard(textToCopy)
           .then(() => this.showToast('カード内容をコピーしました。', 'info'))
           .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
@@ -4652,6 +5636,20 @@ class App {
         item.originalText = editOrig;
         item.translatedText = editTrans;
         item.isTranslating = false;
+
+        if (editOrig) {
+          const updatedRoute = resolveTranslationRoute(editOrig, this.direction, this.partnerLang, null, this.recognitionProfile);
+          item.speakerLang = updatedRoute.srcLang;
+          item.mixedSubLangs = updatedRoute.langInfo.mixedSubLangs || [];
+          item.colloquialMix = updatedRoute.langInfo.colloquialMix || null;
+          const langEl = document.getElementById(`${item.id}_lang`);
+          if (langEl) {
+            langEl.className = this._getLangBadgeClass(item);
+            langEl.textContent = getLanguageBadge(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
+            langEl.title = getLanguageDisplayName(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
+          }
+        }
+
         document.getElementById(`${item.id}_orig`).textContent = editOrig;
         document.getElementById(`${item.id}_trans`).textContent = editTrans;
         document.getElementById(`${item.id}_edit`).classList.remove('open');
@@ -4678,7 +5676,12 @@ class App {
           item.id,
           (id, transResult) => this._onTranslationComplete(id, transResult),
           () => this._getRecentContext(item.id),
-          this.translationCustomPrompt
+          this.translationCustomPrompt,
+          {
+            partnerLang: this.partnerLang,
+            recognitionProfile: this.recognitionProfile,
+            hintedLangCode: item.hintedLangCode || null
+          }
         );
         this.showToast('再翻訳を開始しました。', 'info');
         return;
@@ -4726,6 +5729,12 @@ class App {
     if (transResult.speakerLang && transResult.speakerLang !== 'auto') {
       record.speakerLang = transResult.speakerLang;
     }
+    if (Array.isArray(transResult.mixedSubLangs)) {
+      record.mixedSubLangs = transResult.mixedSubLangs;
+    }
+    if (transResult.colloquialMix !== undefined) {
+      record.colloquialMix = transResult.colloquialMix;
+    }
     record.isTranslating = false;
 
     const transEl = document.getElementById(`${recordId}_trans`);
@@ -4739,9 +5748,9 @@ class App {
 
     const langEl = document.getElementById(`${recordId}_lang`);
     if (langEl && record.speakerLang) {
-      langEl.className = `tag lang-badge lang-${record.speakerLang}`;
-      langEl.textContent = getLanguageBadge(record.speakerLang);
-      langEl.title = getLanguageDisplayName(record.speakerLang);
+      langEl.className = this._getLangBadgeClass(record);
+      langEl.textContent = getLanguageBadge(record.speakerLang, record.mixedSubLangs, record.colloquialMix);
+      langEl.title = getLanguageDisplayName(record.speakerLang, record.mixedSubLangs, record.colloquialMix);
     }
 
     this.unsavedFinalizedDelta += 1;
@@ -4797,7 +5806,7 @@ class App {
       const recordsToSave = finalizedItems.map((r) => ({
         timestamp: r.time,
         speaker: r.speaker,
-        speakerLang: r.speakerLang,
+        speakerLang: formatDocLanguageLabel(r.speakerLang, r.mixedSubLangs, r.colloquialMix),
         original: r.originalText,
         translated: r.translatedText,
         engine: r.engine
@@ -4825,6 +5834,8 @@ class App {
           folderId,
           records: recordsToSave,
           direction: this.direction,
+          partnerLang: this.partnerLang,
+          recognitionProfile: this.recognitionProfile,
           category: this.category,
           model: this.liveModel,
           saveMode: 'sync'
@@ -4839,6 +5850,8 @@ class App {
             folderId,
             records: recordsToSave,
             direction: this.direction,
+            partnerLang: this.partnerLang,
+            recognitionProfile: this.recognitionProfile,
             category: this.category,
             model: this.liveModel,
             saveMode: 'sync'
@@ -4897,6 +5910,7 @@ class App {
 
   // ---- Modals, Clipboard & QR Sync ----
   _openSettingsModal() {
+    this._syncCustomLangCheckboxesUI();
     this.elModal.style.display = 'flex';
     document.body.classList.add('modal-open');
     setTimeout(() => this.elInputApiKey?.focus(), 50);
@@ -4951,10 +5965,11 @@ class App {
     }
 
     const clean = (s) => String(s || '').replace(/\n/g, '<br>').replace(/\|/g, '\\|');
-    let md = `# 現地監査 議事録 (${this.category})\n\n`;
+    let md = `# 会話・翻訳議事録 (${this.category})\n\n`;
     md += '| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n';
     for (const t of this.records) {
-      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(getLanguageDisplayName(t.speakerLang))} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
+      const langLabel = getLanguageDisplayName(t.speakerLang, t.mixedSubLangs, t.colloquialMix);
+      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(langLabel)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
     }
 
     this.copyToClipboard(md)
@@ -5024,9 +6039,20 @@ class App {
     }
     if (this.gasToken) compact.t = this.gasToken;
 
-    // 既定値と異なる設定のみを短縮キーで格納
+    // 既定値と異なる設定のみを短縮キーで格納（標準利用時は追加0バイト）
+    if (this.recognitionProfile && this.recognitionProfile !== DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE) {
+      compact.rp = this.recognitionProfile;
+    }
     if (this.direction && this.direction !== 'auto') compact.d = this.direction;
-    if (this.category && this.category !== 'HKC') compact.c = this.category;
+    if (this.partnerLang && this.partnerLang !== DEFAULT_SETTINGS.DEFAULT_PARTNER_LANG) {
+      compact.pl = this.partnerLang;
+    }
+    const defaultCustomStr = DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS.join(',');
+    const currentCustomStr = Array.isArray(this.customLangs) ? this.customLangs.join(',') : defaultCustomStr;
+    if (this.recognitionProfile === 'multilingual-custom' && currentCustomStr && currentCustomStr !== defaultCustomStr) {
+      compact.cl = currentCustomStr;
+    }
+    if (this.category && this.category !== DEFAULT_SETTINGS.DEFAULT_CATEGORY) compact.c = this.category;
     if (this.chunkMode && this.chunkMode !== 'long') compact.cm = this.chunkMode;
     if (this.contextWindow !== undefined && Number(this.contextWindow) !== 6) compact.cw = Number(this.contextWindow);
     if (this.summaryRange && this.summaryRange !== '5') compact.sr = this.summaryRange;
@@ -5042,7 +6068,7 @@ class App {
     if (this.folderId && this.folderId !== DEFAULT_SETTINGS.DEFAULT_FOLDER_ID) compact.f = this.folderId;
     if (this.lastDocId && this.docMode === 'existing') compact.ld = this.lastDocId;
 
-    // 翻訳プロンプト追記：プリセット一致時はIDのみ('@audit'等)で超軽量同期
+    // 翻訳プロンプト追記：プリセット一致時はIDのみ('@hinglish', '@audit'等)で超軽量同期
     const trimmedCustomPrompt = (this.translationCustomPrompt || '').trim();
     if (trimmedCustomPrompt) {
       const matchedPreset = Object.entries(TRANSLATION_PROMPT_PRESETS).find(([, val]) => val.trim() === trimmedCustomPrompt);
@@ -5055,7 +6081,7 @@ class App {
 
     // systemInstruction：既定値から変更され、かつ明示チェック時のみ格納
     const trimmedSys = (this.systemInstruction || '').trim();
-    if (includeFreePrompts && trimmedSys && trimmedSys !== DEFAULT_SYSTEM_INSTRUCTION.trim()) {
+    if (includeFreePrompts && trimmedSys && !isDefaultOrLegacySystemInstruction(trimmedSys)) {
       compact.si = trimmedSys;
     }
 
@@ -5124,7 +6150,7 @@ class App {
       const K = ConfigManager.STORAGE_KEYS;
 
       if (hash.startsWith('#s=')) {
-        // v3.0.2 超軽量コンパクト形式 (#s=<base64url>)
+        // v3.2.0 超軽量コンパクト形式 (#s=<base64url>)
         const c = JSON.parse(decodeBase64UrlUtf8(hash.substring(3)));
 
         if (c.k) ConfigManager.set(K.API_KEY, String(c.k));
@@ -5132,8 +6158,11 @@ class App {
         else if (c.gu) ConfigManager.set(K.GAS_URL, String(c.gu));
         ConfigManager.set(K.GAS_TOKEN, c.t ? String(c.t) : '');
 
+        ConfigManager.set(K.RECOGNITION_PROFILE, c.rp || DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE);
         ConfigManager.set(K.DIRECTION, c.d || 'auto');
-        ConfigManager.set(K.CATEGORY, c.c || 'HKC');
+        ConfigManager.set(K.PARTNER_LANG, c.pl || DEFAULT_SETTINGS.DEFAULT_PARTNER_LANG);
+        ConfigManager.set(K.CUSTOM_LANGS, c.cl || DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS.join(','));
+        ConfigManager.set(K.CATEGORY, c.c || DEFAULT_SETTINGS.DEFAULT_CATEGORY);
         ConfigManager.set(K.CHUNK_MODE, c.cm || 'long');
         ConfigManager.set(K.CONTEXT_WINDOW, String(c.cw !== undefined ? c.cw : 6));
         ConfigManager.set(K.SUMMARY_RANGE, c.sr || '5');
@@ -5165,7 +6194,10 @@ class App {
           ['apiKey', K.API_KEY],
           ['gasUrl', K.GAS_URL],
           ['gasToken', K.GAS_TOKEN],
+          ['recognitionProfile', K.RECOGNITION_PROFILE],
           ['direction', K.DIRECTION],
+          ['partnerLang', K.PARTNER_LANG],
+          ['customLangs', K.CUSTOM_LANGS],
           ['category', K.CATEGORY],
           ['chunkMode', K.CHUNK_MODE],
           ['summaryRange', K.SUMMARY_RANGE],
