@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Multilingual Transcriber
- * Version: 3.2.0 (Multilingual + EN/JA Priority + Hindi/Urdu Code-Switching & Single-Doc Sync Backend)
+ * Version: 3.3.0 (UX Overhaul + Summary-in-Doc + Multilingual + EN/JA Priority + Hindi/Urdu Code-Switching Backend)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および 多言語バックアップ翻訳 (action: 'translate')
@@ -155,7 +155,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '3.2.0',
+        version: '3.3.0',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -179,7 +179,7 @@ function doGet(e) {
   return createJsonResponse({
     status: 'ok',
     service: 'Multilingual Transcriber Backend',
-    version: '3.2.0',
+    version: '3.3.0',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
@@ -314,6 +314,11 @@ function handleSaveTranscript(payload, config) {
     metaP.setForegroundColor('#57606a');
     metaP.setFontSize(9.5);
     body.appendHorizontalRule();
+
+    if (payload.summary && payload.summary.markdown && String(payload.summary.markdown).trim() !== '') {
+      appendSummarySectionToDoc_(body, payload.summary);
+      body.appendHorizontalRule();
+    }
   } else {
     // 従来の追記モード (append) が明示指定された場合
     body.appendHorizontalRule();
@@ -393,8 +398,50 @@ function handleSaveTranscript(payload, config) {
     folderName: targetFolderName,
     folderUrl: targetFolderUrl,
     savedCount: records.length,
+    summarySaved: !!((isNew || saveMode === 'sync') && payload.summary && payload.summary.markdown),
     timestamp: new Date().toISOString()
   };
+}
+
+/**
+ * Googleドキュメント冒頭に構造化サマリーセクションを出力する
+ */
+function appendSummarySectionToDoc_(body, summary) {
+  var metaParts = [];
+  if (summary.rangeLabel) metaParts.push(String(summary.rangeLabel));
+  if (summary.timeSpan) metaParts.push(String(summary.timeSpan));
+  var sumTitle = '📝 会話サマリー' + (metaParts.length > 0 ? ' [' + metaParts.join(' / ') + ']' : '');
+
+  var sumHeadP = body.appendParagraph(sumTitle);
+  sumHeadP.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  sumHeadP.setForegroundColor('#1b365d');
+  sumHeadP.setSpacingBefore(6);
+  sumHeadP.setSpacingAfter(4);
+
+  var lines = String(summary.markdown || '').split(/\r?\n/);
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line) continue;
+    var cleanInline = line.replace(/\*\*(.+?)\*\*/g, '$1');
+
+    if (/^#{1,4}\s+/.test(cleanInline)) {
+      var subHead = body.appendParagraph(cleanInline.replace(/^#{1,4}\s+/, ''));
+      subHead.setHeading(DocumentApp.ParagraphHeading.HEADING4);
+      subHead.setForegroundColor('#1b365d');
+      subHead.setSpacingBefore(6);
+      subHead.setSpacingAfter(2);
+    } else if (/^([-*•・]|\d+\.)\s+/.test(cleanInline)) {
+      var itemText = cleanInline.replace(/^([-*•・]|\d+\.)\s+/, '');
+      var listItem = body.appendListItem(itemText);
+      listItem.setGlyphType(DocumentApp.GlyphType.BULLET);
+      listItem.setForegroundColor('#2c3e50');
+    } else {
+      var p = body.appendParagraph(cleanInline);
+      p.setForegroundColor('#2c3e50');
+      p.setSpacingBefore(0);
+      p.setSpacingAfter(3);
+    }
+  }
 }
 
 /**

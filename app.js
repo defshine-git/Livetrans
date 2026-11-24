@@ -854,7 +854,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Multilingual Transcriber
- * Version: 3.2.0 (Complete Multilingual + EN/JA Top Priority + Hindi/Urdu Code-Switching Edition)
+ * Version: 3.3.0 (UX Overhaul + Complete Multilingual + EN/JA Top Priority + Hindi/Urdu Code-Switching Edition)
  *
  * Modules:
  *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Base64 UTF-8, Timeout fetch)
@@ -874,7 +874,7 @@ global.QRCode = QRCode;
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -1413,6 +1413,209 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
   }
 }
 
+/**
+ * 経過ミリ秒を MM:SS または H:MM:SS 形式に整形する
+ */
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  const mm = String(minutes).padStart(2, '0');
+  const ss = String(seconds).padStart(2, '0');
+  return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/**
+ * RFC 4180 準拠の CSV フィールドエスケープ
+ */
+function escapeCsvField(val) {
+  const str = val === null || val === undefined ? '' : String(val);
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Excel互換（UTF-8 BOM + CRLF）のタイムラインCSVを生成する
+ */
+function buildTranscriptCsv(records = []) {
+  const header = ['時刻', '話者', '言語', '原文', '訳文', '認識エンジン'].map(escapeCsvField).join(',');
+  const rows = [header];
+  for (const r of records) {
+    const langLabel = getLanguageDisplayName(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
+    rows.push([
+      r.time || '',
+      r.speaker || '',
+      langLabel,
+      r.originalText || '',
+      r.translatedText || '',
+      r.engine || ''
+    ].map(escapeCsvField).join(','));
+  }
+  return '\uFEFF' + rows.join('\r\n') + '\r\n';
+}
+
+/**
+ * サマリー込みの Markdown 議事録を生成する
+ */
+function buildTranscriptMarkdown(records = [], { category = 'Common', title = '', latestSummary = null } = {}) {
+  const cleanCell = (s) => String(s || '').replace(/\r?\n/g, '<br>').replace(/\|/g, '\\|');
+  const docHeading = title ? `# ${title}\n\n` : `# 会話・翻訳議事録 (${category})\n\n`;
+  const exportedAt = new Date().toLocaleString('ja-JP');
+  let md = docHeading;
+  md += `- **出力日時**: ${exportedAt}\n`;
+  md += `- **分野**: ${category}\n`;
+  md += `- **発話件数**: ${records.length}件\n\n`;
+
+  if (latestSummary && latestSummary.markdown) {
+    const metaParts = [latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
+    md += `## 会話サマリー${metaParts ? ` (${metaParts})` : ''}\n\n`;
+    md += `${String(latestSummary.markdown).trim()}\n\n---\n\n`;
+  }
+
+  md += '## 確定翻訳タイムライン\n\n';
+  md += '| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n';
+  for (const t of records) {
+    const langLabel = getLanguageDisplayName(t.speakerLang, t.mixedSubLangs, t.colloquialMix);
+    md += `| ${cleanCell(t.time)} | ${cleanCell(t.speaker)} | ${cleanCell(langLabel)} | ${cleanCell(t.originalText)} | ${cleanCell(t.translatedText)} |\n`;
+  }
+  return md;
+}
+
+/**
+ * シンプルな時系列プレーンテキスト議事録を生成する
+ */
+function buildTranscriptTxt(records = [], { category = 'Common', title = '', latestSummary = null } = {}) {
+  const lines = [];
+  lines.push(title || `会話・翻訳議事録 (${category})`);
+  lines.push(`出力日時: ${new Date().toLocaleString('ja-JP')} / 発話件数: ${records.length}件`);
+  lines.push('==================================================');
+
+  if (latestSummary && latestSummary.markdown) {
+    const metaParts = [latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
+    lines.push('');
+    lines.push(`【会話サマリー${metaParts ? ` (${metaParts})` : ''}】`);
+    lines.push(String(latestSummary.markdown).trim());
+    lines.push('');
+    lines.push('--------------------------------------------------');
+  }
+
+  for (const r of records) {
+    const langLabel = getLanguageDisplayName(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
+    lines.push('');
+    lines.push(`[${r.time || '--:--:--'}] ${r.speaker || ''} (${langLabel})`);
+    lines.push(`原文: ${r.originalText || ''}`);
+    lines.push(`訳文: ${r.translatedText || ''}`);
+  }
+  lines.push('');
+  return lines.join('\r\n');
+}
+
+/**
+ * タイムラインのキーワード検索・話者/言語フィルタ判定
+ */
+function matchesTimelineFilter(record, query = '', filter = 'all') {
+  if (!record) return false;
+  const f = String(filter || 'all');
+  const spk = String(record.speaker || '');
+  const lang = String(record.speakerLang || 'en');
+  const isMixed = (Array.isArray(record.mixedSubLangs) && record.mixedSubLangs.length > 0) || Boolean(record.colloquialMix);
+
+  if (f === 'auditor' && !spk.includes('Auditor')) return false;
+  if (f === 'yard' && !spk.includes('Yard')) return false;
+  if (f === 'facility' && !spk.includes('Facility')) return false;
+  if (f === 'other' && !spk.includes('Other')) return false;
+  if (f === 'ja' && lang !== 'ja') return false;
+  if (f === 'foreign' && lang === 'ja') return false;
+  if (f === 'mixed' && !isMixed) return false;
+
+  const trimmedQuery = String(query || '').trim().toLowerCase();
+  if (!trimmedQuery) return true;
+
+  const haystack = `${record.originalText || ''}\n${record.translatedText || ''}\n${spk}`.toLowerCase();
+  const tokens = trimmedQuery.split(/\s+/).filter(Boolean);
+  return tokens.every((tok) => haystack.includes(tok));
+}
+
+/**
+ * セッション下書き保存用オブジェクトを構築する
+ */
+function serializeSessionDraft({ records = [], summaryHistory = [], category = 'Common', savedAt = Date.now() } = {}) {
+  const safeRecords = records.slice(-500).map((r) => ({
+    id: r.id,
+    time: r.time || '',
+    createdAt: r.createdAt || savedAt,
+    speaker: r.speaker || ROLES[0],
+    speakerLang: r.speakerLang || 'en',
+    mixedSubLangs: Array.isArray(r.mixedSubLangs) ? r.mixedSubLangs : [],
+    colloquialMix: r.colloquialMix || null,
+    hintedLangCode: r.hintedLangCode || null,
+    originalText: r.originalText || '',
+    translatedText: r.translatedText || '',
+    engine: r.engine || 'Gemini Live',
+    direction: r.direction || 'auto',
+    partnerLang: r.partnerLang || 'en',
+    recognitionProfile: r.recognitionProfile || DEFAULT_SETTINGS.DEFAULT_RECOGNITION_PROFILE,
+    category: r.category || category,
+    isTranslating: false
+  }));
+
+  const safeSummaries = (summaryHistory || []).slice(0, 10).map((s) => ({
+    id: s.id,
+    generatedAt: s.generatedAt || '',
+    rangeLabel: s.rangeLabel || '',
+    timeSpan: s.timeSpan || '',
+    count: s.count || 0,
+    hasPending: false,
+    markdown: s.markdown || '',
+    model: s.model || ''
+  }));
+
+  return {
+    version: APP_VERSION,
+    savedAt,
+    category,
+    records: safeRecords,
+    summaryHistory: safeSummaries
+  };
+}
+
+/**
+ * 前回の未保存セッション下書きを現在のセッション先頭（時系列順）へマージする
+ */
+function mergeRestoredDraft(prevDraft, currentRecords = [], currentSummaries = []) {
+  const prevRecs = Array.isArray(prevDraft?.records) ? prevDraft.records : [];
+  const seenIds = new Set();
+  const mergedRecords = [];
+
+  for (const r of prevRecs) {
+    if (!r || !r.id || seenIds.has(r.id)) continue;
+    seenIds.add(r.id);
+    mergedRecords.push({
+      ...r,
+      isTranslating: false
+    });
+  }
+  for (const r of currentRecords) {
+    if (!r || !r.id || seenIds.has(r.id)) continue;
+    seenIds.add(r.id);
+    mergedRecords.push(r);
+  }
+
+  const prevSums = Array.isArray(prevDraft?.summaryHistory) ? prevDraft.summaryHistory : [];
+  const seenSumIds = new Set();
+  const mergedSummaries = [];
+  for (const s of [...currentSummaries, ...prevSums]) {
+    if (!s || !s.id || seenSumIds.has(s.id)) continue;
+    seenSumIds.add(s.id);
+    mergedSummaries.push(s);
+  }
+
+  return { records: mergedRecords, summaryHistory: mergedSummaries };
+}
+
 // ==========================================
 // 2. Config Manager (localStorage)
 // ==========================================
@@ -1441,7 +1644,14 @@ class ConfigManager {
     CONTEXT_WINDOW: 'glt_context_window',
     SUMMARY_RANGE: 'glt_summary_range',
     SUMMARY_CUSTOM_MIN: 'glt_summary_custom_min',
-    VAD_MODE: 'glt_vad_mode'
+    VAD_MODE: 'glt_vad_mode',
+    ADVANCED_OPEN: 'glt_advanced_open',
+    MIC_DEVICE_ID: 'glt_mic_device_id',
+    FONT_SIZE: 'glt_font_size',
+    THEME: 'glt_theme',
+    INCLUDE_SUMMARY_IN_DOC: 'glt_include_summary_in_doc',
+    SESSION_DRAFT: 'glt_session_draft',
+    SESSION_DRAFT_PREV: 'glt_session_draft_prev'
   });
 
   static get(key, defaultValue = '') {
@@ -1459,6 +1669,14 @@ class ConfigManager {
       localStorage.setItem(key, value);
     } catch (e) {
       console.warn('LocalStorage write failed:', e);
+    }
+  }
+
+  static remove(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {
+      console.warn('LocalStorage remove failed:', e);
     }
   }
 }
@@ -1697,6 +1915,7 @@ class AudioCaptureService {
     this.isRecording = false;
     this.isPaused = false;
     this.gainValue = 2.5;
+    this.deviceId = '';
     this.vad = new VoiceActivityDetector('auto');
     this.onChunkCallback = null;
     this.onVolumeCallback = null;
@@ -1708,6 +1927,10 @@ class AudioCaptureService {
     this._vadTimeByte = null;
     this._lastVadUiState = null;
     this._lastVadUiUpdateAt = 0;
+  }
+
+  setDeviceId(deviceId) {
+    this.deviceId = String(deviceId || '').trim();
   }
 
   setVadMode(mode) {
@@ -1810,11 +2033,19 @@ class AudioCaptureService {
       throw new Error('マイクアクセスAPIが利用できません。HTTPS または http://localhost 上でアクセスしてください。');
     }
 
-    const constraintCandidates = [
+    const constraintCandidates = [];
+    if (this.deviceId) {
+      constraintCandidates.push(
+        { audio: { deviceId: { exact: this.deviceId }, echoCancellation: true, noiseSuppression: !isIOS, autoGainControl: true } },
+        { audio: { deviceId: { exact: this.deviceId }, echoCancellation: true } },
+        { audio: { deviceId: { exact: this.deviceId } } }
+      );
+    }
+    constraintCandidates.push(
       { audio: { echoCancellation: true, noiseSuppression: !isIOS, autoGainControl: true } },
       { audio: { echoCancellation: true } },
       { audio: true }
-    ];
+    );
 
     let lastError = null;
     for (const constraints of constraintCandidates) {
@@ -3564,7 +3795,7 @@ class GasStorageClient {
 
   static async saveTranscript(
     gasUrl,
-    { documentId, title, folderId, records, direction, partnerLang, recognitionProfile, category, model, token, saveMode = 'sync' }
+    { documentId, title, folderId, records, summary, direction, partnerLang, recognitionProfile, category, model, token, saveMode = 'sync' }
   ) {
     const trimmedUrl = GasStorageClient._validateGasUrl(gasUrl);
     if (!records || records.length === 0) throw new Error('保存対象の確定翻訳レコードがありません。');
@@ -3585,6 +3816,9 @@ class GasStorageClient {
       saveMode,
       records
     };
+    if (summary && summary.markdown) {
+      payload.summary = summary;
+    }
 
     let res;
     try {
@@ -4084,11 +4318,25 @@ class App {
     this.isSavingDocs = false;
     this.summaryBodyCollapsed = false;
 
+    // v3.3.0 UX state
+    this.unreadNewCount = 0;
+    this.timelineQuery = '';
+    this.timelineFilter = 'all';
+    this._recStartedAt = 0;
+    this._recTimerInterval = null;
+    this._wakeLockSentinel = null;
+    this._scrollRafPending = false;
+    this._lastDraftJson = '';
+    this._pendingPrevDraft = null;
+    this._highlightTimer = null;
+
     this._initElements();
     this._initCustomLangCheckboxes();
     this._loadSettings();
     this._bindAllEvents();
     this._checkHashConfig();
+    this._initSessionDraft();
+    this._refreshMicDevices();
     this._updateUIState();
 
     if (isIPadOrIOS()) {
@@ -4103,7 +4351,7 @@ class App {
     this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
     this.log(
       'info',
-      `初期化完了 (v${APP_VERSION})。日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応・高精度VAD・前文脈連動・任意範囲サマリーが有効です。`
+      `初期化完了 (v${APP_VERSION})。日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応・未保存復元・ミニLIVEバー・ローカル保存・検索フィルタが有効です。`
     );
   }
 
@@ -4129,6 +4377,27 @@ class App {
     this.elStatusText = byId('status-text');
     this.elEngineBadge = byId('active-engine-badge');
     this.elBtnSettings = byId('btn-open-settings');
+    this.elRecTimer = byId('rec-timer');
+    this.elBtnFontSize = byId('btn-font-size');
+    this.elBtnThemeToggle = byId('btn-theme-toggle');
+
+    // Sticky Mini Live Bar & New Items FAB
+    this.elMiniLiveBar = byId('mini-live-bar');
+    this.elMiniTimer = byId('mini-timer');
+    this.elMiniMeterBar = byId('mini-meter-bar');
+    this.elMiniLiveText = byId('mini-live-text');
+    this.elBtnMiniFlush = byId('btn-mini-flush');
+    this.elBtnMiniPause = byId('btn-mini-pause');
+    this.elBtnMiniStop = byId('btn-mini-stop');
+    this.elBtnMiniTop = byId('btn-mini-top');
+    this.elBtnNewItems = byId('btn-new-items');
+    this.elNewItemsCount = byId('new-items-count');
+
+    // Draft Restore Banner
+    this.elDraftRestoreBanner = byId('draft-restore-banner');
+    this.elDraftRestoreText = byId('draft-restore-text');
+    this.elBtnDraftRestore = byId('btn-draft-restore');
+    this.elBtnDraftDiscard = byId('btn-draft-discard');
 
     this.elBtnToggleRecord = byId('btn-toggle-record');
     this.elBtnPauseRecord = byId('btn-pause-record');
@@ -4142,13 +4411,24 @@ class App {
     this.elSelectAudioSource = byId('select-audio-source');
     this.elSelectGain = byId('select-gain');
     this.elSelectVadMode = byId('select-vad-mode');
+    this.elSelectMicDevice = byId('select-mic-device');
     this.elSelectDefaultGain = byId('select-default-gain');
     this.elBtnClearFeed = byId('btn-clear-feed');
     this.elBtnSaveDocs = byId('btn-save-docs');
     this.elSaveDocsText = byId('btn-save-docs-text');
     this.elUnsavedBadge = byId('unsaved-badge');
 
+    // Custom Langs Inline Strip & Collapsible Advanced Panel
+    this.elCustomLangsInline = byId('custom-langs-inline');
+    this.elCustomLangsInlineBadges = byId('custom-langs-inline-badges');
+    this.elBtnEditCustomLangs = byId('btn-edit-custom-langs');
+    this.elBtnToggleAdvanced = byId('btn-toggle-advanced');
+    this.elAdvancedSummaryBadge = byId('advanced-summary-badge');
+    this.elAdvancedToggleChevron = byId('advanced-toggle-chevron');
+    this.elAdvancedPanelBody = byId('advanced-panel-body');
+
     this.elRadioDocModes = document.getElementsByName('doc-save-mode');
+    this.elCheckIncludeSummary = byId('check-include-summary');
     this.elInputDocTitle = byId('input-doc-title');
     this.elInputDocId = byId('input-doc-id');
     this.elInputFolderId = byId('input-folder-id');
@@ -4164,7 +4444,7 @@ class App {
     this.elLiveVadBadge = byId('liveVadBadge');
     this.elLiveBufferStatus = byId('liveBufferStatus');
     this.elBtnFlushNow = byId('btn-flush-now');
-    this.elMeterBar = document.querySelector('.meter-bar');
+    this.elMeterBar = document.querySelector('#audio-meter .meter-bar');
 
     this.elToggleDiag = byId('toggle-diag');
     this.elDiagToggleIcon = byId('diag-toggle-icon');
@@ -4173,8 +4453,18 @@ class App {
 
     this.elTranscriptList = byId('transcript-list');
     this.elEmptyState = byId('empty-state');
+    this.elOnboardingSetup = byId('onboarding-setup');
+    this.elEmptyDefault = byId('empty-default');
+    this.elBtnOnboardSettings = byId('btn-onboard-settings');
     this.elRecordCount = byId('record-count');
     this.elBtnCopyAll = byId('btn-copy-all');
+    this.elExportMenu = byId('export-menu');
+    this.elBtnExportToggle = byId('btn-export-toggle');
+    this.elExportItems = document.querySelectorAll('.export-item[data-export]');
+    this.elInputTimelineSearch = byId('input-timeline-search');
+    this.elSelectTimelineFilter = byId('select-timeline-filter');
+    this.elTimelineFilterCount = byId('timeline-filter-count');
+    this.elFilterEmpty = byId('filter-empty');
 
     // Custom Prompt Panel
     this.elBtnTogglePromptPanel = byId('btn-toggle-prompt-panel');
@@ -4304,6 +4594,7 @@ class App {
 
     this.translationCustomPrompt = ConfigManager.get(K.TRANSLATION_CUSTOM_PROMPT, '');
     this.promptPanelOpen = ConfigManager.get(K.TRANSLATION_PROMPT_OPEN, 'false') === 'true';
+    this.advancedPanelOpen = ConfigManager.get(K.ADVANCED_OPEN, 'false') === 'true';
 
     this.summaryRange = ConfigManager.get(K.SUMMARY_RANGE, '5');
     const savedCustomMin = parseInt(ConfigManager.get(K.SUMMARY_CUSTOM_MIN, '5'), 10);
@@ -4312,6 +4603,7 @@ class App {
     this.gain = ConfigManager.get(K.GAIN, '2.5');
     this.vadMode = ConfigManager.get(K.VAD_MODE, 'auto');
     if (!VoiceActivityDetector.PRESETS[this.vadMode]) this.vadMode = 'auto';
+    this.micDeviceId = ConfigManager.get(K.MIC_DEVICE_ID, '');
     this.engineMode = ConfigManager.get(K.ENGINE_MODE, 'auto');
     this.liveModel = ConfigManager.get(K.LIVE_MODEL, DEFAULT_SETTINGS.DEFAULT_LIVE_MODEL);
 
@@ -4326,8 +4618,20 @@ class App {
 
     this.autoSave = ConfigManager.get(K.AUTO_SAVE, 'false') === 'true';
     this.docMode = ConfigManager.get(K.DOC_MODE, 'new');
+    this.includeSummaryInDoc = ConfigManager.get(K.INCLUDE_SUMMARY_IN_DOC, 'true') !== 'false';
     this.folderId = ConfigManager.get(K.FOLDER_ID, DEFAULT_SETTINGS.DEFAULT_FOLDER_ID);
     this.lastDocId = ConfigManager.get(K.LAST_DOC_ID, '');
+
+    const savedFontSize = ConfigManager.get(K.FONT_SIZE, 'normal');
+    this.fontSize = ['normal', 'large', 'xlarge'].includes(savedFontSize) ? savedFontSize : 'normal';
+
+    const savedTheme = ConfigManager.get(K.THEME, '');
+    if (savedTheme === 'dark' || savedTheme === 'light') {
+      this.theme = savedTheme;
+    } else {
+      const prefersDark = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      this.theme = prefersDark ? 'dark' : 'light';
+    }
 
     if (isIPadOrIOS() && this.audioSource === 'display') {
       this.audioSource = 'mic';
@@ -4352,15 +4656,21 @@ class App {
     this.elSelectLiveModel.value = this.liveModel;
     if (this.elInputSystemInstruction) this.elInputSystemInstruction.value = this.systemInstruction;
     this.elCheckAutoSave.checked = this.autoSave;
+    if (this.elCheckIncludeSummary) this.elCheckIncludeSummary.checked = this.includeSummaryInDoc;
     if (this.elInputFolderId) this.elInputFolderId.value = this.folderId;
     if (this.elInputDefaultFolderId) this.elInputDefaultFolderId.value = this.folderId;
     if (this.lastDocId) this.elInputDocId.value = this.lastDocId;
 
+    this._applyFontSize();
+    this._applyTheme();
     this._syncCustomLangCheckboxesUI();
     this._syncTranslationControlsUI();
+    this._syncAdvancedPanelUI();
+    this._syncOnboardingUI();
 
     this.audioService.setGain(this.gain);
     this.audioService.setVadMode(this.vadMode);
+    this.audioService.setDeviceId(this.micDeviceId);
     this.geminiClient.updateRecognitionSettings({
       direction: this.direction,
       recognitionProfile: this.recognitionProfile,
@@ -4402,6 +4712,7 @@ class App {
     this._bindPromptEvents();
     this._bindSummaryEvents();
     this._bindModalEvents();
+    this._bindUxEvents();
     this._bindGeminiClientCallbacks();
 
     const unlockAudioHandler = () => {
@@ -4447,6 +4758,7 @@ class App {
       }
       this.recognitionProfile = e.target.value;
       ConfigManager.set(K.RECOGNITION_PROFILE, this.recognitionProfile);
+      this._syncCustomLangsInlineUI();
       this.geminiClient.updateRecognitionSettings({ recognitionProfile: this.recognitionProfile });
       this.webSpeechService.updateSettings({ recognitionProfile: this.recognitionProfile });
       this.utteranceBuffer.setConfig({ recognitionProfile: this.recognitionProfile });
@@ -4508,6 +4820,7 @@ class App {
         partnerLang: this.partnerLang,
         recognitionProfile: this.recognitionProfile
       });
+      this._updateAdvancedSummaryBadge();
       this.log('info', `翻訳区切りモード変更: ${this.chunkMode}`);
       this.showToast('翻訳の区切り設定を変更しました。', 'info');
     });
@@ -4516,6 +4829,7 @@ class App {
       const val = parseInt(e.target.value, 10);
       this.contextWindow = isNaN(val) ? 6 : val;
       ConfigManager.set(K.CONTEXT_WINDOW, String(this.contextWindow));
+      this._updateAdvancedSummaryBadge();
       this.log('info', `翻訳時の前文脈参照件数を変更: ${this.contextWindow === 0 ? 'なし (独立翻訳)' : `直近${this.contextWindow}件`}`);
       this.showToast(
         this.contextWindow === 0
@@ -4528,6 +4842,7 @@ class App {
     this.elSelectCategory?.addEventListener('change', (e) => {
       this.category = e.target.value;
       ConfigManager.set(K.CATEGORY, this.category);
+      this._updateAdvancedSummaryBadge();
       this.log('info', `分野変更: ${this.category}`);
     });
 
@@ -4535,6 +4850,7 @@ class App {
       this.gain = e.target.value;
       ConfigManager.set(K.GAIN, this.gain);
       this.audioService.setGain(this.gain);
+      this._updateAdvancedSummaryBadge();
       this.log('info', `マイク集音感度変更: ${this.gain}x (遠距離ブースト適用)`);
       this.showToast(`マイク感度を ${this.gain}x に設定しました。`, 'info');
     });
@@ -4543,6 +4859,7 @@ class App {
       this.vadMode = e.target.value;
       ConfigManager.set(K.VAD_MODE, this.vadMode);
       this.audioService.setVadMode(this.vadMode);
+      this._updateAdvancedSummaryBadge();
       const label = VoiceActivityDetector.PRESETS[this.vadMode]?.label || this.vadMode;
       this.log('info', `VAD（音声区間検出）モード変更: ${label}`);
       this.showToast(`VAD を「${label}」に設定しました。`, 'info');
@@ -4557,8 +4874,12 @@ class App {
       this.currentSummaryId = null;
       this.savedRecordCount = 0;
       this.unsavedFinalizedDelta = 0;
+      this.unreadNewCount = 0;
+      if (this.elBtnNewItems) this.elBtnNewItems.style.display = 'none';
       this.utteranceBuffer.reset();
       this.hasUnsavedChanges = false;
+      ConfigManager.remove(K.SESSION_DRAFT);
+      this._lastDraftJson = '';
       this.elTranscriptList.innerHTML = '';
       this.elEmptyState.style.display = 'block';
       this.elRecordCount.textContent = '0 件の発話';
@@ -4567,7 +4888,13 @@ class App {
         this.elSelectSummaryHistory.innerHTML = '';
         this.elSelectSummaryHistory.style.display = 'none';
       }
+      this.timelineQuery = '';
+      this.timelineFilter = 'all';
+      if (this.elInputTimelineSearch) this.elInputTimelineSearch.value = '';
+      if (this.elSelectTimelineFilter) this.elSelectTimelineFilter.value = 'all';
+      this._applyTimelineFilter();
       this._updateSummaryTargetPreview();
+      this._syncOnboardingUI();
       this._updateUIState();
       this.showToast('全履歴をクリアしました。', 'info');
     });
@@ -4581,6 +4908,11 @@ class App {
         this._syncDocModeUI();
       });
     }
+
+    this.elCheckIncludeSummary?.addEventListener('change', (e) => {
+      this.includeSummaryInDoc = e.target.checked;
+      ConfigManager.set(K.INCLUDE_SUMMARY_IN_DOC, String(this.includeSummaryInDoc));
+    });
 
     this.elInputDocId.addEventListener('input', (e) => {
       const sanitized = GasStorageClient.extractDocId(e.target.value);
@@ -4775,6 +5107,9 @@ class App {
         systemInstruction: this.systemInstruction
       });
 
+      this._syncCustomLangsInlineUI();
+      this._updateAdvancedSummaryBadge();
+      this._syncOnboardingUI();
       this._closeSettingsModal();
       this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}, カスタム言語=${this.customLangs.join(',')}`);
       this.showToast('設定を保存しました。', 'success');
@@ -4823,19 +5158,201 @@ class App {
         .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
     });
 
-    // Close open card action dropdowns when clicking outside
+    // Close open card action dropdowns & export dropdown when clicking outside
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.card-menu')) {
         this._closeAllCardMenus();
       }
+      if (!e.target.closest('.export-menu')) {
+        this._closeExportMenu();
+      }
     });
 
-    // Consolidated Escape key handler for all modals & card menus
+    // Consolidated Escape key handler for all modals & dropdown menus
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       if (this.elModal?.style.display === 'flex') this._closeSettingsModal();
       if (this.elQrModal?.style.display === 'flex') this._closeQrModal();
       this._closeAllCardMenus();
+      this._closeExportMenu();
+    });
+  }
+
+  _bindUxEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
+
+    // Collapsible Advanced Panel
+    this.elBtnToggleAdvanced?.addEventListener('click', () => {
+      this.advancedPanelOpen = !this.advancedPanelOpen;
+      ConfigManager.set(K.ADVANCED_OPEN, String(this.advancedPanelOpen));
+      this._syncAdvancedPanelUI();
+    });
+
+    // Inline Custom Languages Edit Button
+    this.elBtnEditCustomLangs?.addEventListener('click', () => {
+      this._openSettingsModal({ focusCustomLangs: true });
+    });
+
+    // Onboarding Setup Button
+    this.elBtnOnboardSettings?.addEventListener('click', () => {
+      this._openSettingsModal();
+    });
+
+    // Microphone Input Device Selector
+    this.elSelectMicDevice?.addEventListener('change', (e) => {
+      this.micDeviceId = e.target.value || '';
+      ConfigManager.set(K.MIC_DEVICE_ID, this.micDeviceId);
+      this.audioService.setDeviceId(this.micDeviceId);
+      const selectedLabel = e.target.selectedOptions?.[0]?.textContent || '既定のマイク';
+      this.log('info', `マイク入力デバイス設定: ${selectedLabel}`);
+      if (this.isRecording && this.audioSource === 'mic') {
+        this.showToast('マイク設定を保存しました。次回録音開始時から新しいマイクが適用されます。', 'info');
+      } else {
+        this.showToast(`マイクを「${selectedLabel}」に設定しました。`, 'info');
+      }
+    });
+
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.addEventListener === 'function') {
+      navigator.mediaDevices.addEventListener('devicechange', () => this._refreshMicDevices());
+    }
+
+    // Font Size Cycle & Light/Dark Theme Toggle
+    this.elBtnFontSize?.addEventListener('click', () => {
+      const order = ['normal', 'large', 'xlarge'];
+      const idx = order.indexOf(this.fontSize);
+      this.fontSize = order[(idx + 1) % order.length];
+      ConfigManager.set(K.FONT_SIZE, this.fontSize);
+      this._applyFontSize();
+    });
+
+    this.elBtnThemeToggle?.addEventListener('click', () => {
+      this.theme = this.theme === 'dark' ? 'light' : 'dark';
+      ConfigManager.set(K.THEME, this.theme);
+      this._applyTheme();
+    });
+
+    // Local File Export Dropdown
+    this.elBtnExportToggle?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = !this.elExportMenu?.classList.contains('open');
+      this.elExportMenu?.classList.toggle('open', willOpen);
+      this.elBtnExportToggle?.setAttribute('aria-expanded', String(Boolean(willOpen)));
+    });
+
+    this.elExportItems?.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const fmt = btn.dataset.export;
+        this._closeExportMenu();
+        this.exportTranscriptFile(fmt);
+      });
+    });
+
+    // Timeline Keyword Search & Filter
+    this.elInputTimelineSearch?.addEventListener('input', (e) => {
+      this.timelineQuery = e.target.value || '';
+      this._applyTimelineFilter();
+    });
+    this.elSelectTimelineFilter?.addEventListener('change', (e) => {
+      this.timelineFilter = e.target.value || 'all';
+      this._applyTimelineFilter();
+    });
+
+    // Sticky Mini Live Bar Controls & New Items FAB
+    this.elBtnMiniFlush?.addEventListener('click', () => {
+      if (this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('mini-bar');
+      }
+    });
+    this.elBtnMiniPause?.addEventListener('click', () => this.togglePause());
+    this.elBtnMiniStop?.addEventListener('click', () => this.stopRecording());
+    this.elBtnMiniTop?.addEventListener('click', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    this.elBtnNewItems?.addEventListener('click', () => {
+      this.unreadNewCount = 0;
+      if (this.elBtnNewItems) this.elBtnNewItems.style.display = 'none';
+      const targetEl = (this.isRecording && this.elLivePreview) ? this.elLivePreview : this.elTranscriptList;
+      if (targetEl && typeof targetEl.scrollIntoView === 'function') {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+
+    window.addEventListener('scroll', () => {
+      if (this._scrollRafPending) return;
+      this._scrollRafPending = true;
+      requestAnimationFrame(() => {
+        this._scrollRafPending = false;
+        this._onWindowScroll();
+      });
+    }, { passive: true });
+
+    // Session Draft Restore / Discard
+    this.elBtnDraftRestore?.addEventListener('click', () => this.restorePreviousDraft());
+    this.elBtnDraftDiscard?.addEventListener('click', () => this.discardPreviousDraft());
+
+    // Keyboard Shortcuts (e.code for layout-safe Alt combos + '/' quick search)
+    window.addEventListener('keydown', (e) => {
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        if (e.code === 'KeyR') {
+          e.preventDefault();
+          this.audioService.unlockContext();
+          this.toggleRecording();
+          return;
+        }
+        if (e.code === 'KeyP') {
+          if (this.isRecording) {
+            e.preventDefault();
+            this.togglePause();
+          }
+          return;
+        }
+        if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+          if (this.utteranceBuffer.hasPendingText()) {
+            e.preventDefault();
+            this.utteranceBuffer.flushAll('shortcut');
+          }
+          return;
+        }
+        if (e.code === 'KeyS') {
+          e.preventDefault();
+          this.generateSummary();
+          return;
+        }
+      }
+
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === '/') {
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(e.target?.isContentEditable);
+        const modalOpen = this.elModal?.style.display === 'flex' || this.elQrModal?.style.display === 'flex';
+        if (!isEditable && !modalOpen && this.elInputTimelineSearch) {
+          e.preventDefault();
+          this.elInputTimelineSearch.focus();
+          this.elInputTimelineSearch.select();
+        }
+      }
+    });
+
+    // Data-loss protection: beforeunload, pagehide, visibilitychange (draft autosave + Wake Lock re-acquire)
+    window.addEventListener('beforeunload', (e) => {
+      this._saveDraftIfNeeded(true);
+      if (this.isRecording || (this.hasUnsavedChanges && this.records.length > 0)) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    window.addEventListener('pagehide', () => {
+      this._saveDraftIfNeeded(true);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        this._saveDraftIfNeeded(true);
+      } else if (document.visibilityState === 'visible' && this.isRecording) {
+        this._acquireWakeLock();
+      }
     });
   }
 
@@ -4891,6 +5408,387 @@ class App {
         ? '固定翻訳モード中は発話元の単一言語ロックが優先適用されます'
         : '音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）';
     }
+    this._syncCustomLangsInlineUI();
+  }
+
+  _syncCustomLangsInlineUI() {
+    if (!this.elCustomLangsInline) return;
+    const isLocked = Boolean(this.elSelectRecognitionProfile?.disabled);
+    const show = this.recognitionProfile === 'multilingual-custom' && !isLocked;
+    this.elCustomLangsInline.style.display = show ? 'flex' : 'none';
+    if (!show || !this.elCustomLangsInlineBadges) return;
+
+    this.elCustomLangsInlineBadges.innerHTML = '';
+    for (const code of (this.customLangs || DEFAULT_SETTINGS.DEFAULT_CUSTOM_LANGS)) {
+      const meta = resolveLanguageMeta(code);
+      const span = document.createElement('span');
+      span.className = 'custom-lang-mini-badge';
+      span.textContent = `${meta.badge} ${meta.name}`;
+      this.elCustomLangsInlineBadges.appendChild(span);
+    }
+  }
+
+  _syncAdvancedPanelUI() {
+    if (this.elAdvancedPanelBody) {
+      this.elAdvancedPanelBody.style.display = this.advancedPanelOpen ? 'flex' : 'none';
+    }
+    this.elBtnToggleAdvanced?.setAttribute('aria-expanded', String(Boolean(this.advancedPanelOpen)));
+    if (this.elAdvancedToggleChevron) {
+      this.elAdvancedToggleChevron.textContent = this.advancedPanelOpen ? '▲ 閉じる' : '▼ 開く';
+    }
+    this._updateAdvancedSummaryBadge();
+  }
+
+  _updateAdvancedSummaryBadge() {
+    if (!this.elAdvancedSummaryBadge) return;
+    const catMap = { Common: '全般', Casual: '雑談', HKC: 'HKC', 'EU-SRR': 'EU-SRR', HSE: 'HSE', IHM: 'IHM' };
+    const chunkMap = { long: '4秒', 'extra-long': '6秒', balanced: '2.2秒' };
+    const vadMap = { auto: 'VAD自動', sensitive: 'VAD敏感', strong: 'VAD強', off: 'VAD切' };
+    const catLabel = catMap[this.category] || this.category;
+    const chunkLabel = chunkMap[this.chunkMode] || this.chunkMode;
+    const ctxLabel = Number(this.contextWindow) > 0 ? `文脈${this.contextWindow}` : '文脈切';
+    const vadLabel = vadMap[this.vadMode] || 'VAD自動';
+    this.elAdvancedSummaryBadge.textContent = `${catLabel}・${chunkLabel}・${ctxLabel}・${this.gain}x・${vadLabel}`;
+  }
+
+  _syncOnboardingUI() {
+    if (!this.elOnboardingSetup || !this.elEmptyDefault) return;
+    const needsSetup = !this.apiKey && this.records.length === 0;
+    this.elOnboardingSetup.style.display = needsSetup ? 'block' : 'none';
+    this.elEmptyDefault.style.display = needsSetup ? 'none' : 'block';
+  }
+
+  _applyFontSize() {
+    if (typeof document === 'undefined' || !document.body) return;
+    document.body.classList.toggle('fs-l', this.fontSize === 'large');
+    document.body.classList.toggle('fs-xl', this.fontSize === 'xlarge');
+    if (this.elBtnFontSize) {
+      const labelMap = { normal: '🅰 標準', large: '🅰 大', xlarge: '🅰 特大' };
+      this.elBtnFontSize.textContent = labelMap[this.fontSize] || '🅰 標準';
+    }
+  }
+
+  _applyTheme() {
+    if (typeof document === 'undefined' || !document.documentElement) return;
+    document.documentElement.setAttribute('data-theme', this.theme === 'dark' ? 'dark' : 'light');
+    if (this.elBtnThemeToggle) {
+      const isDark = this.theme === 'dark';
+      this.elBtnThemeToggle.textContent = isDark ? '☀️' : '🌙';
+      this.elBtnThemeToggle.title = isDark ? 'ライトモードへ切替' : 'ダークモードへ切替';
+    }
+  }
+
+  async _refreshMicDevices() {
+    if (!this.elSelectMicDevice || typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter((d) => d.kind === 'audioinput');
+      const prevVal = this.micDeviceId || '';
+      this.elSelectMicDevice.innerHTML = '';
+
+      const defaultOpt = document.createElement('option');
+      defaultOpt.value = '';
+      defaultOpt.textContent = '既定のマイク (システム設定)';
+      this.elSelectMicDevice.appendChild(defaultOpt);
+
+      let foundSaved = false;
+      mics.forEach((mic, idx) => {
+        if (!mic.deviceId || mic.deviceId === 'default') return;
+        const opt = document.createElement('option');
+        opt.value = mic.deviceId;
+        opt.textContent = mic.label || `マイク入力 ${idx + 1}`;
+        if (mic.deviceId === prevVal) {
+          opt.selected = true;
+          foundSaved = true;
+        }
+        this.elSelectMicDevice.appendChild(opt);
+      });
+
+      if (prevVal && !foundSaved) {
+        this.elSelectMicDevice.value = '';
+      }
+      this.elSelectMicDevice.disabled = this.audioSource === 'display';
+    } catch (e) {
+      console.warn('[MicDevices] enumerateDevices failed:', e);
+    }
+  }
+
+  // ---- Wake Lock, Elapsed Timer & Mini Bar / Scroll Helpers ----
+  async _acquireWakeLock() {
+    if (!this.isRecording || typeof navigator === 'undefined' || !navigator.wakeLock?.request) return;
+    if (this._wakeLockSentinel && !this._wakeLockSentinel.released) return;
+    try {
+      this._wakeLockSentinel = await navigator.wakeLock.request('screen');
+      this._wakeLockSentinel.addEventListener?.('release', () => {
+        this._wakeLockSentinel = null;
+      });
+      this.log('info', '🔆 画面スリープ防止 (Screen Wake Lock) を有効化しました。');
+    } catch (err) {
+      console.warn('[WakeLock] acquire skipped:', err);
+    }
+  }
+
+  async _releaseWakeLock() {
+    if (!this._wakeLockSentinel) return;
+    try {
+      await this._wakeLockSentinel.release();
+    } catch (e) {}
+    this._wakeLockSentinel = null;
+  }
+
+  _startRecTimer() {
+    this._stopRecTimer();
+    this._recStartedAt = Date.now();
+    if (this.elRecTimer) this.elRecTimer.style.display = 'inline-flex';
+    this._updateRecTimerDisplay();
+    this._recTimerInterval = setInterval(() => this._updateRecTimerDisplay(), 1000);
+  }
+
+  _stopRecTimer() {
+    if (this._recTimerInterval) {
+      clearInterval(this._recTimerInterval);
+      this._recTimerInterval = null;
+    }
+    this._recStartedAt = 0;
+    if (this.elRecTimer) this.elRecTimer.style.display = 'none';
+    if (this.elMiniTimer) this.elMiniTimer.textContent = '00:00';
+  }
+
+  _updateRecTimerDisplay() {
+    if (!this.isRecording || !this._recStartedAt) return;
+    const formatted = formatElapsed(Date.now() - this._recStartedAt);
+    if (this.elRecTimer) {
+      this.elRecTimer.textContent = `${this.isPaused ? '⏸️' : '🔴'} ${formatted}`;
+    }
+    if (this.elMiniTimer) {
+      this.elMiniTimer.textContent = formatted;
+    }
+  }
+
+  _isNearTimelineTop() {
+    if (typeof window === 'undefined') return true;
+    if (window.scrollY < 200) return true;
+    if (this.elTranscriptList && typeof this.elTranscriptList.getBoundingClientRect === 'function') {
+      return this.elTranscriptList.getBoundingClientRect().top >= -40;
+    }
+    return true;
+  }
+
+  _syncMiniLiveBarVisibility() {
+    if (!this.elMiniLiveBar) return;
+    let shouldShow = false;
+    if (this.isRecording && this.elLivePreview && typeof this.elLivePreview.getBoundingClientRect === 'function') {
+      const rect = this.elLivePreview.getBoundingClientRect();
+      shouldShow = rect.bottom < 8;
+    }
+    this.elMiniLiveBar.classList.toggle('is-visible', shouldShow);
+    this.elMiniLiveBar.setAttribute('aria-hidden', String(!shouldShow));
+  }
+
+  _onWindowScroll() {
+    this._syncMiniLiveBarVisibility();
+    if (this.unreadNewCount > 0 && this._isNearTimelineTop()) {
+      this.unreadNewCount = 0;
+      if (this.elBtnNewItems) this.elBtnNewItems.style.display = 'none';
+    }
+  }
+
+  // ---- Session Draft Auto-Save & Restore ----
+  _initSessionDraft() {
+    const K = ConfigManager.STORAGE_KEYS;
+    try {
+      const rawCurrent = ConfigManager.get(K.SESSION_DRAFT, '');
+      if (rawCurrent) {
+        const parsed = JSON.parse(rawCurrent);
+        if (parsed && Array.isArray(parsed.records) && parsed.records.length > 0) {
+          ConfigManager.set(K.SESSION_DRAFT_PREV, rawCurrent);
+        }
+        ConfigManager.remove(K.SESSION_DRAFT);
+      }
+
+      const rawPrev = ConfigManager.get(K.SESSION_DRAFT_PREV, '');
+      if (rawPrev) {
+        const prev = JSON.parse(rawPrev);
+        if (prev && Array.isArray(prev.records) && prev.records.length > 0) {
+          this._pendingPrevDraft = prev;
+          const savedTimeStr = prev.savedAt
+            ? new Date(prev.savedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+            : '';
+          if (this.elDraftRestoreText) {
+            this.elDraftRestoreText.textContent = `前回の未保存セッション（${prev.records.length}件の発話${savedTimeStr ? `・${savedTimeStr}` : ''}）が見つかりました。`;
+          }
+          if (this.elDraftRestoreBanner) {
+            this.elDraftRestoreBanner.style.display = 'flex';
+          }
+        } else {
+          ConfigManager.remove(K.SESSION_DRAFT_PREV);
+        }
+      }
+    } catch (e) {
+      console.warn('[SessionDraft] Failed to load previous draft:', e);
+    }
+
+    this._draftAutosaveTimer = setInterval(() => this._saveDraftIfNeeded(), 4000);
+  }
+
+  _saveDraftIfNeeded(force = false) {
+    const K = ConfigManager.STORAGE_KEYS;
+    if (!this.records || this.records.length === 0 || (!this.hasUnsavedChanges && !this.isRecording && !this.records.some((r) => r.isTranslating))) {
+      if (this.records.length === 0 && this._lastDraftJson !== '') {
+        ConfigManager.remove(K.SESSION_DRAFT);
+        this._lastDraftJson = '';
+      }
+      return;
+    }
+
+    try {
+      const draftObj = serializeSessionDraft({
+        records: this.records,
+        summaryHistory: this.summaryHistory,
+        category: this.category,
+        savedAt: Date.now()
+      });
+      const compareKey = JSON.stringify({ r: draftObj.records, s: draftObj.summaryHistory, c: draftObj.category });
+      if (!force && compareKey === this._lastDraftJson) return;
+      this._lastDraftJson = compareKey;
+      ConfigManager.set(K.SESSION_DRAFT, JSON.stringify(draftObj));
+    } catch (e) {
+      console.warn('[SessionDraft] Save failed:', e);
+    }
+  }
+
+  restorePreviousDraft() {
+    const K = ConfigManager.STORAGE_KEYS;
+    if (!this._pendingPrevDraft) return;
+
+    const restoredCount = Array.isArray(this._pendingPrevDraft.records) ? this._pendingPrevDraft.records.length : 0;
+    const merged = mergeRestoredDraft(this._pendingPrevDraft, this.records, this.summaryHistory);
+    this.records = merged.records;
+    this.summaryHistory = merged.summaryHistory;
+
+    if (this.elTranscriptList) {
+      this.elTranscriptList.innerHTML = '';
+      for (const rec of this.records) {
+        this._appendSingleCard(rec, { skipScrollAdjust: true });
+      }
+    }
+
+    if (this.summaryHistory.length > 0) {
+      this.currentSummaryId = this.summaryHistory[0].id;
+      this._refreshSummaryHistorySelect();
+      if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'flex';
+      this._renderCurrentSummary();
+    }
+
+    this._pendingPrevDraft = null;
+    ConfigManager.remove(K.SESSION_DRAFT_PREV);
+    if (this.elDraftRestoreBanner) this.elDraftRestoreBanner.style.display = 'none';
+
+    this.hasUnsavedChanges = this.records.length > 0;
+    this.unsavedFinalizedDelta = this.getFinalizedRecords().length;
+    this._saveDraftIfNeeded(true);
+    this._applyTimelineFilter();
+    this._updateSummaryTargetPreview();
+    this._syncOnboardingUI();
+    this._updateUIState();
+    this.log('success', `前回の未保存セッション（${restoredCount}件）を復元しました。`);
+    this.showToast(`前回の未保存セッション（${restoredCount}件）を復元しました。`, 'success');
+  }
+
+  discardPreviousDraft() {
+    const K = ConfigManager.STORAGE_KEYS;
+    this._pendingPrevDraft = null;
+    ConfigManager.remove(K.SESSION_DRAFT_PREV);
+    if (this.elDraftRestoreBanner) this.elDraftRestoreBanner.style.display = 'none';
+    this.showToast('前回の未保存セッションを破棄しました。', 'info');
+  }
+
+  // ---- Timeline Search/Filter & Local File Export ----
+  _applyTimelineFilter() {
+    const total = this.records.length;
+    const isFilterActive = Boolean((this.timelineQuery || '').trim()) || (this.timelineFilter && this.timelineFilter !== 'all');
+    let visibleCount = 0;
+
+    for (const rec of this.records) {
+      const cardEl = document.getElementById(rec.id);
+      const matched = matchesTimelineFilter(rec, this.timelineQuery, this.timelineFilter);
+      if (matched) visibleCount += 1;
+      if (cardEl) {
+        cardEl.classList.toggle('is-hidden-by-filter', !matched);
+      }
+    }
+
+    if (this.elTimelineFilterCount) {
+      if (isFilterActive && total > 0) {
+        this.elTimelineFilterCount.style.display = 'inline-block';
+        this.elTimelineFilterCount.textContent = `表示 ${visibleCount}/${total}件`;
+      } else {
+        this.elTimelineFilterCount.style.display = 'none';
+      }
+    }
+
+    if (this.elFilterEmpty) {
+      this.elFilterEmpty.style.display = (total > 0 && isFilterActive && visibleCount === 0) ? 'block' : 'none';
+    }
+  }
+
+  _closeExportMenu() {
+    this.elExportMenu?.classList.remove('open');
+    this.elBtnExportToggle?.setAttribute('aria-expanded', 'false');
+  }
+
+  exportTranscriptFile(format = 'md') {
+    if (this.records.length === 0) {
+      this.showToast('保存する発話履歴がありません。', 'warning');
+      return;
+    }
+
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const customTitle = this.elInputDocTitle?.value.trim() || '';
+    const latestSummary = this.summaryHistory[0] || null;
+
+    let content = '';
+    let ext = 'md';
+    let mime = 'text/markdown;charset=utf-8';
+
+    if (format === 'csv') {
+      content = buildTranscriptCsv(this.records);
+      ext = 'csv';
+      mime = 'text/csv;charset=utf-8';
+    } else if (format === 'txt') {
+      content = buildTranscriptTxt(this.records, { category: this.category, title: customTitle, latestSummary });
+      ext = 'txt';
+      mime = 'text/plain;charset=utf-8';
+    } else {
+      content = buildTranscriptMarkdown(this.records, { category: this.category, title: customTitle, latestSummary });
+      ext = 'md';
+      mime = 'text/markdown;charset=utf-8';
+    }
+
+    const safeBase = customTitle
+      ? customTitle.replace(/[\\/:*?"<>|]/g, '_').slice(0, 50)
+      : `Transcript_${stamp}`;
+    const filename = `${safeBase}.${ext}`;
+    this._downloadFile(content, filename, mime);
+    this.log('success', `ローカルファイル出力完了: ${filename} (${this.records.length}件)`);
+    this.showToast(`「${filename}」をダウンロードしました。`, 'success');
+  }
+
+  _downloadFile(content, filename, mimeType) {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
   _syncDocModeUI() {
@@ -5045,6 +5943,8 @@ class App {
 
       this.summaryHistory.unshift(entry);
       this.currentSummaryId = entry.id;
+      this.hasUnsavedChanges = true;
+      this._saveDraftIfNeeded();
       this._refreshSummaryHistorySelect();
       this._renderCurrentSummary();
       this.showToast(`${spec.label}のサマリーを出力しました！`, 'success');
@@ -5257,6 +6157,11 @@ class App {
       this.isRecording = true;
       this.isPaused = false;
       this.elLivePreview.style.display = 'flex';
+      if (this.advancedPanelOpen) {
+        this.advancedPanelOpen = false;
+        ConfigManager.set(ConfigManager.STORAGE_KEYS.ADVANCED_OPEN, 'false');
+        this._syncAdvancedPanelUI();
+      }
       this.utteranceBuffer.setConfig({
         mode: this.chunkMode,
         direction: this.direction,
@@ -5264,6 +6169,9 @@ class App {
         recognitionProfile: this.recognitionProfile
       });
       this.utteranceBuffer.reset();
+      this._startRecTimer();
+      this._acquireWakeLock();
+      this._refreshMicDevices();
       this._updateStatus('recording');
       this._updateUIState();
       this.showToast('音声認識と自動翻訳を開始しました。マイクに向かって話してください。', 'success');
@@ -5277,6 +6185,8 @@ class App {
       this.isPaused = false;
       this.activeEngine = 'none';
       this.elLivePreview.style.display = 'none';
+      this._stopRecTimer();
+      this._releaseWakeLock();
       this._updateMeter(0);
       this._updateStatus('idle');
       this._updateUIState();
@@ -5301,9 +6211,12 @@ class App {
     this.isPaused = false;
     this.activeEngine = 'none';
     this.elLivePreview.style.display = 'none';
+    this._stopRecTimer();
+    this._releaseWakeLock();
     this._updateMeter(0);
     this._updateStatus('idle');
     this._updateUIState();
+    this._saveDraftIfNeeded(true);
     this.log('info', 'セッション停止完了。');
     this.showToast('翻訳セッションを停止しました。', 'info');
 
@@ -5340,13 +6253,21 @@ class App {
       this._updateStatus('paused');
       this.showToast('翻訳を一時停止しました。', 'warning');
     }
+    this._updateRecTimerDisplay();
     this._updateUIState();
   }
 
   _updateMeter(volume, isSpeaking = true) {
-    if (!this.elMeterBar) return;
-    this.elMeterBar.style.width = `${Math.min(100, Math.round(volume * 400))}%`;
-    this.elMeterBar.classList.toggle('is-muted', !isSpeaking && this.vadMode !== 'off');
+    const widthPct = `${Math.min(100, Math.round(volume * 400))}%`;
+    const isMuted = !isSpeaking && this.vadMode !== 'off';
+    if (this.elMeterBar) {
+      this.elMeterBar.style.width = widthPct;
+      this.elMeterBar.classList.toggle('is-muted', isMuted);
+    }
+    if (this.elMiniMeterBar) {
+      this.elMiniMeterBar.style.width = widthPct;
+      this.elMiniMeterBar.classList.toggle('is-muted', isMuted);
+    }
   }
 
   _updateVadBadge({ state, savedPct = 0 } = {}) {
@@ -5377,6 +6298,9 @@ class App {
     if (this.elBtnFlushNow) {
       this.elBtnFlushNow.disabled = !hasText;
     }
+    if (this.elBtnMiniFlush) {
+      this.elBtnMiniFlush.disabled = !hasText;
+    }
 
     if (this.elLiveBufferStatus) {
       if (!hasText) {
@@ -5396,10 +6320,14 @@ class App {
     }
 
     if (!hasText) {
-      this.elLiveText.className = 'live-text live-placeholder';
-      this.elLiveText.textContent = this.isRecording
+      const placeholderMsg = this.isRecording
         ? (this.isPaused ? '一時停止中 (音声を認識しません)' : '話しかけてください...')
         : 'マイクを開始すると、リアルタイムの原語プレビューが表示されます...';
+      this.elLiveText.className = 'live-text live-placeholder';
+      this.elLiveText.textContent = placeholderMsg;
+      if (this.elMiniLiveText) {
+        this.elMiniLiveText.textContent = placeholderMsg;
+      }
       this._updateSummaryTargetPreview();
       return;
     }
@@ -5410,6 +6338,12 @@ class App {
     if (interim) parts.push(`<bdi class="live-interim">${this._escapeHTML(interim)}</bdi>`);
     this.elLiveText.innerHTML = parts.join(committed && interim ? ' ' : '');
     this.elLiveText.scrollTop = this.elLiveText.scrollHeight;
+    if (this.elMiniLiveText) {
+      const combined = `${committed || ''} ${interim || ''}`.trim();
+      const lines = combined.split(/\r?\n/).filter(Boolean);
+      const lastLine = lines.length > 0 ? lines[lines.length - 1] : combined;
+      this.elMiniLiveText.textContent = lastLine.length > 120 ? `…${lastLine.slice(-120)}` : lastLine;
+    }
     this._updateSummaryTargetPreview();
   }
 
@@ -5494,6 +6428,7 @@ class App {
     this.records.push(record);
     this.hasUnsavedChanges = true;
     this._appendSingleCard(record);
+    this._saveDraftIfNeeded();
     this._updateSummaryTargetPreview();
     this._updateUIState();
 
@@ -5529,7 +6464,7 @@ class App {
     });
   }
 
-  _appendSingleCard(item) {
+  _appendSingleCard(item, options = {}) {
     this.elEmptyState.style.display = 'none';
     this.elRecordCount.textContent = `${this.records.length} 件の発話`;
 
@@ -5583,11 +6518,23 @@ class App {
           <textarea id="${item.id}_edit_trans" dir="auto" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
         </div>
         <div class="edit-actions">
-          <button type="button" class="btn btn-sm btn-outline" data-a="cancel">キャンセル</button>
-          <button type="button" class="btn btn-sm btn-primary" data-a="save">保存</button>
+          <button type="button" class="btn btn-sm btn-outline" data-a="cancel" title="Esc">キャンセル</button>
+          <button type="button" class="btn btn-sm btn-primary" data-a="save" title="Ctrl/⌘ + Enter">保存</button>
         </div>
       </div>
     `;
+
+    card.addEventListener('keydown', (e) => {
+      if (!e.target || e.target.tagName !== 'TEXTAREA') return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'Enter' || e.code === 'Enter')) {
+        e.preventDefault();
+        card.querySelector('[data-a="save"]')?.click();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        card.querySelector('[data-a="cancel"]')?.click();
+      }
+    });
 
     card.addEventListener('click', (e) => {
       const btn = e.target.closest('[data-a]');
@@ -5621,6 +6568,7 @@ class App {
         if (editTransEl) editTransEl.value = item.translatedText || '';
         document.getElementById(`${item.id}_view`).style.display = 'none';
         document.getElementById(`${item.id}_edit`).classList.add('open');
+        editTransEl?.focus();
         return;
       }
 
@@ -5655,6 +6603,8 @@ class App {
         document.getElementById(`${item.id}_edit`).classList.remove('open');
         document.getElementById(`${item.id}_view`).style.display = 'grid';
         this.hasUnsavedChanges = true;
+        this._applyTimelineFilter();
+        this._saveDraftIfNeeded();
         this._updateUIState();
         this.showToast('修正内容を保存しました（Googleドキュメントへ未反映）。', 'success');
         return;
@@ -5697,7 +6647,10 @@ class App {
         if (this.records.length === 0) {
           this.elEmptyState.style.display = 'block';
         }
+        this._applyTimelineFilter();
+        this._saveDraftIfNeeded();
         this._updateSummaryTargetPreview();
+        this._syncOnboardingUI();
         this._updateUIState();
         this.showToast('発話を削除しました。', 'info');
         return;
@@ -5713,11 +6666,31 @@ class App {
         if (item.speaker.includes('Auditor')) spkTarget.classList.add('auditor');
         else if (item.speaker.includes('Yard')) spkTarget.classList.add('yard');
         this.hasUnsavedChanges = true;
+        this._applyTimelineFilter();
+        this._saveDraftIfNeeded();
         this._updateUIState();
       }
     });
 
+    const wasScrolledDown = !options.skipScrollAdjust && !this._isNearTimelineTop();
+    const supportsNativeAnchor = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('overflow-anchor', 'auto');
+    const prevHeight = (wasScrolledDown && !supportsNativeAnchor && this.elTranscriptList)
+      ? this.elTranscriptList.offsetHeight
+      : 0;
+
     this.elTranscriptList.prepend(card);
+    this._applyTimelineFilter();
+
+    const isVisibleCard = !card.classList.contains('is-hidden-by-filter');
+    if (wasScrolledDown && isVisibleCard) {
+      if (!supportsNativeAnchor && this.elTranscriptList && typeof window !== 'undefined' && typeof window.scrollBy === 'function') {
+        const delta = this.elTranscriptList.offsetHeight - prevHeight;
+        if (delta > 0) window.scrollBy(0, delta);
+      }
+      this.unreadNewCount += 1;
+      if (this.elNewItemsCount) this.elNewItemsCount.textContent = String(this.unreadNewCount);
+      if (this.elBtnNewItems) this.elBtnNewItems.style.display = 'inline-flex';
+    }
   }
 
   _onTranslationComplete(recordId, transResult) {
@@ -5755,6 +6728,8 @@ class App {
 
     this.unsavedFinalizedDelta += 1;
     this.hasUnsavedChanges = true;
+    this._applyTimelineFilter();
+    this._saveDraftIfNeeded();
     this._updateUIState();
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
 
@@ -5812,6 +6787,17 @@ class App {
         engine: r.engine
       }));
 
+      const latestSum = this.summaryHistory[0];
+      const summaryPayload = (this.includeSummaryInDoc && latestSum && latestSum.markdown)
+        ? {
+            markdown: latestSum.markdown,
+            rangeLabel: latestSum.rangeLabel || '',
+            timeSpan: latestSum.timeSpan || '',
+            count: latestSum.count || 0,
+            generatedAt: latestSum.generatedAt || ''
+          }
+        : null;
+
       const isExistingMode = this.docMode === 'existing';
       let docId = isExistingMode ? (this.elInputDocId.value.trim() || this.lastDocId) : '';
       docId = GasStorageClient.extractDocId(docId);
@@ -5822,7 +6808,7 @@ class App {
       this.elSaveDocsText.textContent = isExistingMode ? 'ドキュメント同期中...' : 'ドキュメント保存中...';
       this.log(
         'info',
-        `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
+        `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件${summaryPayload ? ' + 最新サマリー' : ''}, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
       );
 
       let result;
@@ -5833,6 +6819,7 @@ class App {
           title,
           folderId,
           records: recordsToSave,
+          summary: summaryPayload,
           direction: this.direction,
           partnerLang: this.partnerLang,
           recognitionProfile: this.recognitionProfile,
@@ -5849,6 +6836,7 @@ class App {
             title,
             folderId,
             records: recordsToSave,
+            summary: summaryPayload,
             direction: this.direction,
             partnerLang: this.partnerLang,
             recognitionProfile: this.recognitionProfile,
@@ -5864,6 +6852,10 @@ class App {
       this.savedRecordCount = recordsToSave.length;
       this.unsavedFinalizedDelta = 0;
       this.hasUnsavedChanges = false;
+      if (!this.records.some((r) => r.isTranslating)) {
+        ConfigManager.remove(ConfigManager.STORAGE_KEYS.SESSION_DRAFT);
+        this._lastDraftJson = '';
+      }
       this._updateUIState();
 
       if (result.documentId) {
@@ -5909,11 +6901,24 @@ class App {
   }
 
   // ---- Modals, Clipboard & QR Sync ----
-  _openSettingsModal() {
+  _openSettingsModal(options = {}) {
     this._syncCustomLangCheckboxesUI();
+    this._refreshMicDevices();
     this.elModal.style.display = 'flex';
     document.body.classList.add('modal-open');
-    setTimeout(() => this.elInputApiKey?.focus(), 50);
+
+    if (options.focusCustomLangs && this.elCustomLangsGrid) {
+      setTimeout(() => {
+        this.elCustomLangsGrid.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+        this.elCustomLangsGrid.classList.add('is-highlighted');
+        if (this._highlightTimer) clearTimeout(this._highlightTimer);
+        this._highlightTimer = setTimeout(() => {
+          this.elCustomLangsGrid?.classList.remove('is-highlighted');
+        }, 1800);
+      }, 60);
+    } else {
+      setTimeout(() => this.elInputApiKey?.focus(), 50);
+    }
   }
 
   _closeSettingsModal() {
@@ -5964,16 +6969,14 @@ class App {
       return;
     }
 
-    const clean = (s) => String(s || '').replace(/\n/g, '<br>').replace(/\|/g, '\\|');
-    let md = `# 会話・翻訳議事録 (${this.category})\n\n`;
-    md += '| 時刻 | 話者 | 言語 | 原文 | 訳文 |\n|---|---|---|---|---|\n';
-    for (const t of this.records) {
-      const langLabel = getLanguageDisplayName(t.speakerLang, t.mixedSubLangs, t.colloquialMix);
-      md += `| ${clean(t.time)} | ${clean(t.speaker)} | ${clean(langLabel)} | ${clean(t.originalText)} | ${clean(t.translatedText)} |\n`;
-    }
+    const md = buildTranscriptMarkdown(this.records, {
+      category: this.category,
+      title: this.elInputDocTitle?.value.trim() || '',
+      latestSummary: this.summaryHistory[0] || null
+    });
 
     this.copyToClipboard(md)
-      .then(() => this.showToast('全履歴をMarkdown表形式でコピーしました。', 'info'))
+      .then(() => this.showToast('全履歴をMarkdown形式でコピーしました。', 'info'))
       .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
   }
 
@@ -6012,6 +7015,15 @@ class App {
 
     pauseText.textContent = this.isPaused ? '再開' : '一時停止';
     pauseIcon.textContent = this.isPaused ? '▶️' : '⏸️';
+    if (this.elBtnMiniPause) {
+      this.elBtnMiniPause.textContent = this.isPaused ? '▶️' : '⏸️';
+    }
+    if (this.elSelectMicDevice) {
+      this.elSelectMicDevice.disabled = this.audioSource === 'display';
+    }
+
+    this._syncOnboardingUI();
+    this._syncMiniLiveBarVisibility();
 
     const finalizedCount = this.getFinalizedRecords().length;
     const unsavedCount = this.unsavedFinalizedDelta;

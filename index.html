@@ -5,11 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Multilingual Transcriber - 多言語音声認識・文脈翻訳システム</title>
   <meta name="description" content="Gemini Live API (日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語自動認識) および Web Speech API に対応した音声認識・長文文脈翻訳・任意範囲サマリーWebアプリ">
-  <link rel="stylesheet" href="style.css?v=3.2.0">
+  <link rel="stylesheet" href="style.css?v=3.3.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
   <div class="app-wrapper">
+    <!-- Sticky Mini Live Bar (録音中にライブ枠が画面外へスクロールした際に上部固定表示) -->
+    <div id="mini-live-bar" class="mini-live-bar" aria-hidden="true">
+      <span class="mini-rec-dot"></span>
+      <span id="mini-timer" class="mini-timer">00:00</span>
+      <span class="audio-meter mini-meter"><span id="mini-meter-bar" class="meter-bar"></span></span>
+      <span id="mini-live-text" class="mini-live-text" dir="auto">話しかけてください...</span>
+      <div class="mini-actions">
+        <button id="btn-mini-flush" type="button" class="btn btn-sm btn-primary" title="今すぐ翻訳 (Alt+Enter)">⚡</button>
+        <button id="btn-mini-pause" type="button" class="btn btn-sm btn-secondary" title="一時停止 / 再開 (Alt+P)">⏸️</button>
+        <button id="btn-mini-stop" type="button" class="btn btn-sm btn-stop" title="録音停止 (Alt+R)">⏹️</button>
+        <button id="btn-mini-top" type="button" class="btn btn-sm btn-secondary" title="ライブ表示へ戻る">↑</button>
+      </div>
+    </div>
+
+    <!-- 過去カード閲覧中の新着通知 -->
+    <button id="btn-new-items" type="button" class="new-items-fab" style="display: none;">↑ 新着の発話 <span id="new-items-count">0</span>件</button>
+
     <!-- Header -->
     <header class="app-header">
       <div class="header-left">
@@ -22,10 +39,13 @@
         </div>
       </div>
       <div class="header-right">
+        <span id="rec-timer" class="rec-timer" style="display: none;" title="録音経過時間">🔴 00:00</span>
         <div id="connection-status" class="status-badge status-idle">
           <span class="status-dot"></span>
           <span id="status-text" class="status-label">待機中</span>
         </div>
+        <button id="btn-font-size" type="button" class="btn btn-secondary btn-sm header-tool-btn" title="文字サイズ切替 (標準 / 大 / 特大)">🅰 標準</button>
+        <button id="btn-theme-toggle" type="button" class="btn btn-secondary btn-sm header-tool-btn" title="ライト / ダークモード切替" aria-label="テーマ切替">🌙</button>
         <button id="btn-open-qr" type="button" class="btn btn-secondary btn-sm" title="スマホ連携用QRコードを表示">📱 スマホ連携</button>
         <button id="btn-open-settings" type="button" class="btn btn-icon btn-secondary btn-sm" title="設定を開く" aria-label="設定">
           ⚙️ 設定
@@ -35,14 +55,26 @@
 
     <!-- Main Container -->
     <main class="app-content">
+      <!-- Unsaved Session Draft Restore Banner -->
+      <div id="draft-restore-banner" class="draft-restore-banner card" style="display: none;" role="region" aria-label="未保存セッション復元">
+        <div class="draft-restore-left">
+          <span class="draft-restore-icon">🗂️</span>
+          <span id="draft-restore-text" class="draft-restore-text">前回の未保存セッション（0件）が見つかりました。</span>
+        </div>
+        <div class="draft-restore-actions">
+          <button id="btn-draft-restore" type="button" class="btn btn-sm btn-primary">↩️ 前回のセッションを復元</button>
+          <button id="btn-draft-discard" type="button" class="btn btn-sm btn-ghost">破棄する</button>
+        </div>
+      </div>
+
       <!-- Controls & Setup Bar -->
       <section class="control-panel card">
         <div class="control-row main-actions">
-          <button id="btn-toggle-record" type="button" class="btn btn-primary btn-record">
+          <button id="btn-toggle-record" type="button" class="btn btn-primary btn-record" title="録音開始 / 停止 (Alt+R)">
             <span class="btn-icon-symbol">🎤</span>
             <span class="btn-text">録音開始</span>
           </button>
-          <button id="btn-pause-record" type="button" class="btn btn-secondary" disabled>
+          <button id="btn-pause-record" type="button" class="btn btn-secondary" title="一時停止 / 再開 (Alt+P)" disabled>
             <span class="btn-icon-symbol">⏸️</span>
             <span class="btn-text">一時停止</span>
           </button>
@@ -102,57 +134,6 @@
             </select>
           </div>
 
-          <div class="control-group category-group">
-            <label for="select-category" class="control-label">分野:</label>
-            <select id="select-category" class="select-input">
-              <option value="Common" selected>全般 (Common)</option>
-              <option value="Casual">雑談・一般会議 (Casual)</option>
-              <option value="HKC">HKC (香港条約)</option>
-              <option value="EU-SRR">EU-SRR</option>
-              <option value="HSE">HSE (安全衛生環境)</option>
-              <option value="IHM">IHM (有害物質一覧表)</option>
-            </select>
-          </div>
-
-          <div class="control-group chunk-group">
-            <label for="select-chunk-mode" class="control-label">区切り:</label>
-            <select id="select-chunk-mode" class="select-input" title="日本語翻訳時の長文まとめ度合い（原語は常にリアルタイム表示）">
-              <option value="long" selected>長文・文脈重視 (推奨 / 4秒)</option>
-              <option value="extra-long">超長文・段落まとめ (6秒)</option>
-              <option value="balanced">標準・やや短め (2.2秒)</option>
-            </select>
-          </div>
-
-          <div class="control-group context-group">
-            <label for="select-context-window" class="control-label">文脈:</label>
-            <select id="select-context-window" class="select-input" title="翻訳時に参照する直前の会話履歴件数（前の文脈を踏まえた翻訳）">
-              <option value="6" selected>直近6件 (推奨)</option>
-              <option value="3">直近3件 (軽め)</option>
-              <option value="10">直近10件 (長会議向け)</option>
-              <option value="0">なし (独立翻訳)</option>
-            </select>
-          </div>
-
-          <div class="control-group gain-group">
-            <label for="select-gain" class="control-label">感度:</label>
-            <select id="select-gain" class="select-input" title="マイク集音感度・遠距離ブースト設定">
-              <option value="1.0">標準 (1.0x / 近距離)</option>
-              <option value="1.8">高感度 (1.8x / 中距離)</option>
-              <option value="2.5" selected>遠距離集音 (2.5x / 推奨)</option>
-              <option value="3.5">超遠距離 (3.5x / 大部屋)</option>
-            </select>
-          </div>
-
-          <div class="control-group vad-group">
-            <label for="select-vad-mode" class="control-label">VAD:</label>
-            <select id="select-vad-mode" class="select-input" title="音声区間検出（プリロール＋余韻保持＋適応ノイズ追従で翻訳精度を維持しながら無音送信を削減）">
-              <option value="auto" selected>自動 (標準 / 推奨)</option>
-              <option value="sensitive">敏感 (小声・遠距離)</option>
-              <option value="strong">強め (騒音現場向け)</option>
-              <option value="off">OFF (常時送信)</option>
-            </select>
-          </div>
-
           <div class="action-spacer"></div>
 
           <button id="btn-clear-feed" type="button" class="btn btn-outline" title="タイムラインをクリア">
@@ -162,6 +143,108 @@
             💾 <span id="btn-save-docs-text">Google ドキュメントに保存</span>
             <span id="unsaved-badge" class="badge-count" style="display: none;">0</span>
           </button>
+        </div>
+
+        <!-- Custom Recognition Languages Inline Strip -->
+        <div id="custom-langs-inline" class="control-row custom-langs-inline" style="display: none;">
+          <span class="custom-langs-inline-label">🎯 カスタム認識言語:</span>
+          <div id="custom-langs-inline-badges" class="custom-langs-inline-badges"></div>
+          <button id="btn-edit-custom-langs" type="button" class="btn btn-sm btn-outline">⚙️ 変更</button>
+        </div>
+
+        <!-- Collapsible Advanced & Audio / Docs Settings Panel -->
+        <div class="control-row advanced-panel-row">
+          <div class="advanced-panel-header">
+            <button type="button" id="btn-toggle-advanced" class="prompt-toggle-btn advanced-toggle-btn" aria-expanded="false">
+              <span class="prompt-toggle-title">🎛️ 詳細・音響設定（分野 / 区切り / マイク選択 / Docs保存先）</span>
+              <span id="advanced-summary-badge" class="tag advanced-summary-badge">全般・4秒・2.5x</span>
+              <span id="advanced-toggle-chevron" class="prompt-chevron">▼ 開く</span>
+            </button>
+          </div>
+          <div id="advanced-panel-body" class="advanced-panel-body" style="display: none;">
+            <div class="advanced-controls-grid">
+              <div class="control-group category-group">
+                <label for="select-category" class="control-label">分野:</label>
+                <select id="select-category" class="select-input">
+                  <option value="Common" selected>全般 (Common)</option>
+                  <option value="Casual">雑談・一般会議 (Casual)</option>
+                  <option value="HKC">HKC (香港条約)</option>
+                  <option value="EU-SRR">EU-SRR</option>
+                  <option value="HSE">HSE (安全衛生環境)</option>
+                  <option value="IHM">IHM (有害物質一覧表)</option>
+                </select>
+              </div>
+
+              <div class="control-group chunk-group">
+                <label for="select-chunk-mode" class="control-label">区切り:</label>
+                <select id="select-chunk-mode" class="select-input" title="日本語翻訳時の長文まとめ度合い（原語は常にリアルタイム表示）">
+                  <option value="long" selected>長文・文脈重視 (推奨 / 4秒)</option>
+                  <option value="extra-long">超長文・段落まとめ (6秒)</option>
+                  <option value="balanced">標準・やや短め (2.2秒)</option>
+                </select>
+              </div>
+
+              <div class="control-group context-group">
+                <label for="select-context-window" class="control-label">文脈:</label>
+                <select id="select-context-window" class="select-input" title="翻訳時に参照する直前の会話履歴件数（前の文脈を踏まえた翻訳）">
+                  <option value="6" selected>直近6件 (推奨)</option>
+                  <option value="3">直近3件 (軽め)</option>
+                  <option value="10">直近10件 (長会議向け)</option>
+                  <option value="0">なし (独立翻訳)</option>
+                </select>
+              </div>
+
+              <div class="control-group gain-group">
+                <label for="select-gain" class="control-label">感度:</label>
+                <select id="select-gain" class="select-input" title="マイク集音感度・遠距離ブースト設定">
+                  <option value="1.0">標準 (1.0x / 近距離)</option>
+                  <option value="1.8">高感度 (1.8x / 中距離)</option>
+                  <option value="2.5" selected>遠距離集音 (2.5x / 推奨)</option>
+                  <option value="3.5">超遠距離 (3.5x / 大部屋)</option>
+                </select>
+              </div>
+
+              <div class="control-group vad-group">
+                <label for="select-vad-mode" class="control-label">VAD:</label>
+                <select id="select-vad-mode" class="select-input" title="音声区間検出（プリロール＋余韻保持＋適応ノイズ追従で翻訳精度を維持しながら無音送信を削減）">
+                  <option value="auto" selected>自動 (標準 / 推奨)</option>
+                  <option value="sensitive">敏感 (小声・遠距離)</option>
+                  <option value="strong">強め (騒音現場向け)</option>
+                  <option value="off">OFF (常時送信)</option>
+                </select>
+              </div>
+
+              <div class="control-group mic-device-group">
+                <label for="select-mic-device" class="control-label">マイク:</label>
+                <select id="select-mic-device" class="select-input" title="使用するマイク入力デバイスを選択（録音開始後にデバイス名が取得されます）">
+                  <option value="">既定のマイク (システム設定)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Google Docs Destination Setting -->
+            <div class="doc-settings-row">
+              <div class="doc-mode-toggle">
+                <label class="radio-label">
+                  <input type="radio" name="doc-save-mode" value="new" checked>
+                  新規ドキュメント作成
+                </label>
+                <label class="radio-label">
+                  <input type="radio" name="doc-save-mode" value="existing">
+                  既存ドキュメントに同期更新
+                </label>
+                <label class="checkbox-label doc-summary-check" title="新規作成または同期更新時に、直近で生成した会話サマリーをドキュメント冒頭に出力します（GAS v3.3.0以降）">
+                  <input type="checkbox" id="check-include-summary" checked>
+                  最新サマリーも冒頭に添付
+                </label>
+              </div>
+              <div class="doc-input-wrapper">
+                <input type="text" id="input-doc-title" class="text-input" placeholder="ドキュメント名 (空欄で日時自動付与)">
+                <input type="text" id="input-folder-id" class="text-input" placeholder="📁 保存先フォルダID/URL (空欄で規定フォルダ)">
+                <input type="text" id="input-doc-id" class="text-input" placeholder="既存ドキュメントIDまたはURLを入力" style="display: none;">
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Translation Custom Prompt / Theme Nuance Panel -->
@@ -190,25 +273,6 @@
           </div>
         </div>
 
-        <!-- Google Docs Destination Setting -->
-        <div class="control-row doc-settings-row">
-          <div class="doc-mode-toggle">
-            <label class="radio-label">
-              <input type="radio" name="doc-save-mode" value="new" checked>
-              新規ドキュメント作成
-            </label>
-            <label class="radio-label">
-              <input type="radio" name="doc-save-mode" value="existing">
-              既存ドキュメントに同期更新
-            </label>
-          </div>
-          <div class="doc-input-wrapper">
-            <input type="text" id="input-doc-title" class="text-input" placeholder="ドキュメント名 (空欄で日時自動付与)">
-            <input type="text" id="input-folder-id" class="text-input" placeholder="📁 保存先フォルダID/URL (空欄で規定フォルダ)">
-            <input type="text" id="input-doc-id" class="text-input" placeholder="既存ドキュメントIDまたはURLを入力" style="display: none;">
-          </div>
-        </div>
-
         <!-- Saved Document Banner -->
         <div id="saved-doc-banner" class="saved-doc-banner" style="display: none;">
           <span class="doc-banner-icon">✅</span>
@@ -232,7 +296,7 @@
               <span id="liveBufferStatus" class="tag buffer-status">発話待機中</span>
             </div>
             <div class="live-head-right">
-              <button id="btn-flush-now" type="button" class="btn btn-sm btn-primary live-flush-btn" title="蓄積中の原語を今すぐ翻訳確定する" disabled>
+              <button id="btn-flush-now" type="button" class="btn btn-sm btn-primary live-flush-btn" title="蓄積中の原語を今すぐ翻訳確定する (Alt+Enter)" disabled>
                 ⚡ 今すぐ翻訳
               </button>
               <span id="liveEngineTag" class="tag engine">Gemini Live</span>
@@ -267,7 +331,7 @@
             <span id="summary-target-preview" class="tag summary-target-badge">対象: 0件</span>
           </div>
           <div class="summary-bar-right">
-            <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したさかのぼり範囲の会話を日本語でサマリー出力">
+            <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したさかのぼり範囲の会話を日本語でサマリー出力 (Alt+S)">
               ✨ サマリー出力
             </button>
           </div>
@@ -299,16 +363,53 @@
           <div class="timeline-actions">
             <span id="record-count" class="record-counter">0 件の発話</span>
             <button id="btn-copy-all" type="button" class="btn btn-sm btn-ghost" title="全履歴を表形式(Markdown)でコピー">📋 全履歴コピー</button>
+            <div id="export-menu" class="export-menu">
+              <button id="btn-export-toggle" type="button" class="btn btn-sm btn-ghost" title="GAS不要でローカルにファイル保存" aria-haspopup="true" aria-expanded="false">📥 ファイル保存 ▾</button>
+              <div class="export-dropdown" role="menu">
+                <button type="button" class="export-item" data-export="md" role="menuitem">📝 Markdown (.md)<small>サマリー込み・議事録向け</small></button>
+                <button type="button" class="export-item" data-export="csv" role="menuitem">📊 CSV (.csv)<small>Excelでそのまま開ける形式</small></button>
+                <button type="button" class="export-item" data-export="txt" role="menuitem">📄 テキスト (.txt)<small>シンプルな時系列テキスト</small></button>
+              </div>
+            </div>
           </div>
+        </div>
+
+        <div class="timeline-tools">
+          <input type="search" id="input-timeline-search" class="text-input timeline-search" placeholder="🔍 キーワード検索（原文・翻訳） /" aria-label="タイムライン検索">
+          <select id="select-timeline-filter" class="select-input select-sm" title="話者・言語で絞り込み">
+            <option value="all" selected>すべて表示</option>
+            <option value="auditor">👤 話者: 監査員</option>
+            <option value="yard">👤 話者: ヤード</option>
+            <option value="facility">👤 話者: 施設</option>
+            <option value="other">👤 話者: その他</option>
+            <option value="ja">🇯🇵 日本語の発話</option>
+            <option value="foreign">🌐 外国語の発話</option>
+            <option value="mixed">🔀 混在（コードスイッチ）</option>
+          </select>
+          <span id="timeline-filter-count" class="tag filter-count-badge" style="display: none;">表示 0/0件</span>
         </div>
 
         <div id="transcript-feed" class="transcript-feed">
           <div id="empty-state" class="empty-state">
-            <div class="empty-icon">💬</div>
-            <h3 class="empty-title">対面ミーティング音声認識を開始してください</h3>
-            <p class="empty-desc">「録音開始」を押すと文字起こし・翻訳を開始します。</p>
+            <div id="onboarding-setup" class="onboarding-card" style="display: none;">
+              <div class="empty-icon">🚀</div>
+              <h3 class="empty-title">はじめに：3ステップで準備完了</h3>
+              <ol class="onboarding-steps">
+                <li><strong>Gemini APIキー</strong>を <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio ↗</a> で取得</li>
+                <li>下のボタンから設定画面を開き、APIキーを貼り付けて「設定を保存」</li>
+                <li>「🎤 録音開始」を押してマイクを許可すれば文字起こし・翻訳が始まります</li>
+              </ol>
+              <button id="btn-onboard-settings" type="button" class="btn btn-primary">🔑 APIキーを登録</button>
+              <p class="onboarding-note">📱 PCで設定済みの場合は、PC側の「スマホ連携」QRコードを読み取るだけで設定をコピーできます。Googleドキュメント保存（GAS）は任意です。</p>
+            </div>
+            <div id="empty-default">
+              <div class="empty-icon">💬</div>
+              <h3 class="empty-title">対面ミーティング音声認識を開始してください</h3>
+              <p class="empty-desc">「録音開始」を押すと文字起こし・翻訳を開始します。</p>
+            </div>
           </div>
           <div id="transcript-list" class="transcript-list"></div>
+          <div id="filter-empty" class="filter-empty" style="display: none;">🔍 条件に一致する発話はありません。検索語やフィルタを変更してください。</div>
         </div>
       </section>
 
@@ -320,7 +421,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.2.0 - 完全多言語対応・日英最優先＋ヒンディー/ウルドゥー雑談補足版)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.3.0 - UX大幅改善・完全多言語対応・日英最優先＋ヒンディー/ウルドゥー雑談補足版)。</div>
           </div>
         </div>
       </section>
@@ -446,6 +547,24 @@
               10発話ごとに自動でGoogleドキュメントへ差分バックアップ保存する
             </label>
           </div>
+
+          <div class="form-group shortcut-help">
+            <label>⌨️ キーボードショートカット</label>
+            <table class="shortcut-table">
+              <tbody>
+                <tr><td><kbd>Alt</kbd> + <kbd>R</kbd></td><td>録音開始 / 停止</td></tr>
+                <tr><td><kbd>Alt</kbd> + <kbd>P</kbd></td><td>一時停止 / 再開</td></tr>
+                <tr><td><kbd>Alt</kbd> + <kbd>Enter</kbd></td><td>蓄積中の原語を今すぐ翻訳確定</td></tr>
+                <tr><td><kbd>Alt</kbd> + <kbd>S</kbd></td><td>会話サマリーを出力</td></tr>
+                <tr><td><kbd>/</kbd></td><td>タイムライン検索欄へ移動</td></tr>
+                <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd></td><td>カード編集中：保存</td></tr>
+                <tr><td><kbd>Esc</kbd></td><td>カード編集のキャンセル / モーダルを閉じる</td></tr>
+              </tbody>
+            </table>
+            <small class="form-help">
+              ※ 文字入力中（テキスト欄にカーソルがある間）は <kbd>/</kbd> は通常の文字入力として扱われます。
+            </small>
+          </div>
         </div>
         <div class="modal-footer">
           <button id="btn-save-settings" type="button" class="btn btn-primary">設定を保存</button>
@@ -490,6 +609,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=3.2.0"></script>
+  <script src="app.js?v=3.3.0"></script>
 </body>
 </html>
