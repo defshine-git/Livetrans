@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Multilingual Transcriber - 多言語音声認識・文脈翻訳システム</title>
   <meta name="description" content="Gemini Live API (日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語自動認識) および Web Speech API に対応した音声認識・長文文脈翻訳・任意範囲サマリーWebアプリ">
-  <link rel="stylesheet" href="style.css?v=3.4.0">
+  <link rel="stylesheet" href="style.css?v=3.5.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
@@ -105,6 +105,7 @@
               <option value="all-to-partner">集約: 全言語 ➔ 相手言語</option>
               <option value="ja-to-partner">固定: 日本語 ➔ 相手言語</option>
               <option value="en-to-ja">固定: 英語のみ ➔ 日本語 (英語ロック)</option>
+              <option value="ja-to-ja-polish">日本語会議: 日本語 ➔ 日本語 (清書)</option>
             </select>
           </div>
 
@@ -268,7 +269,7 @@
             </div>
             <textarea id="input-translation-prompt" class="text-input textarea-translation-prompt" rows="2" placeholder="標準プロンプトに追記するテーマ・ニュアンス指示を入力（例：英語での雑談中に混じるヒンディー語やウルドゥー語の相槌・ニュアンスも自然に汲み取って、読みやすい日本語に翻訳してください）"></textarea>
             <div class="prompt-panel-help">
-              ※ 標準プロンプト（日英最優先・コードスイッチング解釈・長文段落翻訳・文脈引き継ぎ）に自動追記されます。入力内容は即時保存され、次の翻訳および各カードの「🔄 再翻訳」にすぐ反映されます。
+              ※ 標準プロンプト（日英最優先・コードスイッチング解釈・長文段落翻訳・文脈引き継ぎ）に自動追記されます。入力内容は即時保存され、次の翻訳および各カードの「🔄 再翻訳」にすぐ反映されます。※ 日本語清書モード時は固有名詞・専門用語の誤変換補正や文体指定にも自動反映されます。
             </div>
           </div>
         </div>
@@ -283,7 +284,149 @@
         </div>
       </section>
 
-      <!-- Live Preview Section (Real-time Original Speech + Long-Form Buffer) -->
+      <!-- 1. AI Assist Section: Tabbed Summary & Timeline Chat -->
+      <section class="summary-section ai-assist-section">
+        <div class="ai-assist-tabs" role="tablist" aria-label="AIアシスト機能切替">
+          <button
+            type="button"
+            id="btn-ai-tab-summary"
+            class="ai-assist-tab is-active"
+            role="tab"
+            aria-selected="true"
+            aria-controls="ai-panel-summary"
+            data-ai-tab="summary"
+          >📝 サマリー出力</button>
+          <button
+            type="button"
+            id="btn-ai-tab-chat"
+            class="ai-assist-tab"
+            role="tab"
+            aria-selected="false"
+            aria-controls="ai-panel-chat"
+            data-ai-tab="chat"
+            title="確定翻訳タイムラインを使ってAIに相談・軌道修正案を確認 (Alt+C)"
+          >💬 AIチャット相談 <span id="chat-count-badge" class="badge-count chat-tab-badge" style="display: none;">0</span></button>
+        </div>
+
+        <!-- Tab Panel 1: Conversation Summary (existing summary UI kept intact) -->
+        <div id="ai-panel-summary" class="ai-tab-panel" role="tabpanel" aria-labelledby="btn-ai-tab-summary">
+          <div class="summary-bar card">
+            <div class="summary-bar-left">
+              <span class="summary-bar-title">📝 会話サマリー</span>
+              <div id="summary-mode-toggle" class="summary-mode-toggle" role="group" aria-label="サマリーモード切替">
+                <button type="button" id="btn-summary-mode-check" class="summary-mode-btn is-active" data-summary-mode="live-check" title="打ち合わせ進行中に聞き漏らしや誤解がないか Gemini 4 Hydrogen (medium) で迅速にチェックします">⚡ 進行中チェック</button>
+                <button type="button" id="btn-summary-mode-minutes" class="summary-mode-btn" data-summary-mode="minutes" title="打ち合わせ後の振り返り・議事録用サマリーを Gemini 4 Neon (medium) で高精度に作成します">📋 議事録用</button>
+              </div>
+              <div class="summary-range-group">
+                <label for="select-summary-range" class="control-label">対象範囲:</label>
+                <select id="select-summary-range" class="select-input select-sm" title="どこまでさかのぼってサマリーを作成するか選択">
+                  <option value="3">直近 3分</option>
+                  <option value="5" selected>直近 5分 (既定)</option>
+                  <option value="10">直近 10分</option>
+                  <option value="15">直近 15分</option>
+                  <option value="30">直近 30分</option>
+                  <option value="60">直近 60分</option>
+                  <option value="all">セッション全体</option>
+                  <option value="custom">カスタム (分指定)</option>
+                </select>
+                <span id="summary-custom-wrapper" class="summary-custom-wrapper" style="display: none;">
+                  <input type="number" id="input-summary-custom-min" class="text-input input-summary-min" min="1" max="360" step="1" value="5" aria-label="さかのぼる分数">
+                  <span class="summary-unit-label">分前まで</span>
+                </span>
+              </div>
+              <div id="minutes-controls-inline" class="minutes-controls-inline" style="display: none;">
+                <select id="select-minutes-template" class="select-input select-sm minutes-template-select" title="事前登録された議事録用プロンプトを選択"></select>
+                <button type="button" id="btn-toggle-minutes-prompt" class="btn btn-sm btn-outline" aria-expanded="false" title="議事録用プロンプトの手入力調整・事前登録管理を開く">✏️ プロンプト調整・登録</button>
+              </div>
+              <span id="summary-target-preview" class="tag summary-target-badge">対象: 0件</span>
+            </div>
+            <div class="summary-bar-right">
+              <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したモード・さかのぼり範囲の会話を日本語でサマリー出力 (Alt+S)">
+                ✨ サマリー出力
+              </button>
+            </div>
+          </div>
+
+          <!-- Minutes Summary Custom & Pre-registered Prompt Panel -->
+          <div id="minutes-prompt-panel" class="card minutes-prompt-panel" style="display: none;">
+            <div class="minutes-prompt-head">
+              <span class="minutes-prompt-title">📋 議事録用サマリー プロンプト設定（事前登録 ＆ 手入力調整）</span>
+              <button type="button" id="btn-reset-minutes-templates" class="btn btn-sm btn-ghost" title="推奨プロンプト5種を初期状態に戻します（追加した独自テンプレートは保持されます）">↺ 推奨テンプレートを初期値に戻す</button>
+            </div>
+            <div class="minutes-template-save-row">
+              <label for="input-minutes-template-name" class="control-label">登録名:</label>
+              <input type="text" id="input-minutes-template-name" class="text-input minutes-template-name-input" placeholder="テンプレート名（例：定例会議、商談ヒアリング、技術確認）">
+              <button type="button" id="btn-save-minutes-template" class="btn btn-sm btn-primary" title="現在のプロンプト内容を指定した名前で事前登録します（同名なら上書き・別名なら新規追加）">💾 事前登録として保存</button>
+              <button type="button" id="btn-new-minutes-template" class="btn btn-sm btn-secondary" title="新しい空のカスタムプロンプトを作成します">＋ 新規作成</button>
+              <button type="button" id="btn-delete-minutes-template" class="btn btn-sm btn-outline minutes-delete-btn" title="現在選択しているテンプレートを削除します">🗑️ 削除</button>
+            </div>
+            <textarea id="input-minutes-prompt" class="text-input textarea-minutes-prompt" rows="6" placeholder="議事録用サマリーの出力構成や重点項目を手入力で自由に記述・調整できます..."></textarea>
+            <div class="prompt-panel-help">
+              ※ 手入力で調整した内容は自動保存され、直後の「✨ サマリー出力」に即時反映されます。よく使うプロンプトは名前を付けて「💾 事前登録として保存」しておくと、次回以降プルダウンからすぐに呼び出せます（ASR誤変換の文脈復元・否定表現の極性チェックは自動適用されます）。
+            </div>
+          </div>
+
+          <div id="summary-result-card" class="card summary-result-card" style="display: none;">
+            <div class="summary-result-head">
+              <div class="summary-result-head-left">
+                <span class="summary-result-title">📋 サマリー結果</span>
+                <span id="summary-meta-badge" class="tag summary-meta-badge"></span>
+                <select id="select-summary-history" class="select-input select-sm summary-history-select" style="display: none;" title="過去に生成したサマリー履歴を切り替え"></select>
+              </div>
+              <div class="summary-result-actions">
+                <button id="btn-copy-summary" type="button" class="btn btn-sm btn-outline" title="サマリーをMarkdown形式でコピー">📋 コピー</button>
+                <button id="btn-toggle-summary-body" type="button" class="btn btn-sm btn-ghost" title="サマリー本文を折りたたむ／開く">▲ 折りたたむ</button>
+                <button id="btn-close-summary" type="button" class="small-btn" title="サマリー表示を閉じる" aria-label="閉じる">✕</button>
+              </div>
+            </div>
+            <div id="summary-result-body" class="summary-result-body">
+              <div id="summary-content" class="summary-content"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab Panel 2: AI Chat Mode (Timeline Analysis & Course Correction) -->
+        <div id="ai-panel-chat" class="ai-tab-panel card chat-panel" role="tabpanel" aria-labelledby="btn-ai-tab-chat" style="display: none;">
+          <div class="chat-panel-head">
+            <div class="chat-panel-head-left">
+              <span class="chat-panel-title">💬 AIチャット相談（タイムライン分析・軌道修正アシスト）</span>
+              <span class="tag chat-model-badge" title="深い文脈分析と軌道修正提案のため Gemini 4 Hydrogen (推論レベル: xhigh) で応答します">🧠 Gemini 4 Hydrogen [xhigh]</span>
+            </div>
+            <div class="chat-panel-head-right">
+              <label for="select-chat-range" class="control-label">参照範囲:</label>
+              <select id="select-chat-range" class="select-input select-sm" title="チャットでAIが参照する確定翻訳タイムラインの範囲">
+                <option value="all" selected>セッション全体 (既定)</option>
+                <option value="15">直近 15分</option>
+                <option value="5">直近 5分</option>
+              </select>
+              <span id="chat-target-preview" class="tag summary-target-badge">参照: 0件</span>
+              <button type="button" id="btn-clear-chat" class="btn btn-sm btn-ghost" title="チャットの会話履歴をリセット（タイムラインは消えません）">🗑️ 会話クリア</button>
+            </div>
+          </div>
+
+          <div class="chat-quick-prompts" aria-label="ワンクリック相談プリセット">
+            <button type="button" class="btn btn-sm btn-outline chat-quick-btn" data-chat-prompt="これまでの会話で、当初の目的や前提がいつの間にかすり替わったり、こちらの意図が誤解されたりしていませんか？該当箇所があればきっかけになった発言（時刻付き）と、軌道修正するための具体的な対応・言い回しを提案してください。">🔍 話のすり替わり・誤解チェック</button>
+            <button type="button" class="btn btn-sm btn-outline chat-quick-btn" data-chat-prompt="議論を本来の目的に戻すため、相手に悪い印象を与えずに軌道修正できる具体的な切り返しフレーズを2〜3案提案してください。">🧭 軌道修正フレーズ案</button>
+            <button type="button" class="btn btn-sm btn-outline chat-quick-btn" data-chat-prompt="これまでの発言の中で、曖昧なまま進んでいる前提・条件・数値や、この場で確認しておくべき質問事項を根拠の発言時刻付きで教えてください。">❓ 確認漏れ・聞くべき質問</button>
+            <button type="button" class="btn btn-sm btn-outline chat-quick-btn" data-chat-prompt="相手の発言から読み取れる本当の優先事項・懸念点・ゴールを、根拠となる発言時刻を引用しながら簡潔に分析してください。">🎯 相手の意図・懸念点分析</button>
+          </div>
+
+          <div id="chat-messages" class="chat-messages" aria-live="polite">
+            <div id="chat-empty-state" class="chat-empty-state">
+              確定翻訳タイムラインの発言をもとに、AIへ自由に質問・相談できます。<br>
+              例：「話が商品提案から購入前提の価格交渉・納期にすり替わってない？きっかけの発言と軌道修正の方法を教えて」<br>
+              <small>※ チャット内容は内密なアシスト用メモとして扱われ、Googleドキュメントやファイル保存には含まれません。</small>
+            </div>
+          </div>
+
+          <div class="chat-input-area">
+            <textarea id="input-chat-question" class="text-input textarea-chat-input" rows="2" placeholder="タイムラインについて質問・相談を入力... (Ctrl/⌘ + Enter で送信)"></textarea>
+            <button type="button" id="btn-send-chat" class="btn btn-primary btn-sm chat-send-btn" title="AIへ送信 (Ctrl/⌘ + Enter)">送信</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Live Preview Section (Real-time Original Speech + Long-Form Buffer) -->
       <section class="live-stream-section">
         <div id="livePreview" class="live-card" style="display: none;">
           <div class="live-head">
@@ -303,83 +446,6 @@
             </div>
           </div>
           <div id="liveText" class="live-text live-placeholder" dir="auto">話しかけてください...</div>
-        </div>
-      </section>
-
-      <!-- On-Demand Conversation Summary Section -->
-      <section class="summary-section">
-        <div class="summary-bar card">
-          <div class="summary-bar-left">
-            <span class="summary-bar-title">📝 会話サマリー</span>
-            <div id="summary-mode-toggle" class="summary-mode-toggle" role="group" aria-label="サマリーモード切替">
-              <button type="button" id="btn-summary-mode-check" class="summary-mode-btn is-active" data-summary-mode="live-check" title="打ち合わせ進行中に聞き漏らしや誤解がないか迅速にチェックします">⚡ 進行中チェック</button>
-              <button type="button" id="btn-summary-mode-minutes" class="summary-mode-btn" data-summary-mode="minutes" title="打ち合わせ後の振り返り・議事録用サマリーを作成します">📋 議事録用</button>
-            </div>
-            <div class="summary-range-group">
-              <label for="select-summary-range" class="control-label">対象範囲:</label>
-              <select id="select-summary-range" class="select-input select-sm" title="どこまでさかのぼってサマリーを作成するか選択">
-                <option value="3">直近 3分</option>
-                <option value="5" selected>直近 5分 (既定)</option>
-                <option value="10">直近 10分</option>
-                <option value="15">直近 15分</option>
-                <option value="30">直近 30分</option>
-                <option value="60">直近 60分</option>
-                <option value="all">セッション全体</option>
-                <option value="custom">カスタム (分指定)</option>
-              </select>
-              <span id="summary-custom-wrapper" class="summary-custom-wrapper" style="display: none;">
-                <input type="number" id="input-summary-custom-min" class="text-input input-summary-min" min="1" max="360" step="1" value="5" aria-label="さかのぼる分数">
-                <span class="summary-unit-label">分前まで</span>
-              </span>
-            </div>
-            <div id="minutes-controls-inline" class="minutes-controls-inline" style="display: none;">
-              <select id="select-minutes-template" class="select-input select-sm minutes-template-select" title="事前登録された議事録用プロンプトを選択"></select>
-              <button type="button" id="btn-toggle-minutes-prompt" class="btn btn-sm btn-outline" aria-expanded="false" title="議事録用プロンプトの手入力調整・事前登録管理を開く">✏️ プロンプト調整・登録</button>
-            </div>
-            <span id="summary-target-preview" class="tag summary-target-badge">対象: 0件</span>
-          </div>
-          <div class="summary-bar-right">
-            <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したモード・さかのぼり範囲の会話を日本語でサマリー出力 (Alt+S)">
-              ✨ サマリー出力
-            </button>
-          </div>
-        </div>
-
-        <!-- Minutes Summary Custom & Pre-registered Prompt Panel -->
-        <div id="minutes-prompt-panel" class="card minutes-prompt-panel" style="display: none;">
-          <div class="minutes-prompt-head">
-            <span class="minutes-prompt-title">📋 議事録用サマリー プロンプト設定（事前登録 ＆ 手入力調整）</span>
-            <button type="button" id="btn-reset-minutes-templates" class="btn btn-sm btn-ghost" title="推奨プロンプト5種を初期状態に戻します（追加した独自テンプレートは保持されます）">↺ 推奨テンプレートを初期値に戻す</button>
-          </div>
-          <div class="minutes-template-save-row">
-            <label for="input-minutes-template-name" class="control-label">登録名:</label>
-            <input type="text" id="input-minutes-template-name" class="text-input minutes-template-name-input" placeholder="テンプレート名（例：定例会議、商談ヒアリング、技術確認）">
-            <button type="button" id="btn-save-minutes-template" class="btn btn-sm btn-primary" title="現在のプロンプト内容を指定した名前で事前登録します（同名なら上書き・別名なら新規追加）">💾 事前登録として保存</button>
-            <button type="button" id="btn-new-minutes-template" class="btn btn-sm btn-secondary" title="新しい空のカスタムプロンプトを作成します">＋ 新規作成</button>
-            <button type="button" id="btn-delete-minutes-template" class="btn btn-sm btn-outline minutes-delete-btn" title="現在選択しているテンプレートを削除します">🗑️ 削除</button>
-          </div>
-          <textarea id="input-minutes-prompt" class="text-input textarea-minutes-prompt" rows="6" placeholder="議事録用サマリーの出力構成や重点項目を手入力で自由に記述・調整できます..."></textarea>
-          <div class="prompt-panel-help">
-            ※ 手入力で調整した内容は自動保存され、直後の「✨ サマリー出力」に即時反映されます。よく使うプロンプトは名前を付けて「💾 事前登録として保存」しておくと、次回以降プルダウンからすぐに呼び出せます（ASR誤変換の文脈復元・否定表現の極性チェックは自動適用されます）。
-          </div>
-        </div>
-
-        <div id="summary-result-card" class="card summary-result-card" style="display: none;">
-          <div class="summary-result-head">
-            <div class="summary-result-head-left">
-              <span class="summary-result-title">📋 サマリー結果</span>
-              <span id="summary-meta-badge" class="tag summary-meta-badge"></span>
-              <select id="select-summary-history" class="select-input select-sm summary-history-select" style="display: none;" title="過去に生成したサマリー履歴を切り替え"></select>
-            </div>
-            <div class="summary-result-actions">
-              <button id="btn-copy-summary" type="button" class="btn btn-sm btn-outline" title="サマリーをMarkdown形式でコピー">📋 コピー</button>
-              <button id="btn-toggle-summary-body" type="button" class="btn btn-sm btn-ghost" title="サマリー本文を折りたたむ／開く">▲ 折りたたむ</button>
-              <button id="btn-close-summary" type="button" class="small-btn" title="サマリー表示を閉じる" aria-label="閉じる">✕</button>
-            </div>
-          </div>
-          <div id="summary-result-body" class="summary-result-body">
-            <div id="summary-content" class="summary-content"></div>
-          </div>
         </div>
       </section>
 
@@ -448,7 +514,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.4.0 - Gemini 4 Neon サマリー・進行中チェック/議事録2モード・完全多言語対応版)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.5.0 - 日本語清書・AIチャット相談・Gemini 4 Hydrogen高速チェック・完全多言語対応版)。</div>
           </div>
         </div>
       </section>
@@ -583,6 +649,7 @@
                 <tr><td><kbd>Alt</kbd> + <kbd>P</kbd></td><td>一時停止 / 再開</td></tr>
                 <tr><td><kbd>Alt</kbd> + <kbd>Enter</kbd></td><td>蓄積中の原語を今すぐ翻訳確定</td></tr>
                 <tr><td><kbd>Alt</kbd> + <kbd>S</kbd></td><td>会話サマリーを出力</td></tr>
+                <tr><td><kbd>Alt</kbd> + <kbd>C</kbd></td><td>AIチャット相談タブを開く・入力欄へ移動</td></tr>
                 <tr><td><kbd>/</kbd></td><td>タイムライン検索欄へ移動</td></tr>
                 <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd></td><td>カード編集中：保存</td></tr>
                 <tr><td><kbd>Esc</kbd></td><td>カード編集のキャンセル / モーダルを閉じる</td></tr>
@@ -636,6 +703,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=3.4.0"></script>
+  <script src="app.js?v=3.5.0"></script>
 </body>
 </html>

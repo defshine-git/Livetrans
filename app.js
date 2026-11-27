@@ -854,7 +854,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Multilingual Transcriber
- * Version: 3.4.0 (Gemini 4 Dual-Mode Summary + Pre-registered Minutes Prompts + Docs Summary Sync Fix)
+ * Version: 3.5.0 (Japanese Polish + AI Chat + Gemini 4 Hydrogen Live Check + Multilingual Core)
  *
  * Modules:
  *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Minutes templates, Base64 UTF-8)
@@ -863,18 +863,18 @@ global.QRCode = QRCode;
  *  3. AudioCaptureService (Anti-aliased 16kHz PCM, far-field boost, iPad/iOS unlock)
  *  4. WebSpeechService (Multilingual Web Speech API fallback)
  *  5. GeminiLiveClient (Tiered EN/JA + HI/UR & 85+ multilingual setup, single `audio` stream, auto-reconnect x5)
- *  6. GeminiTextClient (Shared Gemini REST cascade client with isolated cache & Gemini 4 thinkingLevel support)
- *  7. TranslationService (FIFO queue, multilingual & Hinglish/Urdu code-switching nuance, prior-context continuity)
- *  8. SummaryService (Gemini 4 neon/hydrogen [medium] dual-mode summarizer: Live Check & Minutes)
+ *  6. GeminiTextClient (Shared Gemini REST cascade client with isolated cache, multi-turn & Gemini 4 thinkingLevel support)
+ *  7. TranslationService (FIFO queue, multilingual & Hinglish/Urdu code-switching, JA-to-JA polish, prior-context continuity)
+ *  8. buildTranscriptContextBlock, SummaryService (Neon minutes / Hydrogen live-check) & TranscriptChatService (Hydrogen xhigh)
  *  9. GasStorageClient (Google Docs single-document sync & GAS multilingual fallback)
  * 10. LongFormUtteranceBuffer (Real-time original display + code-switch-safe chunking + Urdu/RTL punctuation)
- * 11. App (Modular UI controller with concurrency locks & DOM bounds)
+ * 11. App (Modular UI controller with concurrency locks, 2-tab AI Assist & DOM bounds)
  */
 
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.5.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -894,8 +894,19 @@ const DEFAULT_SETTINGS = Object.freeze({
     'gemini-4-hydrogen',
     'gemini-2.5-flash'
   ]),
+  GEMINI_SUMMARY_LIVE_MODELS: Object.freeze([
+    'gemini-4-hydrogen',
+    'gemini-2.5-flash'
+  ]),
+  GEMINI_CHAT_MODELS: Object.freeze([
+    'gemini-4-hydrogen',
+    'gemini-2.5-flash'
+  ]),
   SUMMARY_THINKING_LEVEL: 'medium',
+  CHAT_THINKING_LEVEL: 'xhigh',
   SUMMARY_MAX_INPUT_CHARS: 120000,
+  CHAT_MAX_INPUT_CHARS: 120000,
+  CHAT_MAX_HISTORY_TURNS: 10,
   MAX_LOG_LINES: 300
 });
 
@@ -1350,10 +1361,19 @@ function detectLanguage4(text, hintedLangCode = null) {
  */
 function resolveTranslationRoute(text, direction = 'auto', partnerLang = 'en', hintedLangCode = null, recognitionProfile = 'ja-en-hi-ur') {
   const effectivePartner = normalizeLangCode(partnerLang) || 'en';
-  const effectiveProfile = direction === 'en-to-ja' ? 'strict-ja-en' : recognitionProfile;
+  const effectiveProfile = (direction === 'en-to-ja' || direction === 'ja-to-ja-polish') ? 'strict-ja-en' : recognitionProfile;
   const langInfo = detectLanguageInfo(text, hintedLangCode, effectiveProfile);
   const hasCodeSwitch = (langInfo.mixedSubLangs && langInfo.mixedSubLangs.length > 0) || Boolean(langInfo.colloquialMix);
 
+  if (direction === 'ja-to-ja-polish') {
+    return {
+      srcLang: 'ja',
+      targetLang: 'ja',
+      langInfo: { ...langInfo, primaryLang: 'ja', mixedSubLangs: [], colloquialMix: null, isRtl: false },
+      skipTranslation: false,
+      isPolish: true
+    };
+  }
   if (direction === 'en-to-ja') {
     return { srcLang: 'en', targetLang: 'ja', langInfo: { ...langInfo, primaryLang: 'en' }, skipTranslation: false };
   }
@@ -1479,12 +1499,49 @@ function decodeBase64UrlUtf8(b64url) {
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const { signal: externalSignal = null, ...restOptions } = options || {};
+  if (externalSignal && externalSignal.aborted) {
+    const abortErr = new Error('The operation was aborted.');
+    abortErr.name = 'AbortError';
+    throw abortErr;
+  }
+
+  if (typeof AbortController === 'undefined') {
+    let timer = null;
+    try {
+      const fetchOpts = externalSignal ? { ...restOptions, signal: externalSignal } : restOptions;
+      const fetchPromise = fetch(url, fetchOpts);
+      if (!timeoutMs || timeoutMs <= 0) {
+        return await fetchPromise;
+      }
+      return await Promise.race([
+        fetchPromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const err = new Error('The operation timed out.');
+            err.name = 'AbortError';
+            reject(err);
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal && typeof externalSignal.addEventListener === 'function') {
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { ...restOptions, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (externalSignal && typeof externalSignal.removeEventListener === 'function') {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 
@@ -1633,7 +1690,7 @@ function matchesTimelineFilter(record, query = '', filter = 'all') {
 /**
  * セッション下書き保存用オブジェクトを構築する
  */
-function serializeSessionDraft({ records = [], summaryHistory = [], category = 'Common', savedAt = Date.now() } = {}) {
+function serializeSessionDraft({ records = [], summaryHistory = [], chatHistory = [], category = 'Common', savedAt = Date.now() } = {}) {
   const safeRecords = records.slice(-500).map((r) => ({
     id: r.id,
     time: r.time || '',
@@ -1667,19 +1724,34 @@ function serializeSessionDraft({ records = [], summaryHistory = [], category = '
     thinkingLevel: s.thinkingLevel || ''
   }));
 
+  const safeChats = (Array.isArray(chatHistory) ? chatHistory : [])
+    .filter((c) => c && (c.role === 'user' || c.role === 'assistant') && typeof c.text === 'string')
+    .slice(-40)
+    .map((c, idx) => ({
+      id: c.id || `chat_restored_${savedAt}_${idx}`,
+      role: c.role,
+      text: c.text,
+      time: c.time || '',
+      rangeLabel: c.rangeLabel || '',
+      count: typeof c.count === 'number' ? c.count : 0,
+      model: c.model || '',
+      thinkingLevel: c.thinkingLevel || ''
+    }));
+
   return {
     version: APP_VERSION,
     savedAt,
     category,
     records: safeRecords,
-    summaryHistory: safeSummaries
+    summaryHistory: safeSummaries,
+    chatHistory: safeChats
   };
 }
 
 /**
  * 前回の未保存セッション下書きを現在のセッション先頭（時系列順）へマージする
  */
-function mergeRestoredDraft(prevDraft, currentRecords = [], currentSummaries = []) {
+function mergeRestoredDraft(prevDraft, currentRecords = [], currentSummaries = [], currentChats = []) {
   const prevRecs = Array.isArray(prevDraft?.records) ? prevDraft.records : [];
   const seenIds = new Set();
   const mergedRecords = [];
@@ -1707,7 +1779,20 @@ function mergeRestoredDraft(prevDraft, currentRecords = [], currentSummaries = [
     mergedSummaries.push(s);
   }
 
-  return { records: mergedRecords, summaryHistory: mergedSummaries };
+  const prevChats = Array.isArray(prevDraft?.chatHistory) ? prevDraft.chatHistory : [];
+  const seenChatIds = new Set();
+  const mergedChats = [];
+  for (const c of [...prevChats, ...(Array.isArray(currentChats) ? currentChats : [])]) {
+    if (!c || !c.id || seenChatIds.has(c.id)) continue;
+    seenChatIds.add(c.id);
+    mergedChats.push(c);
+  }
+
+  return {
+    records: mergedRecords,
+    summaryHistory: mergedSummaries,
+    chatHistory: mergedChats.slice(-40)
+  };
 }
 
 // ==========================================
@@ -1743,6 +1828,8 @@ class ConfigManager {
     ACTIVE_MINUTES_TEMPLATE_ID: 'glt_active_minutes_template_id',
     MINUTES_CUSTOM_PROMPT: 'glt_minutes_custom_prompt',
     MINUTES_PROMPT_OPEN: 'glt_minutes_prompt_open',
+    AI_ASSIST_TAB: 'glt_ai_assist_tab',
+    CHAT_RANGE: 'glt_chat_range',
     VAD_MODE: 'glt_vad_mode',
     ADVANCED_OPEN: 'glt_advanced_open',
     MIC_DEVICE_ID: 'glt_mic_device_id',
@@ -2471,7 +2558,7 @@ class WebSpeechService {
 
   _resolveSpeechLang(direction = this.direction, partnerLang = this.partnerLang) {
     if (direction === 'en-to-ja') return 'en-US';
-    if (direction === 'ja-to-partner' || direction === 'ja-to-en') return 'ja-JP';
+    if (direction === 'ja-to-partner' || direction === 'ja-to-en' || direction === 'ja-to-ja-polish') return 'ja-JP';
     if (direction === 'bn-to-ja' || direction === 'hi-to-ja' || direction === 'ur-to-ja') {
       return resolveLanguageMeta(direction.split('-')[0]).speechLang;
     }
@@ -3122,7 +3209,7 @@ class GeminiLiveClient {
 
     // 1. 翻訳方向の厳密単一言語ロック
     if (this.direction === 'en-to-ja') return ['en-US', 'en-IN'];
-    if (this.direction === 'ja-to-partner' || this.direction === 'ja-to-en') return ['ja-JP'];
+    if (this.direction === 'ja-to-partner' || this.direction === 'ja-to-en' || this.direction === 'ja-to-ja-polish') return ['ja-JP'];
     if (this.direction === 'bn-to-ja') return ['bn-BD', 'bn-IN', 'en-US'];
     if (this.direction === 'hi-to-ja') return ['hi-IN', 'en-US'];
     if (this.direction === 'ur-to-ja') return ['ur-PK', 'en-US'];
@@ -3181,6 +3268,10 @@ class GeminiLiveClient {
         'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard English technical abbreviations). ' +
         'NEVER output Hindi, Urdu, Bengali, Korean, or other foreign scripts.',
       'ja-to-en':
+        'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese. ' +
+        'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard English technical abbreviations). ' +
+        'NEVER output Hindi, Urdu, Bengali, Korean, or other foreign scripts.',
+      'ja-to-ja-polish':
         'STRICT LANGUAGE LOCK (JAPANESE ONLY): You are transcribing spoken Japanese. ' +
         'Transcribe ALL speech STRICTLY in natural Japanese (kanji, hiragana, katakana, and standard English technical abbreviations). ' +
         'NEVER output Hindi, Urdu, Bengali, Korean, or other foreign scripts.',
@@ -3336,17 +3427,25 @@ class GeminiTextClient {
 
   async generateText({
     apiKey,
-    prompt,
+    prompt = '',
+    contents = null,
+    systemInstruction = null,
     temperature = 0.15,
     maxOutputTokens = 2048,
     timeoutMs = 20000,
     logTag = 'Gemini',
     models = null,
     cacheKey = 'translation',
-    thinkingLevel = null
+    thinkingLevel = null,
+    signal = null
   }) {
     if (!apiKey || apiKey.trim() === '') {
       throw new Error('Gemini APIキーが未設定です。');
+    }
+    if (signal && signal.aborted) {
+      const abortErr = new Error('リクエストがキャンセルされました。');
+      abortErr.name = 'AbortError';
+      throw abortErr;
     }
 
     const baseModels = (Array.isArray(models) && models.length > 0)
@@ -3361,6 +3460,12 @@ class GeminiTextClient {
     let lastError = 'Gemini API 応答を取得できませんでした。';
 
     for (const modelName of modelsToTry) {
+      if (signal && signal.aborted) {
+        const abortErr = new Error('リクエストがキャンセルされました。');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
       const isGemini4 = /^gemini-4-/i.test(modelName);
       const isGemini3 = /^gemini-3\./i.test(modelName);
@@ -3387,15 +3492,32 @@ class GeminiTextClient {
         }
       }
 
+      const requestPayload = {
+        contents: (Array.isArray(contents) && contents.length > 0)
+          ? contents
+          : [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig
+      };
+      if (systemInstruction && String(systemInstruction).trim()) {
+        requestPayload.system_instruction = {
+          parts: [{ text: String(systemInstruction).trim() }]
+        };
+      }
+
       try {
-        const res = await fetchWithTimeout(endpoint, {
+        const fetchOpts = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig
-          })
-        }, timeoutMs);
+          body: JSON.stringify(requestPayload)
+        };
+        if (signal) fetchOpts.signal = signal;
+
+        const res = await fetchWithTimeout(endpoint, fetchOpts, timeoutMs);
+        if (signal && signal.aborted) {
+          const abortErr = new Error('リクエストがキャンセルされました。');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
 
         if (res.ok) {
           const data = await res.json();
@@ -3427,6 +3549,11 @@ class GeminiTextClient {
           this.log('warn', logTag, `Gemini (${modelName}) 失敗: ${errDetail}`);
         }
       } catch (err) {
+        if (signal && signal.aborted) {
+          const abortErr = new Error('リクエストがキャンセルされました。');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
         if (this._preferredModels[cacheKey] === modelName) delete this._preferredModels[cacheKey];
         const reason = err.name === 'AbortError' ? `タイムアウト (${Math.round(timeoutMs / 1000)}秒)` : err.message;
         lastError = `Gemini (${modelName}): ${reason}`;
@@ -3577,6 +3704,30 @@ class TranslationService {
     }
 
     const domainHint = this._buildDomainHint(category);
+    const trimmedCustomPrompt = String(customPrompt || '').trim();
+
+    if (direction === 'ja-to-ja-polish') {
+      const polishCustomBlock = trimmedCustomPrompt
+        ? `[Additional Theme, Terminology & Style Instructions — Reflect these proper nouns, domain terminology, and style preferences while STRICTLY obeying constraints 1–5]:\n${trimmedCustomPrompt}\n\n`
+        : '';
+      const polishContextRule = validContext.length > 0
+        ? '   - Use [Previous Conversation Context] to preserve proper nouns, terminology, omitted subjects, and logical continuity with prior Japanese turns without repeating earlier turns.\n'
+        : '';
+      return (
+        `You are an expert Japanese meeting editor and ASR transcript polisher.${domainHint}\n` +
+        'Polish the spoken Japanese ASR transcript in [Text to Polish] into clean, natural, accurate business Japanese.\n' +
+        'STRICT CONSTRAINTS:\n' +
+        '1. Output ONLY the polished Japanese body text — do NOT include any preamble, explanations, notes, headings, labels, or surrounding quotes.\n' +
+        '2. Remove spoken fillers (e.g., えー、あのー、まあ、えっと、そのー), meaningless stutters, and unintended word repetitions, and add appropriate Japanese punctuation (、 and 。) so the text reads smoothly.\n' +
+        '3. Based on [Previous Conversation Context] and any additional theme/terminology instructions, restore ASR homophone and phonetic misrecognitions to the intended proper nouns and domain terms.\n' +
+        polishContextRule +
+        '4. DO NOT summarize, omit, or invent information: preserve EVERY fact, number, monetary amount, area, date/time, proper noun, and negative/exclusion polarity (e.g., 「〜しない」「不要」「対象外」「見送り」) without omission or reversal.\n' +
+        '5. If English words or technical abbreviations (e.g., HKC, IHM, EU-SRR, HSE) appear in the Japanese utterance, integrate them cleanly into natural business Japanese.\n\n' +
+        polishCustomBlock +
+        contextBlock +
+        `[Text to Polish]:\n${text}`
+      );
+    }
 
     const longFormInstruction = targetLang === 'ja'
       ? '5. The input may contain multiple sentences or spoken ASR fragments with minor filler/stutters. Translate the ENTIRE passage as one cohesive, natural, well-structured Japanese paragraph that preserves logical flow, causality, and nuance—do NOT produce choppy literal clause-by-clause translations.\n'
@@ -3628,7 +3779,6 @@ class TranslationService {
         `4. Express the complete intended meaning seamlessly in natural ${targetName} without leaving untranslated fragments.\n`;
     }
 
-    const trimmedCustomPrompt = String(customPrompt || '').trim();
     const customPromptBlock = trimmedCustomPrompt
       ? `[Additional Theme & Nuance Instructions — Follow these tone, domain, and terminology preferences while STRICTLY obeying constraints 1 and 2 (output ONLY the translation with no commentary)]:\n${trimmedCustomPrompt}\n\n`
       : '';
@@ -3687,6 +3837,7 @@ class TranslationService {
       };
     }
 
+    const isPolish = direction === 'ja-to-ja-polish';
     const validContext = Array.isArray(contextRecords)
       ? contextRecords.filter((c) => c && (c.original || c.translated))
       : [];
@@ -3713,15 +3864,23 @@ class TranslationService {
           temperature: 0.15,
           maxOutputTokens: 2048,
           timeoutMs: 20000,
-          logTag: 'Translation'
+          cacheKey: 'translation',
+          logTag: isPolish ? 'Polish' : 'Translation'
         });
         const ctxNote = validContext.length > 0 ? ` / 文脈${validContext.length}件参照` : '';
-        const mixNote = (langInfo.mixedSubLangs?.length || langInfo.colloquialMix) ? ' / 混在補完' : '';
+        const mixNote = (!isPolish && (langInfo.mixedSubLangs?.length || langInfo.colloquialMix)) ? ' / 混在補完' : '';
         const customNote = trimmedCustomPrompt ? ' / 追記プロンプト適用' : '';
-        this.log(
-          'success',
-          `Gemini (${res.model}) 翻訳完了 [${srcLang.toUpperCase()}➔${targetLang.toUpperCase()}] (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${mixNote}${customNote})`
-        );
+        if (isPolish) {
+          this.log(
+            'success',
+            `Gemini (${res.model}) 日本語清書完了 [JA➔JA清書] (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${customNote})`
+          );
+        } else {
+          this.log(
+            'success',
+            `Gemini (${res.model}) 翻訳完了 [${srcLang.toUpperCase()}➔${targetLang.toUpperCase()}] (${text.length}文字 ➔ ${res.text.length}文字${ctxNote}${mixNote}${customNote})`
+          );
+        }
         return {
           translated: res.text,
           speakerLang: srcLang,
@@ -3729,10 +3888,22 @@ class TranslationService {
           colloquialMix: langInfo.colloquialMix || null
         };
       } catch (err) {
-        this.log('warn', `Gemini 翻訳全モデル失敗 (${err.message})`);
+        this.log('warn', isPolish ? `Gemini 日本語清書全モデル失敗 (${err.message})` : `Gemini 翻訳全モデル失敗 (${err.message})`);
       }
-    } else {
+    } else if (!isPolish) {
       this.log('warn', 'Gemini APIキーが未入力のため、GASバックアップ翻訳を試行します。');
+    }
+
+    // 日本語清書モードでは GAS LanguageApp は同一言語エラーになるためスキップし、原文を安全に返す
+    if (isPolish) {
+      this.log('warn', '日本語清書モードでは GAS (LanguageApp) フォールバックをスキップし、原文をそのまま確定しました。');
+      return {
+        translated: text.trim(),
+        speakerLang: 'ja',
+        mixedSubLangs: [],
+        colloquialMix: null,
+        polishFallback: true
+      };
     }
 
     // Layer 2: GAS Web App (LanguageApp) Fallback
@@ -3785,8 +3956,68 @@ class TranslationService {
 }
 
 // ==========================================
-// 8. Summary Service (Gemini 4 Dual-Mode Summarizer: Live Check & Minutes)
+// 8. Shared Transcript Formatter, Summary Service & AI Chat Service
 // ==========================================
+function buildTranscriptContextBlock(records = [], { pendingText = '', maxChars = 120000 } = {}) {
+  const lines = [];
+  if (Array.isArray(records)) {
+    for (const r of records) {
+      const timeStr = r.time || '--:--:--';
+      const spk = r.speaker || '発話';
+      const langTag = formatDocLanguageLabel(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
+      const orig = String(r.originalText || '').trim();
+      const hasValidTrans =
+        !r.isTranslating &&
+        r.translatedText &&
+        r.translatedText.trim() !== '' &&
+        !r.translatedText.startsWith('【翻訳');
+      const trans = hasValidTrans ? r.translatedText.trim() : '';
+
+      if (orig || trans) {
+        let entry = `[${timeStr}] (${spk} / ${langTag})`;
+        if (trans && orig && trans !== orig) {
+          const transLabel = r.direction === 'ja-to-ja-polish' ? '清書' : '訳文';
+          entry += `\n  ${transLabel}: ${trans}\n  原文: ${orig}`;
+        } else {
+          entry += `\n  内容: ${trans || orig}`;
+        }
+        lines.push(entry);
+      }
+    }
+  }
+
+  const cleanPending = String(pendingText || '').trim();
+  if (cleanPending) {
+    lines.push(`[現在発話中・未確定]\n  原文: ${cleanPending}`);
+  }
+
+  if (lines.length === 0) {
+    return { text: '', lineCount: 0 };
+  }
+
+  let transcriptText = lines.join('\n\n');
+  const limit = Number(maxChars) > 0 ? Number(maxChars) : 120000;
+  if (transcriptText.length > limit) {
+    const kept = [];
+    let totalLen = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const chunk = lines[i];
+      const addedLen = chunk.length + (kept.length > 0 ? 2 : 0);
+      if (totalLen + addedLen > limit) {
+        if (kept.length === 0) {
+          kept.unshift(chunk.slice(-limit));
+        }
+        break;
+      }
+      kept.unshift(chunk);
+      totalLen += addedLen;
+    }
+    transcriptText = '…(古い一部発話を省略)…\n\n' + kept.join('\n\n');
+  }
+
+  return { text: transcriptText, lineCount: lines.length };
+}
+
 class SummaryService {
   constructor(geminiTextClient) {
     this.textClient = geminiTextClient;
@@ -3813,59 +4044,14 @@ class SummaryService {
       throw new Error('サマリー生成には Gemini API キーが必要です。設定画面から登録してください。');
     }
 
-    const lines = [];
-    if (Array.isArray(records)) {
-      for (const r of records) {
-        const timeStr = r.time || '--:--:--';
-        const spk = r.speaker || '発話';
-        const langTag = formatDocLanguageLabel(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
-        const orig = String(r.originalText || '').trim();
-        const hasValidTrans =
-          !r.isTranslating &&
-          r.translatedText &&
-          r.translatedText.trim() !== '' &&
-          !r.translatedText.startsWith('【翻訳');
-        const trans = hasValidTrans ? r.translatedText.trim() : '';
-
-        if (orig || trans) {
-          let entry = `[${timeStr}] (${spk} / ${langTag})`;
-          if (trans && orig && trans !== orig) {
-            entry += `\n  訳文: ${trans}\n  原文: ${orig}`;
-          } else {
-            entry += `\n  内容: ${trans || orig}`;
-          }
-          lines.push(entry);
-        }
-      }
-    }
-
-    const cleanPending = String(pendingText || '').trim();
-    if (cleanPending) {
-      lines.push(`[現在発話中・未確定]\n  原文: ${cleanPending}`);
-    }
-
-    if (lines.length === 0) {
-      throw new Error('指定された範囲にサマリー対象の発話がありません。');
-    }
-
-    let transcriptText = lines.join('\n\n');
     const MAX_INPUT_CHARS = DEFAULT_SETTINGS.SUMMARY_MAX_INPUT_CHARS || 120000;
-    if (transcriptText.length > MAX_INPUT_CHARS) {
-      const kept = [];
-      let totalLen = 0;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        const chunk = lines[i];
-        const addedLen = chunk.length + (kept.length > 0 ? 2 : 0);
-        if (totalLen + addedLen > MAX_INPUT_CHARS) {
-          if (kept.length === 0) {
-            kept.unshift(chunk.slice(-MAX_INPUT_CHARS));
-          }
-          break;
-        }
-        kept.unshift(chunk);
-        totalLen += addedLen;
-      }
-      transcriptText = '…(古い一部発話を省略)…\n\n' + kept.join('\n\n');
+    const { text: transcriptText, lineCount } = buildTranscriptContextBlock(records, {
+      pendingText,
+      maxChars: MAX_INPUT_CHARS
+    });
+
+    if (lineCount === 0) {
+      throw new Error('指定された範囲にサマリー対象の発話がありません。');
     }
 
     let domainHint = '対象分野: 一般ビジネス会話・国際打ち合わせ。固有名詞・専門用語・略称・数値条件は正確に保持してください。';
@@ -3921,11 +4107,16 @@ class SummaryService {
       commonQualityRules +
       `【会話ログ（時系列順）】\n${transcriptText}`;
 
+    const targetModels = isMinutesMode
+      ? DEFAULT_SETTINGS.GEMINI_SUMMARY_MODELS
+      : DEFAULT_SETTINGS.GEMINI_SUMMARY_LIVE_MODELS;
+    const targetCacheKey = isMinutesMode ? 'summary-minutes' : 'summary-live';
+
     const res = await this.textClient.generateText({
       apiKey,
       prompt,
-      models: DEFAULT_SETTINGS.GEMINI_SUMMARY_MODELS,
-      cacheKey: 'summary',
+      models: targetModels,
+      cacheKey: targetCacheKey,
       thinkingLevel: DEFAULT_SETTINGS.SUMMARY_THINKING_LEVEL,
       maxOutputTokens: 65536,
       timeoutMs: 90000,
@@ -3946,11 +4137,126 @@ class SummaryService {
     const thinkInfo = res.thinkingLevel
       ? ` [thinking:${res.thinkingLevel}${res.thoughtsTokenCount ? ` / ${res.thoughtsTokenCount}tok` : ''}]`
       : '';
-    this.log('success', `Gemini (${res.model}${thinkInfo}) サマリー生成完了 [${modeTag}] (${rangeLabel} / ${lines.length}件)`);
+    this.log('success', `Gemini (${res.model}${thinkInfo}) サマリー生成完了 [${modeTag}] (${rangeLabel} / ${lineCount}件)`);
     return {
       summary: cleanedSummary,
       model: res.model,
       thinkingLevel: res.thinkingLevel || null
+    };
+  }
+}
+
+class TranscriptChatService {
+  constructor(geminiTextClient) {
+    this.textClient = geminiTextClient;
+    this.onLogCallback = null;
+  }
+
+  log(type, message) {
+    if (this.onLogCallback) {
+      this.onLogCallback(type, `[Chat] ${message}`);
+    }
+  }
+
+  async ask({
+    question,
+    chatHistory = [],
+    records = [],
+    rangeLabel = 'セッション全体',
+    category = 'Common',
+    customPrompt = '',
+    apiKey,
+    signal = null
+  }) {
+    if (!apiKey || apiKey.trim() === '') {
+      throw new Error('AIチャット相談には Gemini API キーが必要です。設定画面から登録してください。');
+    }
+
+    const cleanQuestion = String(question || '').trim();
+    if (!cleanQuestion) {
+      throw new Error('質問内容を入力してください。');
+    }
+
+    const MAX_INPUT_CHARS = DEFAULT_SETTINGS.CHAT_MAX_INPUT_CHARS || 120000;
+    const { text: transcriptText, lineCount } = buildTranscriptContextBlock(records, {
+      maxChars: MAX_INPUT_CHARS
+    });
+
+    if (!Array.isArray(records) || records.length === 0 || lineCount === 0) {
+      throw new Error('チャットで参照できる確定翻訳がまだありません。録音・発話が確定してから質問してください。');
+    }
+
+    let domainHint = '対象分野: 一般ビジネス会話・商談・国際打ち合わせ。固有名詞・専門用語・数値条件は正確に扱ってください。';
+    if (category === 'Casual') {
+      domainHint = '対象分野: 一般会話・ビジネス雑談・日常対話。英語の雑談中に混じるヒンディー語・ウルドゥー語等のニュアンスも踏まえて分析してください。';
+    } else if (category && category !== 'Common') {
+      domainHint = `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）および数値条件を正確に扱ってください。`;
+    }
+
+    const customThemeHint = String(customPrompt || '').trim()
+      ? `\n【会話の背景・テーマ補足情報】\n${String(customPrompt).trim()}\n`
+      : '';
+
+    const systemInstruction =
+      'あなたは会議・商談・打ち合わせの進行をリアルタイムで支援する優秀な AI 参謀／コミュニケーション分析アシスタントです。\n' +
+      `${domainHint}\n` +
+      `提供された確定翻訳タイムライン（対象範囲: ${rangeLabel}）を精読し、ユーザーの質問（論点のすり替わり検証、意図や誤解の分析、軌道修正の対応策・切り返しフレーズの提案など）に的確に回答してください。\n` +
+      customThemeHint +
+      '\n【厳守ルール】\n' +
+      '1. **事実厳守＆タイムスタンプ根拠明示**: 話の転換点・すり替わり・誤解のきっかけ・懸念点を指摘する際は、必ずタイムライン中の該当発言時刻を **`[HH:MM:SS]`** 形式（角括弧付き）で明示して要旨を引用すること。ログに存在しない発言や事実は推測・創作しないこと。\n' +
+      '2. **ASR誤変換の文脈復元 ＆ 否定・役割極性チェック**: 音声認識の同音異義語・音韻類似の誤変換は文脈から本来の語句を復元して理解し、「実施しない・不要・対象外」「AではなくB」等の否定・除外条件・主語/役割極性を絶対に逆転させないこと。\n' +
+      '3. **実戦的な軌道修正・対応提案**: 誤解・論点ズレ・前提のすり替わりが確認された場合は、①ズレの内容ときっかけ発言（`[HH:MM:SS]`）、②相手の前提・意図の読み解き、③角を立てずに軌道修正する具体策とそのまま口頭で使えるフレーズ案（多言語会議なら必要に応じ相手言語フレーズも併記）を構造化して提案すること。\n' +
+      '4. **簡潔・スキャン性**: 会議中でも素早く読めるよう、日本語で Markdown 見出し（`###`）と箇条書き（`-` / `1.`）を使って簡潔・明瞭に回答すること。\n\n' +
+      `【確定翻訳タイムライン（時系列順・対象範囲: ${rangeLabel} / ${lineCount}件）】\n${transcriptText}`;
+
+    const maxHistoryMessages = (DEFAULT_SETTINGS.CHAT_MAX_HISTORY_TURNS || 10) * 2;
+    const recentTurns = Array.isArray(chatHistory)
+      ? chatHistory
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' && m.text.trim())
+          .slice(-maxHistoryMessages)
+      : [];
+
+    const contents = [];
+    for (const m of recentTurns) {
+      const mappedRole = m.role === 'assistant' ? 'model' : 'user';
+      const trimmedText = m.text.trim();
+      if (contents.length === 0 && mappedRole === 'model') {
+        continue;
+      }
+      if (contents.length > 0 && contents[contents.length - 1].role === mappedRole) {
+        contents[contents.length - 1].parts[0].text += `\n\n${trimmedText}`;
+      } else {
+        contents.push({ role: mappedRole, parts: [{ text: trimmedText }] });
+      }
+    }
+    if (contents.length > 0 && contents[contents.length - 1].role === 'user') {
+      contents[contents.length - 1].parts[0].text += `\n\n${cleanQuestion}`;
+    } else {
+      contents.push({ role: 'user', parts: [{ text: cleanQuestion }] });
+    }
+
+    const res = await this.textClient.generateText({
+      apiKey,
+      systemInstruction,
+      contents,
+      models: DEFAULT_SETTINGS.GEMINI_CHAT_MODELS,
+      cacheKey: 'chat',
+      thinkingLevel: DEFAULT_SETTINGS.CHAT_THINKING_LEVEL,
+      maxOutputTokens: 65536,
+      timeoutMs: 150000,
+      logTag: 'Chat',
+      signal
+    });
+
+    const thinkInfo = res.thinkingLevel
+      ? ` [thinking:${res.thinkingLevel}${res.thoughtsTokenCount ? ` / ${res.thoughtsTokenCount}tok` : ''}]`
+      : '';
+    this.log('success', `Gemini (${res.model}${thinkInfo}) チャット応答完了 (${rangeLabel} / ${lineCount}件参照)`);
+    return {
+      answer: res.text.trim(),
+      model: res.model,
+      thinkingLevel: res.thinkingLevel || null,
+      recordCount: lineCount
     };
   }
 }
@@ -4199,7 +4505,12 @@ class LongFormUtteranceBuffer {
    */
   _isClearLanguageGroupSwitch(incomingText, langCode) {
     if (!this.committedText.trim()) return false;
-    if (this.direction === 'en-to-ja' || this.direction === 'ja-to-partner' || this.direction === 'ja-to-en') {
+    if (
+      this.direction === 'en-to-ja' ||
+      this.direction === 'ja-to-partner' ||
+      this.direction === 'ja-to-en' ||
+      this.direction === 'ja-to-ja-polish'
+    ) {
       return false;
     }
 
@@ -4530,6 +4841,9 @@ class App {
     this.summaryService = new SummaryService(this.geminiTextClient);
     this.summaryService.onLogCallback = (type, msg) => this.log(type, msg);
 
+    this.chatService = new TranscriptChatService(this.geminiTextClient);
+    this.chatService.onLogCallback = (type, msg) => this.log(type, msg);
+
     this.activeEngine = 'none';
     this.records = [];
     this.summaryHistory = [];
@@ -4546,12 +4860,23 @@ class App {
     this.isSavingDocs = false;
     this.summaryBodyCollapsed = false;
 
-    // v3.3.0+ UX & v3.4.0 Summary state
+    // v3.3.0+ UX & v3.4.0/v3.5.0 Summary & AI Chat state
     this.summaryMode = 'live-check';
     this.minutesTemplates = [];
     this.activeMinutesTemplateId = '';
     this.minutesCustomPrompt = '';
     this.minutesPromptOpen = false;
+    this.aiAssistTab = 'summary';
+    this.chatRange = 'all';
+    this.chatHistory = [];
+    this.isChatting = false;
+    this._chatEpoch = 0;
+    this._chatAbortController = null;
+    this._chatLoadingTimer = null;
+    this._chatHighlightTimer = null;
+    this._chatHighlightedCardEl = null;
+    this._chatLoadingText = '';
+    this._elChatLoadingBody = null;
     this.unreadNewCount = 0;
     this.timelineQuery = '';
     this.timelineFilter = 'all';
@@ -4582,10 +4907,13 @@ class App {
       }
     }
 
-    this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
+    this._summaryPreviewTimer = setInterval(() => {
+      this._updateSummaryTargetPreview();
+      this._updateChatTargetPreview();
+    }, 15000);
     this.log(
       'info',
-      `初期化完了 (v${APP_VERSION})。Gemini 4 サマリー (進行中チェック/議事録用・medium固定)・日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応が有効です。`
+      `初期化完了 (v${APP_VERSION})。日本語清書・AIチャット相談・Gemini 4 サマリー (進行中チェック: Hydrogen / 議事録用: Neon)・85+多言語対応が有効です。`
     );
   }
 
@@ -4737,6 +5065,21 @@ class App {
     this.elSummaryResultBody = byId('summary-result-body');
     this.elSummaryContent = byId('summary-content');
 
+    // v3.5.0 AI Assist Tabs & Chat UI
+    this.elBtnAiTabSummary = byId('btn-ai-tab-summary');
+    this.elBtnAiTabChat = byId('btn-ai-tab-chat');
+    this.elChatCountBadge = byId('chat-count-badge');
+    this.elAiPanelSummary = byId('ai-panel-summary');
+    this.elAiPanelChat = byId('ai-panel-chat');
+    this.elSelectChatRange = byId('select-chat-range');
+    this.elChatTargetPreview = byId('chat-target-preview');
+    this.elBtnClearChat = byId('btn-clear-chat');
+    this.elChatMessages = byId('chat-messages');
+    this.elChatEmptyState = byId('chat-empty-state');
+    this.elInputChatQuestion = byId('input-chat-question');
+    this.elBtnSendChat = byId('btn-send-chat');
+    this.elChatQuickBtns = document.querySelectorAll('.chat-quick-btn');
+
     // Settings Modal
     this.elModal = byId('settings-modal');
     this.elBtnCloseModal = byId('btn-close-modal');
@@ -4819,7 +5162,7 @@ class App {
       rawDirection = 'ja-to-partner';
       if (!ConfigManager.get(K.PARTNER_LANG, '')) savedPartner = 'en';
     }
-    const validDirections = new Set(['auto', 'all-to-ja', 'all-to-partner', 'ja-to-partner', 'en-to-ja']);
+    const validDirections = new Set(['auto', 'all-to-ja', 'all-to-partner', 'ja-to-partner', 'en-to-ja', 'ja-to-ja-polish']);
     this.direction = validDirections.has(rawDirection) ? rawDirection : 'auto';
     this.partnerLang = savedPartner;
 
@@ -4993,6 +5336,15 @@ class App {
     if (this.elInputSummaryCustomMin) this.elInputSummaryCustomMin.value = String(this.summaryCustomMin);
     this._syncSummaryModeUI();
     this._syncSummaryRangeUI();
+
+    const savedAiTab = ConfigManager.get(K.AI_ASSIST_TAB, 'summary');
+    this.aiAssistTab = savedAiTab === 'chat' ? 'chat' : 'summary';
+    const savedChatRange = ConfigManager.get(K.CHAT_RANGE, 'all');
+    this.chatRange = ['all', '15', '5'].includes(savedChatRange) ? savedChatRange : 'all';
+    if (this.elSelectChatRange) this.elSelectChatRange.value = this.chatRange;
+    this._syncAiAssistTabUI();
+    this._renderChatMessages();
+    this._updateChatTargetPreview();
   }
 
   // ---- Modular Event Binding ----
@@ -5001,6 +5353,7 @@ class App {
     this._bindControlEvents();
     this._bindPromptEvents();
     this._bindSummaryEvents();
+    this._bindChatEvents();
     this._bindModalEvents();
     this._bindUxEvents();
     this._bindGeminiClientCallbacks();
@@ -5156,13 +5509,35 @@ class App {
     });
 
     this.elBtnClearFeed.addEventListener('click', () => {
-      if (this.records.length === 0) return;
+      if (this.records.length === 0 && this.chatHistory.length === 0 && !this.isChatting) return;
       if (!confirm('タイムラインの翻訳履歴を全消去しますか？')) return;
 
       this._sessionEpoch += 1;
+      this._chatEpoch += 1;
+      if (this._chatAbortController) {
+        try { this._chatAbortController.abort(); } catch (_) {}
+        this._chatAbortController = null;
+      }
+      if (this._chatLoadingTimer) {
+        clearInterval(this._chatLoadingTimer);
+        this._chatLoadingTimer = null;
+      }
+      this.isChatting = false;
+      if (this.elBtnSendChat) {
+        this.elBtnSendChat.disabled = false;
+        this.elBtnSendChat.textContent = '送信';
+      }
       this.records = [];
       this.summaryHistory = [];
       this.currentSummaryId = null;
+      this.chatHistory = [];
+      this._chatLoadingText = '';
+      this._elChatLoadingBody = null;
+      if (this._chatHighlightTimer) {
+        clearTimeout(this._chatHighlightTimer);
+        this._chatHighlightTimer = null;
+      }
+      this._chatHighlightedCardEl = null;
       this.savedRecordCount = 0;
       this.unsavedFinalizedDelta = 0;
       this.unreadNewCount = 0;
@@ -5185,6 +5560,8 @@ class App {
       if (this.elSelectTimelineFilter) this.elSelectTimelineFilter.value = 'all';
       this._applyTimelineFilter();
       this._updateSummaryTargetPreview();
+      this._renderChatMessages();
+      this._updateChatTargetPreview();
       this._syncOnboardingUI();
       this._updateUIState();
       this.showToast('全履歴をクリアしました。', 'info');
@@ -5644,7 +6021,15 @@ class App {
         }
         if (e.code === 'KeyS') {
           e.preventDefault();
+          if (this.aiAssistTab !== 'summary') {
+            this._switchAiAssistTab('summary');
+          }
           this.generateSummary();
+          return;
+        }
+        if (e.code === 'KeyC') {
+          e.preventDefault();
+          this._switchAiAssistTab('chat', { focusChatInput: true });
           return;
         }
       }
@@ -5728,12 +6113,22 @@ class App {
     if (this.elGroupPartnerLang) {
       this.elGroupPartnerLang.style.display = usesPartner ? 'flex' : 'none';
     }
-    const isStrictSingleSource = this.direction === 'en-to-ja' || this.direction === 'ja-to-partner';
+    const isPolish = this.direction === 'ja-to-ja-polish';
+    const isStrictSingleSource = this.direction === 'en-to-ja' || this.direction === 'ja-to-partner' || isPolish;
     if (this.elSelectRecognitionProfile) {
       this.elSelectRecognitionProfile.disabled = isStrictSingleSource;
       this.elSelectRecognitionProfile.title = isStrictSingleSource
         ? '固定翻訳モード中は発話元の単一言語ロックが優先適用されます'
         : '音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）';
+    }
+    if (this.elBtnFlushNow) {
+      this.elBtnFlushNow.textContent = isPolish ? '⚡ 今すぐ清書' : '⚡ 今すぐ翻訳';
+      this.elBtnFlushNow.title = isPolish
+        ? '蓄積中の原語を今すぐ日本語清書する (Alt+Enter)'
+        : '蓄積中の原語を今すぐ翻訳確定する (Alt+Enter)';
+    }
+    if (this.elBtnMiniFlush) {
+      this.elBtnMiniFlush.title = isPolish ? '今すぐ清書 (Alt+Enter)' : '今すぐ翻訳 (Alt+Enter)';
     }
     this._syncCustomLangsInlineUI();
   }
@@ -5962,8 +6357,10 @@ class App {
 
   _saveDraftIfNeeded(force = false) {
     const K = ConfigManager.STORAGE_KEYS;
-    if (!this.records || this.records.length === 0 || (!this.hasUnsavedChanges && !this.isRecording && !this.records.some((r) => r.isTranslating))) {
-      if (this.records.length === 0 && this._lastDraftJson !== '') {
+    const hasPendingTrans = this.records.some((r) => r.isTranslating);
+    const hasChat = Array.isArray(this.chatHistory) && this.chatHistory.length > 0;
+    if (!this.records || this.records.length === 0 || (!this.hasUnsavedChanges && !this.isRecording && !hasPendingTrans && !hasChat)) {
+      if (this._lastDraftJson !== '' || ConfigManager.get(K.SESSION_DRAFT, '')) {
         ConfigManager.remove(K.SESSION_DRAFT);
         this._lastDraftJson = '';
       }
@@ -5974,10 +6371,16 @@ class App {
       const draftObj = serializeSessionDraft({
         records: this.records,
         summaryHistory: this.summaryHistory,
+        chatHistory: this.chatHistory,
         category: this.category,
         savedAt: Date.now()
       });
-      const compareKey = JSON.stringify({ r: draftObj.records, s: draftObj.summaryHistory, c: draftObj.category });
+      const compareKey = JSON.stringify({
+        r: draftObj.records,
+        s: draftObj.summaryHistory,
+        ch: draftObj.chatHistory,
+        c: draftObj.category
+      });
       if (!force && compareKey === this._lastDraftJson) return;
       this._lastDraftJson = compareKey;
       ConfigManager.set(K.SESSION_DRAFT, JSON.stringify(draftObj));
@@ -5991,9 +6394,10 @@ class App {
     if (!this._pendingPrevDraft) return;
 
     const restoredCount = Array.isArray(this._pendingPrevDraft.records) ? this._pendingPrevDraft.records.length : 0;
-    const merged = mergeRestoredDraft(this._pendingPrevDraft, this.records, this.summaryHistory);
+    const merged = mergeRestoredDraft(this._pendingPrevDraft, this.records, this.summaryHistory, this.chatHistory);
     this.records = merged.records;
     this.summaryHistory = merged.summaryHistory;
+    this.chatHistory = Array.isArray(merged.chatHistory) ? merged.chatHistory : [];
 
     if (this.elTranscriptList) {
       this.elTranscriptList.innerHTML = '';
@@ -6008,6 +6412,7 @@ class App {
       if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'flex';
       this._renderCurrentSummary();
     }
+    this._renderChatMessages();
 
     this._pendingPrevDraft = null;
     ConfigManager.remove(K.SESSION_DRAFT_PREV);
@@ -6018,6 +6423,7 @@ class App {
     this._saveDraftIfNeeded(true);
     this._applyTimelineFilter();
     this._updateSummaryTargetPreview();
+    this._updateChatTargetPreview();
     this._syncOnboardingUI();
     this._updateUIState();
     this.log('success', `前回の未保存セッション（${restoredCount}件）を復元しました。`);
@@ -6610,6 +7016,487 @@ class App {
       .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
   }
 
+  // ---- AI Assist Tabs & Timeline Chat ----
+  _syncAiAssistTabUI() {
+    const isChat = this.aiAssistTab === 'chat';
+    if (this.elBtnAiTabSummary) {
+      this.elBtnAiTabSummary.classList.toggle('is-active', !isChat);
+      this.elBtnAiTabSummary.setAttribute('aria-selected', String(!isChat));
+    }
+    if (this.elBtnAiTabChat) {
+      this.elBtnAiTabChat.classList.toggle('is-active', isChat);
+      this.elBtnAiTabChat.setAttribute('aria-selected', String(isChat));
+    }
+    if (this.elAiPanelSummary) {
+      this.elAiPanelSummary.style.display = isChat ? 'none' : 'flex';
+    }
+    if (this.elAiPanelChat) {
+      this.elAiPanelChat.style.display = isChat ? 'flex' : 'none';
+    }
+  }
+
+  _switchAiAssistTab(nextTab, { focusChatInput = false } = {}) {
+    const normalized = nextTab === 'chat' ? 'chat' : 'summary';
+    this.aiAssistTab = normalized;
+    ConfigManager.set(ConfigManager.STORAGE_KEYS.AI_ASSIST_TAB, normalized);
+    this._syncAiAssistTabUI();
+    if (normalized === 'chat') {
+      this._updateChatTargetPreview();
+      if (focusChatInput && this.elInputChatQuestion) {
+        this.elInputChatQuestion.focus();
+      }
+    }
+  }
+
+  _getChatRangeSpec(overrideRange = null) {
+    const targetRange = overrideRange || this.chatRange || 'all';
+    if (targetRange === '5') return { mode: 'minutes', minutes: 5, label: '直近5分' };
+    if (targetRange === '15') return { mode: 'minutes', minutes: 15, label: '直近15分' };
+    return { mode: 'all', minutes: null, label: 'セッション全体' };
+  }
+
+  _collectRecordsForChat(nowMs = Date.now(), overrideRange = null) {
+    const spec = this._getChatRangeSpec(overrideRange);
+    const finalized = this.getFinalizedRecords();
+    const matchedRecords = spec.mode === 'all'
+      ? finalized
+      : finalized.filter((r) => this._getRecordTimestampMs(r) >= nowMs - spec.minutes * 60 * 1000);
+    return {
+      spec,
+      records: matchedRecords,
+      totalFinalized: finalized.length
+    };
+  }
+
+  _updateChatTargetPreview() {
+    if (this.elChatTargetPreview) {
+      const { records } = this._collectRecordsForChat();
+      const count = records.length;
+      this.elChatTargetPreview.textContent = `参照: ${count}件`;
+      this.elChatTargetPreview.className = count > 0 ? 'tag summary-target-badge has-items' : 'tag summary-target-badge';
+    }
+    if (this.elChatCountBadge) {
+      const msgCount = Array.isArray(this.chatHistory) ? this.chatHistory.length : 0;
+      this.elChatCountBadge.textContent = String(msgCount);
+      this.elChatCountBadge.style.display = msgCount > 0 ? 'inline-block' : 'none';
+    }
+  }
+
+  _renderChatMarkdown(md) {
+    const baseHtml = this._renderSummaryMarkdown(md);
+    return baseHtml.replace(
+      /\[(\d{1,2}:\d{2}(?::\d{2})?)\]/g,
+      '<button type="button" class="chat-cite-btn" data-jump-time="$1" title="タイムラインの $1 付近へ移動">🕒 $1</button>'
+    );
+  }
+
+  _renderChatMessages() {
+    if (!this.elChatMessages) {
+      this._updateChatTargetPreview();
+      return;
+    }
+
+    if (typeof this.elChatMessages.replaceChildren === 'function') {
+      this.elChatMessages.replaceChildren();
+    } else {
+      while (this.elChatMessages.firstChild) {
+        this.elChatMessages.removeChild(this.elChatMessages.firstChild);
+      }
+      while (this.elChatMessages.children && this.elChatMessages.children.length > 0) {
+        this.elChatMessages.removeChild(this.elChatMessages.children[0]);
+      }
+      this.elChatMessages.innerHTML = '';
+    }
+
+    const hasMsgs = Array.isArray(this.chatHistory) && this.chatHistory.length > 0;
+    if (this.elChatEmptyState) {
+      this.elChatEmptyState.style.display = (!hasMsgs && !this.isChatting) ? 'block' : 'none';
+      this.elChatMessages.appendChild(this.elChatEmptyState);
+    }
+
+    if (hasMsgs) {
+      for (const msg of this.chatHistory) {
+        if (!msg) continue;
+        const isUser = msg.role === 'user';
+        const msgEl = document.createElement('div');
+        msgEl.className = isUser ? 'chat-msg chat-msg-user' : 'chat-msg chat-msg-assistant';
+        if (msg.id) msgEl.dataset.chatId = msg.id;
+
+        const roleLabel = isUser ? '🧑 あなた' : '🤖 AIアシスタント';
+        const modelHtml = (!isUser && msg.model)
+          ? `<span class="chat-msg-model">${this._escapeHTML(msg.model)}${msg.thinkingLevel ? ` [${this._escapeHTML(msg.thinkingLevel)}]` : ''}</span>`
+          : '';
+        const rangeHtml = msg.rangeLabel
+          ? `<span class="chat-msg-range">${this._escapeHTML(msg.rangeLabel)}${typeof msg.count === 'number' ? ` (${msg.count}件)` : ''}</span>`
+          : '';
+        const bodyHtml = isUser
+          ? this._escapeHTML(msg.text || '')
+          : this._renderChatMarkdown(msg.text || '');
+
+        msgEl.innerHTML = `
+          <div class="chat-msg-head">
+            <div class="chat-msg-meta">
+              <span class="chat-msg-role">${roleLabel}</span>
+              ${msg.time ? `<span class="chat-msg-time">${this._escapeHTML(msg.time)}</span>` : ''}
+              ${modelHtml}
+              ${rangeHtml}
+            </div>
+            <button type="button" class="chat-msg-copy" data-chat-copy="${this._escapeHTML(msg.id || '')}" title="このメッセージをコピー">📋 コピー</button>
+          </div>
+          <div class="chat-msg-body">${bodyHtml}</div>
+        `;
+        this.elChatMessages.appendChild(msgEl);
+      }
+    }
+
+    if (this.isChatting && this._chatLoadingText) {
+      const loadingEl = document.createElement('div');
+      loadingEl.className = 'chat-msg chat-msg-assistant chat-msg-loading';
+      const headEl = document.createElement('div');
+      headEl.className = 'chat-msg-head';
+      headEl.innerHTML = '<div class="chat-msg-meta"><span class="chat-msg-role">🤖 AIアシスタント</span><span class="chat-msg-model">gemini-4-hydrogen [xhigh]</span></div>';
+      const bodyEl = document.createElement('div');
+      bodyEl.className = 'chat-msg-body';
+      bodyEl.textContent = this._chatLoadingText;
+      loadingEl.appendChild(headEl);
+      loadingEl.appendChild(bodyEl);
+      this._elChatLoadingBody = bodyEl;
+      this.elChatMessages.appendChild(loadingEl);
+    } else {
+      this._elChatLoadingBody = null;
+    }
+
+    this.elChatMessages.scrollTop = this.elChatMessages.scrollHeight;
+    this._updateChatTargetPreview();
+  }
+
+  _parseClockSeconds(timeStr) {
+    const m = String(timeStr || '').trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!m) return null;
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    const s = m[3] !== undefined ? parseInt(m[3], 10) : 0;
+    if (h > 23 || min > 59 || s > 59) return null;
+    const pad2 = (n) => String(n).padStart(2, '0');
+    return {
+      hasSeconds: m[3] !== undefined,
+      totalSec: h * 3600 + min * 60 + s,
+      mmss: `${pad2(h)}:${pad2(min)}`,
+      hhmmss: `${pad2(h)}:${pad2(min)}:${pad2(s)}`
+    };
+  }
+
+  _jumpToTimelineByTime(timeStr) {
+    const target = this._parseClockSeconds(timeStr);
+    if (!target || !Array.isArray(this.records) || this.records.length === 0) {
+      this.showToast(`${timeStr} 付近の発言カードが見つかりませんでした。`, 'warning');
+      return false;
+    }
+
+    const parsedList = this.records.map((rec) => {
+      let clock = this._parseClockSeconds(rec.time);
+      if (!clock && typeof rec.createdAt === 'number' && !isNaN(rec.createdAt)) {
+        const formatted = new Date(rec.createdAt).toLocaleTimeString('ja-JP', { hour12: false });
+        clock = this._parseClockSeconds(formatted);
+      }
+      return { rec, clock };
+    });
+
+    let matched = null;
+    if (target.hasSeconds) {
+      matched = parsedList.find((x) => x.clock && x.clock.hhmmss === target.hhmmss)?.rec || null;
+    }
+    if (!matched) {
+      matched = parsedList.find((x) => x.clock && x.clock.mmss === target.mmss)?.rec || null;
+    }
+    if (!matched) {
+      let bestDiff = Infinity;
+      for (const x of parsedList) {
+        if (!x.clock) continue;
+        const rawDiff = Math.abs(x.clock.totalSec - target.totalSec);
+        const diff = Math.min(rawDiff, 86400 - rawDiff);
+        if (diff <= 120 && diff < bestDiff) {
+          bestDiff = diff;
+          matched = x.rec;
+        }
+      }
+    }
+
+    if (!matched) {
+      this.showToast(`${timeStr} 付近の発言カードが見つかりませんでした。`, 'warning');
+      return false;
+    }
+
+    const cardEl = document.getElementById(matched.id);
+    if (!cardEl) {
+      this.showToast(`${timeStr} 付近の発言カードが見つかりませんでした。`, 'warning');
+      return false;
+    }
+
+    if (cardEl.classList?.contains('is-hidden-by-filter')) {
+      this.showToast(`🕒 ${timeStr} 付近の発言は現在の検索・フィルタで非表示になっています。検索語やフィルタを解除してください。`, 'warning');
+      return false;
+    }
+
+    if (this._chatHighlightedCardEl && this._chatHighlightedCardEl !== cardEl) {
+      this._chatHighlightedCardEl.classList?.remove('is-chat-highlighted');
+    }
+    if (this._chatHighlightTimer) {
+      clearTimeout(this._chatHighlightTimer);
+      this._chatHighlightTimer = null;
+    }
+
+    cardEl.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    cardEl.classList?.add('is-chat-highlighted');
+    this._chatHighlightedCardEl = cardEl;
+    this._chatHighlightTimer = setTimeout(() => {
+      cardEl.classList?.remove('is-chat-highlighted');
+      if (this._chatHighlightedCardEl === cardEl) {
+        this._chatHighlightedCardEl = null;
+      }
+      this._chatHighlightTimer = null;
+    }, 1800);
+    return true;
+  }
+
+  async sendChatMessage(overrideText = null) {
+    if (this.isChatting) return null;
+
+    const rawInput = overrideText !== null ? overrideText : (this.elInputChatQuestion?.value || '');
+    const question = String(rawInput || '').trim();
+    if (!question) {
+      this.showToast('相談したい質問やメッセージを入力してください。', 'warning');
+      this.elInputChatQuestion?.focus();
+      return null;
+    }
+
+    if (!this.apiKey || !this.apiKey.trim()) {
+      this.showToast('AIチャット相談には Gemini API キーが必要です。', 'warning');
+      this._openSettingsModal();
+      return null;
+    }
+
+    const nowMs = Date.now();
+    const { spec, records, totalFinalized } = this._collectRecordsForChat(nowMs);
+    if (records.length === 0) {
+      const hint = totalFinalized > 0
+        ? `（セッション全体には確定発話が ${totalFinalized} 件あります。参照範囲を「セッション全体」へ切り替えてお試しください）`
+        : '';
+      this.showToast(`${spec.label}以内にチャットで参照できる確定翻訳がありません${hint}`, 'warning');
+      return null;
+    }
+
+    const startSessionEpoch = this._sessionEpoch;
+    const startChatEpoch = this._chatEpoch;
+    const priorHistory = this.chatHistory.slice();
+    const timeStr = new Date(nowMs).toLocaleTimeString('ja-JP', { hour12: false });
+    const userEntry = {
+      id: `chat_u_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
+      role: 'user',
+      text: question,
+      time: timeStr,
+      rangeLabel: spec.label,
+      count: records.length,
+      model: '',
+      thinkingLevel: ''
+    };
+
+    this.chatHistory.push(userEntry);
+    if (this.chatHistory.length > 40) {
+      this.chatHistory = this.chatHistory.slice(-40);
+    }
+    if (overrideText === null && this.elInputChatQuestion) {
+      this.elInputChatQuestion.value = '';
+    }
+
+    const chatAbortController = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    this._chatAbortController = chatAbortController;
+    this.isChatting = true;
+    this._chatLoadingText = '⏳ Gemini 4 Hydrogen [xhigh] で分析中 (0秒)...';
+    if (this.elBtnSendChat) {
+      this.elBtnSendChat.disabled = true;
+      this.elBtnSendChat.textContent = '分析中...';
+    }
+    this._renderChatMessages();
+
+    let elapsedSec = 0;
+    if (this._chatLoadingTimer) {
+      clearInterval(this._chatLoadingTimer);
+      this._chatLoadingTimer = null;
+    }
+    const progressTimer = setInterval(() => {
+      if (startSessionEpoch !== this._sessionEpoch || startChatEpoch !== this._chatEpoch) return;
+      elapsedSec += 1;
+      this._chatLoadingText = `⏳ Gemini 4 Hydrogen [xhigh] で分析中 (${elapsedSec}秒)...`;
+      if (this._elChatLoadingBody && this.isChatting) {
+        this._elChatLoadingBody.textContent = this._chatLoadingText;
+      }
+    }, 1000);
+    this._chatLoadingTimer = progressTimer;
+
+    this.log('info', `AIチャット相談送信 (参照範囲: ${spec.label} / ${records.length}件)`);
+
+    try {
+      const result = await this.chatService.ask({
+        question,
+        chatHistory: priorHistory,
+        records,
+        rangeLabel: spec.label,
+        category: this.category,
+        customPrompt: this.translationCustomPrompt,
+        apiKey: this.apiKey,
+        signal: chatAbortController ? chatAbortController.signal : null
+      });
+
+      if (startSessionEpoch !== this._sessionEpoch || startChatEpoch !== this._chatEpoch) {
+        this.log('info', '履歴クリア後に完了したAIチャット応答を破棄しました。');
+        return null;
+      }
+
+      const replyTimeStr = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+      const assistantEntry = {
+        id: `chat_a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        role: 'assistant',
+        text: result.answer,
+        time: replyTimeStr,
+        rangeLabel: spec.label,
+        count: result.recordCount,
+        model: result.model || '',
+        thinkingLevel: result.thinkingLevel || ''
+      };
+
+      this.chatHistory.push(assistantEntry);
+      if (this.chatHistory.length > 40) {
+        this.chatHistory = this.chatHistory.slice(-40);
+      }
+      this.isChatting = false;
+      this._chatLoadingText = '';
+      this._elChatLoadingBody = null;
+      this._renderChatMessages();
+      this._saveDraftIfNeeded(true);
+      return assistantEntry;
+    } catch (err) {
+      if (startSessionEpoch !== this._sessionEpoch || startChatEpoch !== this._chatEpoch) {
+        return null;
+      }
+      console.error('AI chat failed:', err);
+      const uIdx = this.chatHistory.findIndex((m) => m.id === userEntry.id);
+      if (uIdx !== -1) this.chatHistory.splice(uIdx, 1);
+      if (this.elInputChatQuestion && !this.elInputChatQuestion.value.trim()) {
+        this.elInputChatQuestion.value = question;
+      }
+      this.isChatting = false;
+      this._chatLoadingText = '';
+      this._elChatLoadingBody = null;
+      this._renderChatMessages();
+      this.log('error', `AIチャット相談エラー: ${err.message}`);
+      this.showToast('AIチャット相談エラー: ' + err.message, 'error');
+      return null;
+    } finally {
+      clearInterval(progressTimer);
+      if (this._chatLoadingTimer === progressTimer) {
+        this._chatLoadingTimer = null;
+      }
+      if (this._chatAbortController === chatAbortController) {
+        this._chatAbortController = null;
+      }
+      if (startSessionEpoch === this._sessionEpoch && startChatEpoch === this._chatEpoch) {
+        this.isChatting = false;
+        this._chatLoadingText = '';
+        this._elChatLoadingBody = null;
+        if (this.elBtnSendChat) {
+          this.elBtnSendChat.disabled = false;
+          this.elBtnSendChat.textContent = '送信';
+        }
+        this._updateChatTargetPreview();
+      }
+    }
+  }
+
+  _bindChatEvents() {
+    const K = ConfigManager.STORAGE_KEYS;
+
+    this.elBtnAiTabSummary?.addEventListener('click', () => this._switchAiAssistTab('summary'));
+    this.elBtnAiTabChat?.addEventListener('click', () => this._switchAiAssistTab('chat', { focusChatInput: true }));
+
+    this.elSelectChatRange?.addEventListener('change', (e) => {
+      const val = e.target.value;
+      this.chatRange = ['all', '15', '5'].includes(val) ? val : 'all';
+      ConfigManager.set(K.CHAT_RANGE, this.chatRange);
+      this._updateChatTargetPreview();
+      const spec = this._getChatRangeSpec();
+      this.log('info', `AIチャット参照範囲変更: ${spec.label}`);
+    });
+
+    this.elChatQuickBtns?.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (this.isChatting) return;
+        const promptText = btn.dataset?.chatPrompt || btn.getAttribute?.('data-chat-prompt') || '';
+        if (!promptText) return;
+        const currentDraft = (this.elInputChatQuestion?.value || '').trim();
+        if (currentDraft) {
+          this.showToast('入力欄に書きかけのテキストがあるため、自動送信を控え入力内容を保持しました。', 'info');
+          this.elInputChatQuestion?.focus();
+          return;
+        }
+        this.sendChatMessage(promptText);
+      });
+    });
+
+    this.elBtnSendChat?.addEventListener('click', () => this.sendChatMessage());
+
+    this.elInputChatQuestion?.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'Enter' || e.code === 'Enter')) {
+        e.preventDefault();
+        this.sendChatMessage();
+      }
+    });
+
+    this.elBtnClearChat?.addEventListener('click', () => {
+      if (this.chatHistory.length === 0 && !this.isChatting) return;
+      this._chatEpoch += 1;
+      if (this._chatAbortController) {
+        try { this._chatAbortController.abort(); } catch (_) {}
+        this._chatAbortController = null;
+      }
+      if (this._chatLoadingTimer) {
+        clearInterval(this._chatLoadingTimer);
+        this._chatLoadingTimer = null;
+      }
+      this.isChatting = false;
+      if (this.elBtnSendChat) {
+        this.elBtnSendChat.disabled = false;
+        this.elBtnSendChat.textContent = '送信';
+      }
+      this.chatHistory = [];
+      this._chatLoadingText = '';
+      this._elChatLoadingBody = null;
+      this._renderChatMessages();
+      this._saveDraftIfNeeded(true);
+      this.showToast('チャットの会話履歴をリセットしました（タイムラインは保持されています）。', 'info');
+    });
+
+    this.elChatMessages?.addEventListener('click', (e) => {
+      const citeBtn = e.target?.closest?.('[data-jump-time]');
+      if (citeBtn) {
+        const targetTime = citeBtn.dataset?.jumpTime || citeBtn.getAttribute?.('data-jump-time') || '';
+        if (targetTime) {
+          this._jumpToTimelineByTime(targetTime);
+        }
+        return;
+      }
+      const copyBtn = e.target?.closest?.('[data-chat-copy]');
+      if (copyBtn) {
+        const chatId = copyBtn.dataset?.chatCopy || copyBtn.getAttribute?.('data-chat-copy') || '';
+        const entry = this.chatHistory.find((m) => m.id === chatId);
+        if (!entry) return;
+        this.copyToClipboard(entry.text || '')
+          .then(() => this.showToast('チャットメッセージをコピーしました。', 'info'))
+          .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
+      }
+    });
+  }
+
   // ---- Recording Lifecycle ----
   async toggleRecording() {
     if (this.isStarting) return;
@@ -6876,6 +7763,9 @@ class App {
       } else if (skipTranslation) {
         this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒でそのまま確定）`;
         this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
+      } else if (this.direction === 'ja-to-ja-polish') {
+        this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒 or 文末で日本語清書）`;
+        this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
       } else if (targetLang === 'ja') {
         this.elLiveBufferStatus.textContent = `原語蓄積中 ${totalChars}文字（無音${silenceSec}秒 or 文末で長文日本語訳）`;
         this.elLiveBufferStatus.className = 'tag buffer-status is-buffering';
@@ -6997,6 +7887,7 @@ class App {
     this._appendSingleCard(record);
     this._saveDraftIfNeeded();
     this._updateSummaryTargetPreview();
+    this._updateChatTargetPreview();
     this._updateUIState();
 
     this.log('info', `確定発話をFIFOキューに投入 [${formatDocLanguageLabel(record.speakerLang, record.mixedSubLangs, record.colloquialMix)}]: "${finalText}"`);
@@ -7050,6 +7941,10 @@ class App {
     const langBadgeClass = this._getLangBadgeClass(item);
     const engineFull = item.engine || 'Gemini Live';
     const engineShort = getEngineShortLabel(engineFull);
+    const isPolishCard = item.direction === 'ja-to-ja-polish';
+    const rightColLabel = isPolishCard ? '🇯🇵 清書' : '訳文';
+    const pendingText = isPolishCard ? '⏳ 清書中...' : '⏳ 翻訳中...';
+    const retryMenuText = isPolishCard ? '🔄 再清書' : '🔄 再翻訳';
 
     card.innerHTML = `
       <div class="meta">
@@ -7060,11 +7955,11 @@ class App {
           <span class="tag engine" title="${this._escapeHTML(engineFull)}"><span class="engine-full">${this._escapeHTML(engineFull)}</span><span class="engine-short">${this._escapeHTML(engineShort)}</span></span>
         </div>
         <div class="card-actions card-menu">
-          <button type="button" class="small-btn card-menu-btn" data-a="toggle-menu" aria-haspopup="true" aria-expanded="false" title="操作メニュー (コピー・修正・再翻訳・削除)">⋯ ▾</button>
+          <button type="button" class="small-btn card-menu-btn" data-a="toggle-menu" aria-haspopup="true" aria-expanded="false" title="操作メニュー (コピー・修正・再翻訳/再清書・削除)">⋯ ▾</button>
           <div class="card-menu-dropdown" role="menu">
             <button type="button" class="card-menu-item" data-a="copy" role="menuitem">📋 コピー</button>
             <button type="button" class="card-menu-item" data-a="edit" role="menuitem">✏️ 修正</button>
-            <button type="button" class="card-menu-item" data-a="retry" role="menuitem">🔄 再翻訳</button>
+            <button type="button" class="card-menu-item" data-a="retry" role="menuitem">${retryMenuText}</button>
             <button type="button" class="card-menu-item card-menu-item-danger" data-a="delete" role="menuitem">🗑️ 削除</button>
           </div>
         </div>
@@ -7075,14 +7970,14 @@ class App {
           <div id="${item.id}_orig" class="original" dir="auto">${this._escapeHTML(item.originalText)}</div>
         </div>
         <div class="column">
-          <span class="label">訳文</span>
-          <div id="${item.id}_trans" class="translation" dir="auto">${item.isTranslating ? '⏳ 翻訳中...' : this._escapeHTML(item.translatedText)}</div>
+          <span id="${item.id}_trans_label" class="label">${rightColLabel}</span>
+          <div id="${item.id}_trans" class="translation" dir="auto">${item.isTranslating ? pendingText : this._escapeHTML(item.translatedText)}</div>
         </div>
       </div>
       <div id="${item.id}_edit" class="edit">
         <div class="edit-grid">
           <textarea id="${item.id}_edit_orig" dir="auto" placeholder="原文">${this._escapeHTML(item.originalText)}</textarea>
-          <textarea id="${item.id}_edit_trans" dir="auto" placeholder="訳文">${this._escapeHTML(item.translatedText)}</textarea>
+          <textarea id="${item.id}_edit_trans" dir="auto" placeholder="${rightColLabel}">${this._escapeHTML(item.translatedText)}</textarea>
         </div>
         <div class="edit-actions">
           <button type="button" class="btn btn-sm btn-outline" data-a="cancel" title="Esc">キャンセル</button>
@@ -7104,7 +7999,7 @@ class App {
     });
 
     card.addEventListener('click', (e) => {
-      const btn = e.target.closest('[data-a]');
+      const btn = e.target?.closest?.('[data-a]');
       const action = btn ? btn.dataset.a : null;
 
       if (action === 'toggle-menu') {
@@ -7119,7 +8014,10 @@ class App {
       if (action === 'copy') {
         this._closeAllCardMenus();
         const langNote = getLanguageDisplayName(item.speakerLang, item.mixedSubLangs, item.colloquialMix);
-        const textToCopy = `[${item.time}] (${item.speaker} / ${langNote})\n原文: ${item.originalText}\n訳文: ${item.translatedText || '(翻訳中...)'}`;
+        const copyPolish = item.direction === 'ja-to-ja-polish';
+        const copyRightLabel = copyPolish ? '🇯🇵 清書' : '訳文';
+        const copyPendingNote = copyPolish ? '(清書中...)' : '(翻訳中...)';
+        const textToCopy = `[${item.time}] (${item.speaker} / ${langNote})\n原文: ${item.originalText}\n${copyRightLabel}: ${item.translatedText || copyPendingNote}`;
         this.copyToClipboard(textToCopy)
           .then(() => this.showToast('カード内容をコピーしました。', 'info'))
           .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
@@ -7172,6 +8070,8 @@ class App {
         this.hasUnsavedChanges = true;
         this._applyTimelineFilter();
         this._saveDraftIfNeeded();
+        this._updateSummaryTargetPreview();
+        this._updateChatTargetPreview();
         this._updateUIState();
         this.showToast('修正内容を保存しました（Googleドキュメントへ未反映）。', 'success');
         return;
@@ -7179,9 +8079,21 @@ class App {
 
       if (action === 'retry') {
         this._closeAllCardMenus();
+        item.direction = this.direction;
+        item.partnerLang = this.partnerLang;
         item.isTranslating = true;
-        document.getElementById(`${item.id}_trans`).textContent = '⏳ 再翻訳中...';
+        const retryPolish = item.direction === 'ja-to-ja-polish';
+        const transLabelEl = document.getElementById(`${item.id}_trans_label`);
+        if (transLabelEl) transLabelEl.textContent = retryPolish ? '🇯🇵 清書' : '訳文';
+        const transEl = document.getElementById(`${item.id}_trans`);
+        if (transEl) transEl.textContent = retryPolish ? '⏳ 再清書中...' : '⏳ 再翻訳中...';
+        const editTransEl = document.getElementById(`${item.id}_edit_trans`);
+        if (editTransEl) editTransEl.placeholder = retryPolish ? '🇯🇵 清書' : '訳文';
+        const retryMenuBtn = card.querySelector?.('[data-a="retry"]');
+        if (retryMenuBtn) retryMenuBtn.textContent = retryPolish ? '🔄 再清書' : '🔄 再翻訳';
         this.hasUnsavedChanges = true;
+        this._updateSummaryTargetPreview();
+        this._updateChatTargetPreview();
         this._updateUIState();
         this.translationService.enqueue(
           item.originalText,
@@ -7200,7 +8112,7 @@ class App {
             hintedLangCode: item.hintedLangCode || null
           }
         );
-        this.showToast('再翻訳を開始しました。', 'info');
+        this.showToast(retryPolish ? '再清書を開始しました。' : '再翻訳を開始しました。', 'info');
         return;
       }
 
@@ -7217,6 +8129,7 @@ class App {
         this._applyTimelineFilter();
         this._saveDraftIfNeeded();
         this._updateSummaryTargetPreview();
+        this._updateChatTargetPreview();
         this._syncOnboardingUI();
         this._updateUIState();
         this.showToast('発話を削除しました。', 'info');
@@ -7297,6 +8210,8 @@ class App {
     this.hasUnsavedChanges = true;
     this._applyTimelineFilter();
     this._saveDraftIfNeeded();
+    this._updateSummaryTargetPreview();
+    this._updateChatTargetPreview();
     this._updateUIState();
     this.log('success', `翻訳反映完了: "${transResult.translated}"`);
 
@@ -7461,7 +8376,7 @@ class App {
       if (summaryPayload && result && result.summarySaved !== true && result.documentId) {
         this.log(
           'warn',
-          'デプロイ済みのGAS Web Appが旧バージョンのため、後方互換モードで冒頭サマリーをドキュメント先頭へ書き込みます（最新の code.gs v3.4.0 で再デプロイすると見出し・箇条書き装飾が適用されます）。'
+          'デプロイ済みのGAS Web Appが旧バージョンのため、後方互換モードで冒頭サマリーをドキュメント先頭へ書き込みます（最新の code.gs v3.5.0 で再デプロイすると見出し・箇条書き装飾が適用されます）。'
         );
         try {
           const fallbackRecords = [buildLegacySummaryFallbackRecord(summaryPayload), ...recordsToSave];
@@ -7483,8 +8398,12 @@ class App {
       this.unsavedFinalizedDelta = 0;
       this.hasUnsavedChanges = false;
       if (!this.records.some((r) => r.isTranslating)) {
-        ConfigManager.remove(ConfigManager.STORAGE_KEYS.SESSION_DRAFT);
-        this._lastDraftJson = '';
+        if (this.chatHistory && this.chatHistory.length > 0) {
+          this._saveDraftIfNeeded(true);
+        } else {
+          ConfigManager.remove(ConfigManager.STORAGE_KEYS.SESSION_DRAFT);
+          this._lastDraftJson = '';
+        }
       }
       this._updateUIState();
 

@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Multilingual Transcriber
- * Version: 3.4.0 (Summary 2-Mode + Hardened Summary-in-Doc + Multilingual Backend)
+ * Version: 3.5.0 (Japanese Polish + AI Chat Upgrade + Hardened Summary-in-Doc + Multilingual Backend)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および 多言語バックアップ翻訳 (action: 'translate')
@@ -155,7 +155,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '3.4.0',
+        version: '3.5.0',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -179,7 +179,7 @@ function doGet(e) {
   return createJsonResponse({
     status: 'ok',
     service: 'Multilingual Transcriber Backend',
-    version: '3.4.0',
+    version: '3.5.0',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
@@ -284,6 +284,7 @@ function handleSaveTranscript(payload, config) {
     'ja-to-partner': '日本語 ➔ ' + partnerLang,
     'ja-to-en': '日本語 ➔ 英語',
     'en-to-ja': '英語 ➔ 日本語',
+    'ja-to-ja-polish': '日本語 ➔ 日本語（清書）',
     'bn-to-ja': 'ベンガル語 ➔ 日本語',
     'hi-to-ja': 'ヒンディー語 ➔ 日本語',
     'ur-to-ja': 'ウルドゥー語 ➔ 日本語'
