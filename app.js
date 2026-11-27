@@ -854,7 +854,7 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Multilingual Transcriber
- * Version: 3.5.0 (Japanese Polish + AI Chat + Gemini 4 Hydrogen Live Check + Multilingual Core)
+ * Version: 3.6.0 (Original-Only Summary + Time/Lang-Only AI Headers + Settings Recognition Profile)
  *
  * Modules:
  *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Minutes templates, Base64 UTF-8)
@@ -874,7 +874,7 @@ global.QRCode = QRCode;
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.5.0';
+const APP_VERSION = '3.6.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -3958,14 +3958,24 @@ class TranslationService {
 // ==========================================
 // 8. Shared Transcript Formatter, Summary Service & AI Chat Service
 // ==========================================
-function buildTranscriptContextBlock(records = [], { pendingText = '', maxChars = 120000 } = {}) {
+function buildTranscriptContextBlock(
+  records = [],
+  { pendingText = '', maxChars = 120000, includeTranslation = true } = {}
+) {
   const lines = [];
   if (Array.isArray(records)) {
     for (const r of records) {
       const timeStr = r.time || '--:--:--';
-      const spk = r.speaker || '発話';
       const langTag = formatDocLanguageLabel(r.speakerLang, r.mixedSubLangs, r.colloquialMix);
       const orig = String(r.originalText || '').trim();
+
+      if (!includeTranslation) {
+        if (orig) {
+          lines.push(`[${timeStr}] (${langTag})\n  原文: ${orig}`);
+        }
+        continue;
+      }
+
       const hasValidTrans =
         !r.isTranslating &&
         r.translatedText &&
@@ -3974,7 +3984,7 @@ function buildTranscriptContextBlock(records = [], { pendingText = '', maxChars 
       const trans = hasValidTrans ? r.translatedText.trim() : '';
 
       if (orig || trans) {
-        let entry = `[${timeStr}] (${spk} / ${langTag})`;
+        let entry = `[${timeStr}] (${langTag})`;
         if (trans && orig && trans !== orig) {
           const transLabel = r.direction === 'ja-to-ja-polish' ? '清書' : '訳文';
           entry += `\n  ${transLabel}: ${trans}\n  原文: ${orig}`;
@@ -4047,7 +4057,8 @@ class SummaryService {
     const MAX_INPUT_CHARS = DEFAULT_SETTINGS.SUMMARY_MAX_INPUT_CHARS || 120000;
     const { text: transcriptText, lineCount } = buildTranscriptContextBlock(records, {
       pendingText,
-      maxChars: MAX_INPUT_CHARS
+      maxChars: MAX_INPUT_CHARS,
+      includeTranslation: false
     });
 
     if (lineCount === 0) {
@@ -4090,7 +4101,7 @@ class SummaryService {
         '### 聞き漏らし注意ポイント（発言・条件・数値）\n' +
         '- 会話中に出た重要な発言、固有名詞、数値・金額・数量・日時・期限、前提条件などを落とさず箇条書きで整理する\n\n' +
         '### 誤解・認識ズレ確認事項\n' +
-        '- 「〜しない／不要／対象外／未定」といった否定・除外の合意、主語や役割分担の取り違えが起きやすい点、まだ曖昧で相手に確認すべき点があれば箇条書きで示す\n';
+        '- 「〜しない／不要／対象外／未定」といった否定・除外の合意、発話内容における主語や対応対象の取り違えが起きやすい点、まだ曖昧で相手に確認すべき点があれば箇条書きで示す\n';
     }
 
     const commonQualityRules =
@@ -4098,14 +4109,15 @@ class SummaryService {
       '1. 事実厳守：会話ログに含まれていない事実・数値・結論を推測や創作で補わないこと。\n' +
       '2. 音声認識（ASR）誤変換の文脈復元とノイズ選別：音声認識特有の同音異義語・音韻類似の誤変換や、多言語発話・英語に混じるヒンディー語/ウルドゥー語等のコードスイッチング・言い直しは、削除して曖昧な一般論に逃げるのではなく、前後の会話テーマ・文脈から本来の自然な語句・用語へ復元して記述すること。一方、前後の文脈からも主語や意味が特定できない支離滅裂な認識ノイズ断片は無理に拾わず、文脈が明確な発言を優先すること。\n' +
       '3. 否定表現・役割分担の極性チェック：「〜しない・不要・対象外・見送り・削除する」「AではなくBが対応する」といった否定表現・除外条件・主語/役割分担の極性を出力前に必ず確認し、肯定と否定を逆転させたり、隣接する別話題と混同して誤った記載にしたりしないこと。\n' +
-      '4. 出力形式：前置き（「以下がサマリーです」等）や締めの挨拶、最上位メタ見出し（「## 会話サマリー [...]」等）は書かず、指定構成の最初の見出し（例：「### ...」）から直接出力すること。\n\n';
+      '4. 原文のみ参照＆ヘッダ話者属性の無視：入力されるログは発話原文のみであり、各行のヘッダ `[HH:MM:SS] (言語)` は録音時刻と発話言語のみを示している（発言者の氏名・役職・立場などの属性情報は意図的に除外済み）。ヘッダの誤記や話者ラベルの違いについて言及・指摘することは禁止し、時間・言語・発言本文の文脈のみから要約すること。\n' +
+      '5. 出力形式：前置き（「以下がサマリーです」等）や締めの挨拶、最上位メタ見出し（「## 会話サマリー [...]」等）は書かず、指定構成の最初の見出し（例：「### ...」）から直接出力すること。\n\n';
 
     const prompt =
       roleIntro +
       customThemeHint +
       structureSection +
       commonQualityRules +
-      `【会話ログ（時系列順）】\n${transcriptText}`;
+      `【会話ログ（時系列順・原文のみ・ヘッダ=時刻/言語のみ）】\n${transcriptText}`;
 
     const targetModels = isMinutesMode
       ? DEFAULT_SETTINGS.GEMINI_SUMMARY_MODELS
@@ -4179,7 +4191,8 @@ class TranscriptChatService {
 
     const MAX_INPUT_CHARS = DEFAULT_SETTINGS.CHAT_MAX_INPUT_CHARS || 120000;
     const { text: transcriptText, lineCount } = buildTranscriptContextBlock(records, {
-      maxChars: MAX_INPUT_CHARS
+      maxChars: MAX_INPUT_CHARS,
+      includeTranslation: true
     });
 
     if (!Array.isArray(records) || records.length === 0 || lineCount === 0) {
@@ -4205,8 +4218,9 @@ class TranscriptChatService {
       '\n【厳守ルール】\n' +
       '1. **事実厳守＆タイムスタンプ根拠明示**: 話の転換点・すり替わり・誤解のきっかけ・懸念点を指摘する際は、必ずタイムライン中の該当発言時刻を **`[HH:MM:SS]`** 形式（角括弧付き）で明示して要旨を引用すること。ログに存在しない発言や事実は推測・創作しないこと。\n' +
       '2. **ASR誤変換の文脈復元 ＆ 否定・役割極性チェック**: 音声認識の同音異義語・音韻類似の誤変換は文脈から本来の語句を復元して理解し、「実施しない・不要・対象外」「AではなくB」等の否定・除外条件・主語/役割極性を絶対に逆転させないこと。\n' +
-      '3. **実戦的な軌道修正・対応提案**: 誤解・論点ズレ・前提のすり替わりが確認された場合は、①ズレの内容ときっかけ発言（`[HH:MM:SS]`）、②相手の前提・意図の読み解き、③角を立てずに軌道修正する具体策とそのまま口頭で使えるフレーズ案（多言語会議なら必要に応じ相手言語フレーズも併記）を構造化して提案すること。\n' +
-      '4. **簡潔・スキャン性**: 会議中でも素早く読めるよう、日本語で Markdown 見出し（`###`）と箇条書き（`-` / `1.`）を使って簡潔・明瞭に回答すること。\n\n' +
+      '3. **ヘッダ情報（時刻と言語のみ）＆発言者属性の無視**: 各発話ヘッダ `[HH:MM:SS] (言語)` は発話時刻と使用言語のみを示し、発言者の属性・役職・名前は意図的に除外している。ヘッダ情報から発言者属性を推測したり、ヘッダの誤記・話者名の不一致について言及したりしてはならない。タイムライン上の特定・引用は必ず `[HH:MM:SS]` の時刻のみで行うこと。\n' +
+      '4. **実戦的な軌道修正・対応提案**: 誤解・論点ズレ・前提のすり替わりが確認された場合は、①ズレの内容ときっかけ発言（`[HH:MM:SS]`）、②相手の前提・意図の読み解き、③角を立てずに軌道修正する具体策とそのまま口頭で使えるフレーズ案（多言語会議なら必要に応じ相手言語フレーズも併記）を構造化して提案すること。\n' +
+      '5. **簡潔・スキャン性**: 会議中でも素早く読めるよう、日本語で Markdown 見出し（`###`）と箇条書き（`-` / `1.`）を使って簡潔・明瞭に回答すること。\n\n' +
       `【確定翻訳タイムライン（時系列順・対象範囲: ${rangeLabel} / ${lineCount}件）】\n${transcriptText}`;
 
     const maxHistoryMessages = (DEFAULT_SETTINGS.CHAT_MAX_HISTORY_TURNS || 10) * 2;
@@ -5087,6 +5101,7 @@ class App {
     this.elBtnToggleKeyVis = byId('btn-toggle-key-vis');
     this.elSelectEngineMode = byId('select-engine-mode');
     this.elSelectLiveModel = byId('select-live-model');
+    this.elRecognitionProfileLockHint = byId('recognition-profile-lock-hint');
     this.elCustomLangsGrid = byId('custom-langs-grid');
     this.elCustomLangPresetBtns = document.querySelectorAll('.custom-lang-preset-btn');
     this.elInputSystemInstruction = byId('input-system-instruction');
@@ -5396,22 +5411,7 @@ class App {
     });
 
     this.elSelectRecognitionProfile?.addEventListener('change', (e) => {
-      if (this.utteranceBuffer.hasPendingText()) {
-        this.utteranceBuffer.flushAll('profile-change');
-      }
-      this.recognitionProfile = e.target.value;
-      ConfigManager.set(K.RECOGNITION_PROFILE, this.recognitionProfile);
-      this._syncCustomLangsInlineUI();
-      this.geminiClient.updateRecognitionSettings({ recognitionProfile: this.recognitionProfile });
-      this.webSpeechService.updateSettings({ recognitionProfile: this.recognitionProfile });
-      this.utteranceBuffer.setConfig({ recognitionProfile: this.recognitionProfile });
-
-      const profileLabel = RECOGNITION_PROFILES[this.recognitionProfile]?.label || this.recognitionProfile;
-      const customDetail = this.recognitionProfile === 'multilingual-custom'
-        ? ` (${this.customLangs.map((c) => resolveLanguageMeta(c).name).join('・')})`
-        : '';
-      this.log('info', `認識プロファイル変更: ${profileLabel}${customDetail}`);
-      this.showToast(`認識モードを「${profileLabel}${customDetail}」に設定しました。`, 'info');
+      this._syncSettingsProfileUI(e.target.value);
     });
 
     this.elSelectDirection.addEventListener('change', (e) => {
@@ -5779,8 +5779,17 @@ class App {
       this.liveModel = this.elSelectLiveModel.value;
       this.autoSave = this.elCheckAutoSave.checked;
 
+      const prevProfile = this.recognitionProfile;
+      const rawProfile = this.elSelectRecognitionProfile?.value;
+      const nextProfile = rawProfile && RECOGNITION_PROFILES[rawProfile] ? rawProfile : this.recognitionProfile;
+      if (nextProfile !== prevProfile && this.utteranceBuffer.hasPendingText()) {
+        this.utteranceBuffer.flushAll('profile-change');
+      }
+      this.recognitionProfile = nextProfile;
+
       this.customLangs = this._readCustomLangCheckboxes();
       this._syncCustomLangCheckboxesUI();
+      ConfigManager.set(K.RECOGNITION_PROFILE, this.recognitionProfile);
       ConfigManager.set(K.CUSTOM_LANGS, this.customLangs.join(','));
 
       if (this.elSelectDefaultGain) {
@@ -5807,15 +5816,19 @@ class App {
       ConfigManager.set(K.AUTO_SAVE, String(this.autoSave));
 
       this.geminiClient.updateRecognitionSettings({
+        recognitionProfile: this.recognitionProfile,
         customLangs: this.customLangs,
         systemInstruction: this.systemInstruction
       });
+      this.webSpeechService.updateSettings({ recognitionProfile: this.recognitionProfile });
+      this.utteranceBuffer.setConfig({ recognitionProfile: this.recognitionProfile });
 
       this._syncCustomLangsInlineUI();
+      this._syncSettingsProfileUI(this.recognitionProfile);
       this._updateAdvancedSummaryBadge();
       this._syncOnboardingUI();
       this._closeSettingsModal();
-      this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}, カスタム言語=${this.customLangs.join(',')}`);
+      this.log('info', `設定保存: エンジン=${this.engineMode}, モデル=${this.liveModel}, プロファイル=${this.recognitionProfile}, カスタム言語=${this.customLangs.join(',')}`);
       this.showToast('設定を保存しました。', 'success');
     });
 
@@ -6114,13 +6127,6 @@ class App {
       this.elGroupPartnerLang.style.display = usesPartner ? 'flex' : 'none';
     }
     const isPolish = this.direction === 'ja-to-ja-polish';
-    const isStrictSingleSource = this.direction === 'en-to-ja' || this.direction === 'ja-to-partner' || isPolish;
-    if (this.elSelectRecognitionProfile) {
-      this.elSelectRecognitionProfile.disabled = isStrictSingleSource;
-      this.elSelectRecognitionProfile.title = isStrictSingleSource
-        ? '固定翻訳モード中は発話元の単一言語ロックが優先適用されます'
-        : '音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）';
-    }
     if (this.elBtnFlushNow) {
       this.elBtnFlushNow.textContent = isPolish ? '⚡ 今すぐ清書' : '⚡ 今すぐ翻訳';
       this.elBtnFlushNow.title = isPolish
@@ -6130,12 +6136,46 @@ class App {
     if (this.elBtnMiniFlush) {
       this.elBtnMiniFlush.title = isPolish ? '今すぐ清書 (Alt+Enter)' : '今すぐ翻訳 (Alt+Enter)';
     }
+    this._syncSettingsProfileUI(this.recognitionProfile);
     this._syncCustomLangsInlineUI();
+  }
+
+  _syncSettingsProfileUI(previewProfile = null) {
+    const isStrictSingleSource = ['en-to-ja', 'ja-to-partner', 'ja-to-ja-polish'].includes(this.direction);
+    const activeProfile = previewProfile || this.elSelectRecognitionProfile?.value || this.recognitionProfile;
+
+    if (this.elSelectRecognitionProfile) {
+      this.elSelectRecognitionProfile.disabled = isStrictSingleSource;
+      this.elSelectRecognitionProfile.title = isStrictSingleSource
+        ? '現在の翻訳方向（固定英語 / 固定日本語 / 日本語清書）は単一言語にロックされているため変更できません'
+        : '音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）';
+    }
+
+    if (this.elRecognitionProfileLockHint) {
+      this.elRecognitionProfileLockHint.classList.toggle('is-locked', isStrictSingleSource);
+      if (isStrictSingleSource) {
+        this.elRecognitionProfileLockHint.textContent =
+          '⚠️ 現在の翻訳モード（英語固定／日本語固定／日本語清書）では単一言語ロックが優先されるため選択できません。「自動双方向」等にすると変更できます。';
+      } else if (activeProfile === 'multilingual-custom') {
+        this.elRecognitionProfileLockHint.textContent =
+          '🎯 下の「カスタム認識言語セット」でチェックした言語（設定保存で即時反映）に認識対象を絞り込みます。';
+      } else {
+        this.elRecognitionProfileLockHint.textContent =
+          '※ 既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足します。';
+      }
+    }
+
+    if (this.elCustomLangsGrid) {
+      this.elCustomLangsGrid.classList.toggle(
+        'is-inactive-profile',
+        !isStrictSingleSource && activeProfile !== 'multilingual-custom'
+      );
+    }
   }
 
   _syncCustomLangsInlineUI() {
     if (!this.elCustomLangsInline) return;
-    const isLocked = Boolean(this.elSelectRecognitionProfile?.disabled);
+    const isLocked = ['en-to-ja', 'ja-to-partner', 'ja-to-ja-polish'].includes(this.direction);
     const show = this.recognitionProfile === 'multilingual-custom' && !isLocked;
     this.elCustomLangsInline.style.display = show ? 'flex' : 'none';
     if (!show || !this.elCustomLangsInlineBadges) return;
@@ -8457,6 +8497,10 @@ class App {
 
   // ---- Modals, Clipboard & QR Sync ----
   _openSettingsModal(options = {}) {
+    if (this.elSelectRecognitionProfile) {
+      this.elSelectRecognitionProfile.value = this.recognitionProfile;
+    }
+    this._syncSettingsProfileUI(this.recognitionProfile);
     this._syncCustomLangCheckboxesUI();
     this._refreshMicDevices();
     this.elModal.style.display = 'flex';

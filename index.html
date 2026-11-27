@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Multilingual Transcriber - 多言語音声認識・文脈翻訳システム</title>
   <meta name="description" content="Gemini Live API (日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語自動認識) および Web Speech API に対応した音声認識・長文文脈翻訳・任意範囲サマリーWebアプリ">
-  <link rel="stylesheet" href="style.css?v=3.5.0">
+  <link rel="stylesheet" href="style.css?v=3.6.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
@@ -84,16 +84,6 @@
             <select id="select-audio-source" class="select-input" title="音声入力元を選択">
               <option value="mic" selected>マイク (対面会話)</option>
               <option value="display">タブ・PC音声 (イヤホン・ウェブ会議)</option>
-            </select>
-          </div>
-
-          <div class="control-group profile-group">
-            <label for="select-recognition-profile" class="control-label">認識:</label>
-            <select id="select-recognition-profile" class="select-input" title="音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）">
-              <option value="ja-en-hi-ur" selected>日英最優先 ＋ ヒンディー/ウルドゥー補足 (推奨)</option>
-              <option value="multilingual-auto">完全多言語 (85+言語自動判別・日英優先)</option>
-              <option value="multilingual-custom">カスタム言語セット (設定で選択)</option>
-              <option value="strict-ja-en">日英2言語のみ厳密ロック</option>
             </select>
           </div>
 
@@ -514,7 +504,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.5.0 - 日本語清書・AIチャット相談・Gemini 4 Hydrogen高速チェック・完全多言語対応版)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.6.0 - サマリー原文入力分離・時刻/言語ヘッダ最適化・設定画面プロファイル整理版)。</div>
           </div>
         </div>
       </section>
@@ -560,9 +550,20 @@
             </select>
           </div>
 
+          <div class="form-group" id="group-settings-recognition-profile">
+            <label for="select-recognition-profile">音声認識プロファイル（多言語優先度）</label>
+            <select id="select-recognition-profile" class="select-input" title="音声認識の言語優先プロファイル（既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足）">
+              <option value="ja-en-hi-ur" selected>日英最優先 ＋ ヒンディー/ウルドゥー補足 (推奨)</option>
+              <option value="multilingual-auto">完全多言語 (85+言語自動判別・日英優先)</option>
+              <option value="multilingual-custom">カスタム言語セット (下のチェックから選択)</option>
+              <option value="strict-ja-en">日英2言語のみ厳密ロック</option>
+            </select>
+            <small id="recognition-profile-lock-hint" class="form-help">※ 既定は日英精度を最優先しつつ、英語雑談に混じるヒンディー語・ウルドゥー語を補足します。</small>
+          </div>
+
           <div class="form-group">
             <div class="label-with-action">
-              <label>カスタム認識言語セット（「認識: カスタム言語セット」選択時に適用）</label>
+              <label>カスタム認識言語セット（上の「音声認識プロファイル」で「カスタム言語セット」選択時に適用）</label>
               <div class="custom-langs-presets">
                 <button type="button" class="btn btn-sm btn-ghost custom-lang-preset-btn" data-lang-preset="south-asia">日英+南アジア</button>
                 <button type="button" class="btn btn-sm btn-ghost custom-lang-preset-btn" data-lang-preset="asia">日英+アジア</button>
@@ -703,6 +704,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=3.5.0"></script>
+  <script src="app.js?v=3.6.0"></script>
 </body>
 </html>
