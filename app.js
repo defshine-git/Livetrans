@@ -854,18 +854,18 @@ global.QRCode = QRCode;
 
 /**
  * app.js - Optimized Frontend Architecture for Multilingual Transcriber
- * Version: 3.3.0 (UX Overhaul + Complete Multilingual + EN/JA Top Priority + Hindi/Urdu Code-Switching Edition)
+ * Version: 3.4.0 (Gemini 4 Dual-Mode Summary + Pre-registered Minutes Prompts + Docs Summary Sync Fix)
  *
  * Modules:
- *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Base64 UTF-8, Timeout fetch)
+ *  1. Constants & Shared Utilities (Multilingual registry, Code-switch detection, Minutes templates, Base64 UTF-8)
  *  2. ConfigManager (localStorage persistence)
  *  2.5. VoiceActivityDetector (Pre-Gain VAD with Minimum Statistics noise floor)
  *  3. AudioCaptureService (Anti-aliased 16kHz PCM, far-field boost, iPad/iOS unlock)
  *  4. WebSpeechService (Multilingual Web Speech API fallback)
  *  5. GeminiLiveClient (Tiered EN/JA + HI/UR & 85+ multilingual setup, single `audio` stream, auto-reconnect x5)
- *  6. GeminiTextClient (Shared Gemini REST cascade client for Translation & Summary)
+ *  6. GeminiTextClient (Shared Gemini REST cascade client with isolated cache & Gemini 4 thinkingLevel support)
  *  7. TranslationService (FIFO queue, multilingual & Hinglish/Urdu code-switching nuance, prior-context continuity)
- *  8. SummaryService (On-demand lookback structured Japanese summarizer)
+ *  8. SummaryService (Gemini 4 neon/hydrogen [medium] dual-mode summarizer: Live Check & Minutes)
  *  9. GasStorageClient (Google Docs single-document sync & GAS multilingual fallback)
  * 10. LongFormUtteranceBuffer (Real-time original display + code-switch-safe chunking + Urdu/RTL punctuation)
  * 11. App (Modular UI controller with concurrency locks & DOM bounds)
@@ -874,7 +874,7 @@ global.QRCode = QRCode;
 // ==========================================
 // 1. Constants & Shared Utilities
 // ==========================================
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.4.0';
 
 const DEFAULT_SETTINGS = Object.freeze({
   DEFAULT_FOLDER_ID: '15THrUI5WmO-aQIV7Nr5345jZEBOKDb8f',
@@ -889,8 +889,83 @@ const DEFAULT_SETTINGS = Object.freeze({
     'gemini-2.0-flash',
     'gemini-1.5-flash'
   ]),
+  GEMINI_SUMMARY_MODELS: Object.freeze([
+    'gemini-4-neon',
+    'gemini-4-hydrogen',
+    'gemini-2.5-flash'
+  ]),
+  SUMMARY_THINKING_LEVEL: 'medium',
+  SUMMARY_MAX_INPUT_CHARS: 120000,
   MAX_LOG_LINES: 300
 });
+
+const DEFAULT_MINUTES_TEMPLATES = Object.freeze([
+  Object.freeze({
+    id: 'std-minutes',
+    name: '標準・会話/会議議事録',
+    builtIn: true,
+    prompt:
+      '以下のMarkdown見出し構成で日本語出力してください（該当内容が全く無い見出しは省略可）：\n' +
+      '### 要点サマリー\n' +
+      '（会話全体の結論・合意方針・流れを2〜4文で簡潔にまとめる）\n\n' +
+      '### 主なトピック・発言内容\n' +
+      '- 議論されたテーマごとに重要な発言・説明・質疑応答を整理する（固有名詞・数値・金額・期間・条件があれば落とさず記載する）\n\n' +
+      '### 決定事項・今後のアクション / 課題\n' +
+      '- 合意・決定した事項、見送り・対象外とした事項、今後のアクション（担当・期限）や未解決課題を箇条書きで整理する'
+  }),
+  Object.freeze({
+    id: 'decisions-conditions',
+    name: '決定事項・合意条件整理',
+    builtIn: true,
+    prompt:
+      '以下のMarkdown見出し構成で、意思決定の結論と具体条件が後から見返して一目で分かるように整理してください：\n' +
+      '### 合意・決定事項の結論\n' +
+      '- 「何をどう進めるか」「どのような方針にしたか」の結論を明確に箇条書きにする\n\n' +
+      '### 採用条件・数値・固有名詞の整理\n' +
+      '- 会話中に出た人数・数量・面積・金額・単価・日付・スケジュール・組織/企業名などの具体条件を漏れなく整理する\n\n' +
+      '### 見送り・除外事項 / 残課題\n' +
+      '- 「実施しない・削除する・対象外とする」と合意された事項と、今後詰めるべき未決事項を明確に分けて記載する'
+  }),
+  Object.freeze({
+    id: 'client-hearing',
+    name: '商談・ヒアリング記録',
+    builtIn: true,
+    prompt:
+      '以下のMarkdown見出し構成で、商談やヒアリングの内容を実務共有向けに整理してください：\n' +
+      '### 相手の要望・背景課題\n' +
+      '- 相手が重視しているニーズ、現状の課題、背景事情を箇条書きで整理する\n\n' +
+      '### 前提条件・提案と反応\n' +
+      '- 予算・時期・体制・制約などの前提条件と、提案・説明に対する相手の反応や懸念点を整理する\n\n' +
+      '### ネクストアクション・双方の宿題\n' +
+      '- 次回までの確認事項・提出物・スケジュールを、双方の役割分担が分かるように箇条書きにする'
+  }),
+  Object.freeze({
+    id: 'tech-audit',
+    name: '技術レビュー・現地確認記録',
+    builtIn: true,
+    prompt:
+      '以下のMarkdown見出し構成で、技術打ち合わせ・点検・現地確認の記録を正確に整理してください：\n' +
+      '### 確認結果サマリー\n' +
+      '（確認・レビューの全体状況と主要な結論を2〜4文で簡潔にまとめる）\n\n' +
+      '### 仕様・数値基準・指摘/確認事項\n' +
+      '- 技術仕様、基準値・測定値、現場状況、質疑応答や指摘された懸念点を具体的に箇条書きにする\n\n' +
+      '### 是正・フォローアップ対応\n' +
+      '- 必要な対応アクション、対象範囲、担当・期限を整理する'
+  }),
+  Object.freeze({
+    id: 'brainstorm-casual',
+    name: '雑談・アイデアブレスト整理',
+    builtIn: true,
+    prompt:
+      '以下のMarkdown見出し構成で、自由な意見交換や雑談・ブレストの内容を読みやすく整理してください：\n' +
+      '### 盛り上がったテーマ・全体の流れ\n' +
+      '（話題になった主なテーマや全体の流れを2〜3文でまとめる）\n\n' +
+      '### 出たアイデア・意見の整理\n' +
+      '- 挙がったアイデア、印象的な意見、視点や気づきをテーマ別に箇条書きで整理する\n\n' +
+      '### 試してみたいこと・メモ\n' +
+      '- 今後試したいステップや共有メモがあれば箇条書きにする'
+  })
+]);
 
 const LANGUAGE_REGISTRY = Object.freeze({
   ja: { code: 'ja', name: '日本語', englishName: 'Japanese', badge: '🇯🇵', bcp47: ['ja-JP'], speechLang: 'ja-JP', rtl: false },
@@ -1470,7 +1545,7 @@ function buildTranscriptMarkdown(records = [], { category = 'Common', title = ''
   md += `- **発話件数**: ${records.length}件\n\n`;
 
   if (latestSummary && latestSummary.markdown) {
-    const metaParts = [latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
+    const metaParts = [latestSummary.modeLabel, latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
     md += `## 会話サマリー${metaParts ? ` (${metaParts})` : ''}\n\n`;
     md += `${String(latestSummary.markdown).trim()}\n\n---\n\n`;
   }
@@ -1494,7 +1569,7 @@ function buildTranscriptTxt(records = [], { category = 'Common', title = '', lat
   lines.push('==================================================');
 
   if (latestSummary && latestSummary.markdown) {
-    const metaParts = [latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
+    const metaParts = [latestSummary.modeLabel, latestSummary.rangeLabel, latestSummary.timeSpan].filter(Boolean).join(' / ');
     lines.push('');
     lines.push(`【会話サマリー${metaParts ? ` (${metaParts})` : ''}】`);
     lines.push(String(latestSummary.markdown).trim());
@@ -1511,6 +1586,22 @@ function buildTranscriptTxt(records = [], { category = 'Common', title = '', lat
   }
   lines.push('');
   return lines.join('\r\n');
+}
+
+/**
+ * 旧バージョン(v3.2.0以前)の GAS Web App がデプロイされている環境でも
+ * ドキュメント最上部へ確実にサマリーを書き込むための後方互換レコードを生成する
+ */
+function buildLegacySummaryFallbackRecord(summary) {
+  const metaParts = [summary?.modeLabel, summary?.rangeLabel, summary?.timeSpan].filter(Boolean).join(' / ');
+  return {
+    timestamp: summary?.generatedAt || 'SUMMARY',
+    speaker: '📝 会話サマリー',
+    speakerLang: summary?.modeLabel || 'SUMMARY',
+    original: metaParts ? `対象範囲: ${metaParts}` : '会話サマリー',
+    translated: String(summary?.markdown || '').trim(),
+    engine: summary?.model || 'Gemini 4'
+  };
 }
 
 /**
@@ -1565,12 +1656,15 @@ function serializeSessionDraft({ records = [], summaryHistory = [], category = '
   const safeSummaries = (summaryHistory || []).slice(0, 10).map((s) => ({
     id: s.id,
     generatedAt: s.generatedAt || '',
+    mode: s.mode || '',
+    modeLabel: s.modeLabel || '',
     rangeLabel: s.rangeLabel || '',
     timeSpan: s.timeSpan || '',
     count: s.count || 0,
     hasPending: false,
     markdown: s.markdown || '',
-    model: s.model || ''
+    model: s.model || '',
+    thinkingLevel: s.thinkingLevel || ''
   }));
 
   return {
@@ -1642,8 +1736,13 @@ class ConfigManager {
     TRANSLATION_CUSTOM_PROMPT: 'glt_translation_custom_prompt',
     TRANSLATION_PROMPT_OPEN: 'glt_translation_prompt_open',
     CONTEXT_WINDOW: 'glt_context_window',
+    SUMMARY_MODE: 'glt_summary_mode',
     SUMMARY_RANGE: 'glt_summary_range',
     SUMMARY_CUSTOM_MIN: 'glt_summary_custom_min',
+    MINUTES_TEMPLATES: 'glt_minutes_templates',
+    ACTIVE_MINUTES_TEMPLATE_ID: 'glt_active_minutes_template_id',
+    MINUTES_CUSTOM_PROMPT: 'glt_minutes_custom_prompt',
+    MINUTES_PROMPT_OPEN: 'glt_minutes_prompt_open',
     VAD_MODE: 'glt_vad_mode',
     ADVANCED_OPEN: 'glt_advanced_open',
     MIC_DEVICE_ID: 'glt_mic_device_id',
@@ -3212,12 +3311,21 @@ class GeminiLiveClient {
 }
 
 // ==========================================
-// 6. Shared Gemini Text Client (Cascade Fallback + Preferred Model Cache)
+// 6. Shared Gemini Text Client (Cascade Fallback + Isolated Cache + Gemini 4 Thinking)
 // ==========================================
 class GeminiTextClient {
   constructor() {
-    this._preferredModel = null;
+    this._preferredModels = {};
     this.onLogCallback = null;
+  }
+
+  get _preferredModel() {
+    return this._preferredModels.translation || null;
+  }
+
+  set _preferredModel(val) {
+    if (val) this._preferredModels.translation = val;
+    else delete this._preferredModels.translation;
   }
 
   log(type, tag, message) {
@@ -3226,47 +3334,100 @@ class GeminiTextClient {
     }
   }
 
-  async generateText({ apiKey, prompt, temperature = 0.15, maxOutputTokens = 2048, timeoutMs = 20000, logTag = 'Gemini' }) {
+  async generateText({
+    apiKey,
+    prompt,
+    temperature = 0.15,
+    maxOutputTokens = 2048,
+    timeoutMs = 20000,
+    logTag = 'Gemini',
+    models = null,
+    cacheKey = 'translation',
+    thinkingLevel = null
+  }) {
     if (!apiKey || apiKey.trim() === '') {
       throw new Error('Gemini APIキーが未設定です。');
     }
 
-    const baseModels = DEFAULT_SETTINGS.GEMINI_TEXT_MODELS;
-    const modelsToTry = this._preferredModel
-      ? [this._preferredModel, ...baseModels.filter((m) => m !== this._preferredModel)]
-      : baseModels;
+    const baseModels = (Array.isArray(models) && models.length > 0)
+      ? models
+      : DEFAULT_SETTINGS.GEMINI_TEXT_MODELS;
+    const cachedModel = this._preferredModels[cacheKey];
+    const preferred = (cachedModel && baseModels.includes(cachedModel)) ? cachedModel : null;
+    const modelsToTry = preferred
+      ? [preferred, ...baseModels.filter((m) => m !== preferred)]
+      : [...baseModels];
 
     let lastError = 'Gemini API 応答を取得できませんでした。';
 
     for (const modelName of modelsToTry) {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+      const isGemini4 = /^gemini-4-/i.test(modelName);
+      const isGemini3 = /^gemini-3\./i.test(modelName);
+
+      let generationConfig;
+      let appliedThinkingLevel = null;
+
+      if (isGemini4) {
+        // Gemini 4 公式仕様: temperature / topP / topK / thinkingBudget は指定せず、
+        // 思考トークン分を含む maxOutputTokens (65536) と thinkingConfig.thinkingLevel を送信
+        generationConfig = {
+          maxOutputTokens: Math.max(maxOutputTokens || 0, 65536)
+        };
+        if (thinkingLevel) {
+          generationConfig.thinkingConfig = { thinkingLevel };
+          appliedThinkingLevel = thinkingLevel;
+        }
+      } else {
+        const safeMaxTokens = Math.min(maxOutputTokens || 2048, 8192);
+        generationConfig = { temperature, maxOutputTokens: safeMaxTokens };
+        if (thinkingLevel && isGemini3) {
+          generationConfig.thinkingConfig = { thinkingLevel };
+          appliedThinkingLevel = thinkingLevel;
+        }
+      }
+
       try {
         const res = await fetchWithTimeout(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature, maxOutputTokens }
+            generationConfig
           })
         }, timeoutMs);
 
         if (res.ok) {
           const data = await res.json();
-          const outText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (typeof outText === 'string' && outText.trim().length > 0) {
-            this._preferredModel = modelName;
-            return { text: outText.trim(), model: modelName };
+          const parts = data.candidates?.[0]?.content?.parts || [];
+          const outText = parts
+            .filter((p) => p && !p.thought && typeof p.text === 'string')
+            .map((p) => p.text)
+            .join('');
+          const thoughtsTokenCount = data.usageMetadata?.thoughtsTokenCount || 0;
+
+          if (outText.trim().length > 0) {
+            this._preferredModels[cacheKey] = modelName;
+            return {
+              text: outText.trim(),
+              model: modelName,
+              thinkingLevel: appliedThinkingLevel,
+              thoughtsTokenCount
+            };
           }
-          lastError = `Gemini (${modelName}): 空の応答を受信`;
+          const finishReason = data.candidates?.[0]?.finishReason || 'EMPTY';
+          lastError = `Gemini (${modelName}): 空の応答を受信 (${finishReason})`;
+          if (this._preferredModels[cacheKey] === modelName) delete this._preferredModels[cacheKey];
+          this.log('warn', logTag, lastError);
         } else {
           const errData = await res.json().catch(() => null);
           const errDetail = errData?.error?.message || `HTTP ${res.status}`;
           lastError = `Gemini (${modelName}): ${errDetail}`;
-          if (this._preferredModel === modelName) this._preferredModel = null;
+          if (this._preferredModels[cacheKey] === modelName) delete this._preferredModels[cacheKey];
           this.log('warn', logTag, `Gemini (${modelName}) 失敗: ${errDetail}`);
         }
       } catch (err) {
-        if (this._preferredModel === modelName) this._preferredModel = null;
+        if (this._preferredModels[cacheKey] === modelName) delete this._preferredModels[cacheKey];
         const reason = err.name === 'AbortError' ? `タイムアウト (${Math.round(timeoutMs / 1000)}秒)` : err.message;
         lastError = `Gemini (${modelName}): ${reason}`;
         this.log('warn', logTag, `Gemini (${modelName}) 通信エラー: ${reason}`);
@@ -3624,7 +3785,7 @@ class TranslationService {
 }
 
 // ==========================================
-// 8. Summary Service (On-Demand Lookback Japanese Summarizer)
+// 8. Summary Service (Gemini 4 Dual-Mode Summarizer: Live Check & Minutes)
 // ==========================================
 class SummaryService {
   constructor(geminiTextClient) {
@@ -3638,7 +3799,16 @@ class SummaryService {
     }
   }
 
-  async generateSummary({ records, pendingText, rangeLabel, category, customPrompt, apiKey }) {
+  async generateSummary({
+    records,
+    pendingText,
+    rangeLabel,
+    category,
+    customPrompt,
+    summaryMode = 'live-check',
+    minutesPrompt = '',
+    apiKey
+  }) {
     if (!apiKey || apiKey.trim() === '') {
       throw new Error('サマリー生成には Gemini API キーが必要です。設定画面から登録してください。');
     }
@@ -3679,51 +3849,109 @@ class SummaryService {
     }
 
     let transcriptText = lines.join('\n\n');
-    const MAX_INPUT_CHARS = 24000;
+    const MAX_INPUT_CHARS = DEFAULT_SETTINGS.SUMMARY_MAX_INPUT_CHARS || 120000;
     if (transcriptText.length > MAX_INPUT_CHARS) {
-      transcriptText = '…(古い一部発話を省略)…\n\n' + transcriptText.slice(-MAX_INPUT_CHARS);
+      const kept = [];
+      let totalLen = 0;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const chunk = lines[i];
+        const addedLen = chunk.length + (kept.length > 0 ? 2 : 0);
+        if (totalLen + addedLen > MAX_INPUT_CHARS) {
+          if (kept.length === 0) {
+            kept.unshift(chunk.slice(-MAX_INPUT_CHARS));
+          }
+          break;
+        }
+        kept.unshift(chunk);
+        totalLen += addedLen;
+      }
+      transcriptText = '…(古い一部発話を省略)…\n\n' + kept.join('\n\n');
     }
 
-    let domainHint = '対象分野: 一般ビジネス会議・国際打ち合わせ。専門用語や固有名詞・略称は正確に保持してください。';
+    let domainHint = '対象分野: 一般ビジネス会話・国際打ち合わせ。固有名詞・専門用語・略称・数値条件は正確に保持してください。';
     if (category === 'Casual') {
-      domainHint = '対象分野: 一般会議・ビジネス雑談・日常対話。英語の雑談中に混じるヒンディー語やウルドゥー語等の発言意図も含めて自然に整理してください。';
+      domainHint = '対象分野: 一般会話・ビジネス雑談・日常対話。英語の雑談中に混じるヒンディー語やウルドゥー語等の発言意図も含めて自然に整理してください。';
     } else if (category && category !== 'Common') {
-      domainHint = `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）は正確に保持してください。`;
+      domainHint = `対象分野: 海事・シップリサイクル / 安全衛生監査 (${category})。専門用語や条約・規則の略称（HKC, EU-SRR, IHM, SRFP, SOC, HSE等）および数値条件は正確に保持してください。`;
     }
 
     const customThemeHint = String(customPrompt || '').trim()
-      ? `\n【ユーザー指定のテーマ・ニュアンス方針】\n${String(customPrompt).trim()}\n`
+      ? `\n【会話の背景・テーマ補足情報】\n${String(customPrompt).trim()}\n`
       : '';
 
+    const isMinutesMode = summaryMode === 'minutes';
+    let roleIntro = '';
+    let structureSection = '';
+
+    if (isMinutesMode) {
+      const effectiveMinutesPrompt = String(minutesPrompt || '').trim() || DEFAULT_MINUTES_TEMPLATES[0].prompt;
+      roleIntro =
+        'あなたは多言語会話・打ち合わせ・国際コミュニケーションに精通した優秀な議事録作成・要約アシスタントです。\n' +
+        `${domainHint}\n` +
+        `以下の会話ログ（対象範囲: ${rangeLabel}）を読み、打ち合わせ後の振り返り・共有にそのまま使える正確な日本語の議事録サマリーを作成してください。\n`;
+      structureSection =
+        `\n【議事録サマリーの出力構成・重点指示】\n${effectiveMinutesPrompt}\n`;
+    } else {
+      roleIntro =
+        'あなたは進行中の会話・打ち合わせをリアルタイムで支援する優秀な会話チェック・要約アシスタントです。\n' +
+        `${domainHint}\n` +
+        `以下の会話ログ（対象範囲: ${rangeLabel}）を読み、参加者が「聞き漏らしたことがないか」「誤解や認識のズレが生じていないか」を素早く確認できる日本語サマリーを作成してください。\n`;
+      structureSection =
+        '\n【進行中チェックの出力構成】\n' +
+        '必ず以下のMarkdown見出し構成で簡潔・明瞭に出力してください（該当事項が全く無い見出しは省略可）：\n' +
+        '### いまの話の要点\n' +
+        '（直近の会話で何が話され、どのような方向性・結論になっているかを2〜4文で素早く把握できるようにまとめる）\n\n' +
+        '### 聞き漏らし注意ポイント（発言・条件・数値）\n' +
+        '- 会話中に出た重要な発言、固有名詞、数値・金額・数量・日時・期限、前提条件などを落とさず箇条書きで整理する\n\n' +
+        '### 誤解・認識ズレ確認事項\n' +
+        '- 「〜しない／不要／対象外／未定」といった否定・除外の合意、主語や役割分担の取り違えが起きやすい点、まだ曖昧で相手に確認すべき点があれば箇条書きで示す\n';
+    }
+
+    const commonQualityRules =
+      '\n【共通品質ルール（厳守）】\n' +
+      '1. 事実厳守：会話ログに含まれていない事実・数値・結論を推測や創作で補わないこと。\n' +
+      '2. 音声認識（ASR）誤変換の文脈復元とノイズ選別：音声認識特有の同音異義語・音韻類似の誤変換や、多言語発話・英語に混じるヒンディー語/ウルドゥー語等のコードスイッチング・言い直しは、削除して曖昧な一般論に逃げるのではなく、前後の会話テーマ・文脈から本来の自然な語句・用語へ復元して記述すること。一方、前後の文脈からも主語や意味が特定できない支離滅裂な認識ノイズ断片は無理に拾わず、文脈が明確な発言を優先すること。\n' +
+      '3. 否定表現・役割分担の極性チェック：「〜しない・不要・対象外・見送り・削除する」「AではなくBが対応する」といった否定表現・除外条件・主語/役割分担の極性を出力前に必ず確認し、肯定と否定を逆転させたり、隣接する別話題と混同して誤った記載にしたりしないこと。\n' +
+      '4. 出力形式：前置き（「以下がサマリーです」等）や締めの挨拶、最上位メタ見出し（「## 会話サマリー [...]」等）は書かず、指定構成の最初の見出し（例：「### ...」）から直接出力すること。\n\n';
+
     const prompt =
-      'あなたは多言語会議・現地監査・国際コミュニケーションに精通した優秀な議事録作成・要約アシスタントです。\n' +
-      `${domainHint}\n` +
-      `以下の多言語会話ログ（対象範囲: ${rangeLabel}）を読み、日本語で簡潔かつ実務にすぐ使える構造化サマリーを作成してください。\n` +
+      roleIntro +
       customThemeHint +
-      '\n【出力ルール】\n' +
-      '1. 必ず以下のMarkdown見出し構成で日本語出力すること（該当内容が全く無い見出しは省略可）：\n' +
-      '### 要点サマリー\n' +
-      '（この時間帯の議論の結論・全体の流れを2〜4文で簡潔にまとめる）\n\n' +
-      '### 主なトピック・発言内容\n' +
-      '- 重要な発言・説明・質疑応答を話者や論点ごとに箇条書きで整理（具体名・数値・条件があれば落とさない）\n\n' +
-      '### 確認事項・合意・今後のアクション / 課題\n' +
-      '- 決定事項、宿題、懸念点、未解決の課題があれば箇条書きで整理\n\n' +
-      '2. ログに含まれていない事実・数値・結論を推測や創作で補わないこと。\n' +
-      '3. 多言語発話や英語に混じるヒンディー語・ウルドゥー語等のコードスイッチング、および音声認識の軽微な誤字・言い直しは前後文脈から自然に補正して日本語でまとめること。\n' +
-      '4. 前置き（「以下がサマリーです」等）や締めの挨拶は書かず、最初の「### 要点サマリー」から直接出力すること。\n\n' +
+      structureSection +
+      commonQualityRules +
       `【会話ログ（時系列順）】\n${transcriptText}`;
 
     const res = await this.textClient.generateText({
       apiKey,
       prompt,
-      temperature: 0.2,
-      maxOutputTokens: 2048,
-      timeoutMs: 30000,
+      models: DEFAULT_SETTINGS.GEMINI_SUMMARY_MODELS,
+      cacheKey: 'summary',
+      thinkingLevel: DEFAULT_SETTINGS.SUMMARY_THINKING_LEVEL,
+      maxOutputTokens: 65536,
+      timeoutMs: 90000,
       logTag: 'Summary'
     });
 
-    this.log('success', `Gemini (${res.model}) サマリー生成完了 (${rangeLabel} / ${lines.length}件)`);
-    return { summary: res.text, model: res.model };
+    let cleanedSummary = res.text.trim();
+    const firstHeadingMatch = cleanedSummary.match(/^#{1,6}\s+/m);
+    if (firstHeadingMatch && firstHeadingMatch.index > 0) {
+      const leading = cleanedSummary.slice(0, firstHeadingMatch.index).trim();
+      if (!/^[-*•・\d]/.test(leading) && leading.length < 160) {
+        cleanedSummary = cleanedSummary.slice(firstHeadingMatch.index).trim();
+      }
+    }
+    cleanedSummary = cleanedSummary.replace(/^#{1,2}\s*会話サマリー[^\r\n]*\r?\n+/i, '').trim();
+
+    const modeTag = isMinutesMode ? '議事録用' : '進行中チェック';
+    const thinkInfo = res.thinkingLevel
+      ? ` [thinking:${res.thinkingLevel}${res.thoughtsTokenCount ? ` / ${res.thoughtsTokenCount}tok` : ''}]`
+      : '';
+    this.log('success', `Gemini (${res.model}${thinkInfo}) サマリー生成完了 [${modeTag}] (${rangeLabel} / ${lines.length}件)`);
+    return {
+      summary: cleanedSummary,
+      model: res.model,
+      thinkingLevel: res.thinkingLevel || null
+    };
   }
 }
 
@@ -4318,7 +4546,12 @@ class App {
     this.isSavingDocs = false;
     this.summaryBodyCollapsed = false;
 
-    // v3.3.0 UX state
+    // v3.3.0+ UX & v3.4.0 Summary state
+    this.summaryMode = 'live-check';
+    this.minutesTemplates = [];
+    this.activeMinutesTemplateId = '';
+    this.minutesCustomPrompt = '';
+    this.minutesPromptOpen = false;
     this.unreadNewCount = 0;
     this.timelineQuery = '';
     this.timelineFilter = 'all';
@@ -4329,6 +4562,7 @@ class App {
     this._lastDraftJson = '';
     this._pendingPrevDraft = null;
     this._highlightTimer = null;
+    this._sessionEpoch = 0;
 
     this._initElements();
     this._initCustomLangCheckboxes();
@@ -4351,7 +4585,7 @@ class App {
     this._summaryPreviewTimer = setInterval(() => this._updateSummaryTargetPreview(), 15000);
     this.log(
       'info',
-      `初期化完了 (v${APP_VERSION})。日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応・未保存復元・ミニLIVEバー・ローカル保存・検索フィルタが有効です。`
+      `初期化完了 (v${APP_VERSION})。Gemini 4 サマリー (進行中チェック/議事録用・medium固定)・日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語対応が有効です。`
     );
   }
 
@@ -4476,9 +4710,22 @@ class App {
     this.elPromptPresetBtns = document.querySelectorAll('.prompt-preset-btn');
 
     // Summary UI
+    this.elSummaryModeToggle = byId('summary-mode-toggle');
+    this.elBtnSummaryModeCheck = byId('btn-summary-mode-check');
+    this.elBtnSummaryModeMinutes = byId('btn-summary-mode-minutes');
     this.elSelectSummaryRange = byId('select-summary-range');
     this.elSummaryCustomWrapper = byId('summary-custom-wrapper');
     this.elInputSummaryCustomMin = byId('input-summary-custom-min');
+    this.elMinutesControlsInline = byId('minutes-controls-inline');
+    this.elSelectMinutesTemplate = byId('select-minutes-template');
+    this.elBtnToggleMinutesPrompt = byId('btn-toggle-minutes-prompt');
+    this.elMinutesPromptPanel = byId('minutes-prompt-panel');
+    this.elBtnResetMinutesTemplates = byId('btn-reset-minutes-templates');
+    this.elInputMinutesTemplateName = byId('input-minutes-template-name');
+    this.elBtnSaveMinutesTemplate = byId('btn-save-minutes-template');
+    this.elBtnNewMinutesTemplate = byId('btn-new-minutes-template');
+    this.elBtnDeleteMinutesTemplate = byId('btn-delete-minutes-template');
+    this.elInputMinutesPrompt = byId('input-minutes-prompt');
     this.elSummaryTargetPreview = byId('summary-target-preview');
     this.elBtnGenerateSummary = byId('btn-generate-summary');
     this.elSummaryResultCard = byId('summary-result-card');
@@ -4596,6 +4843,41 @@ class App {
     this.promptPanelOpen = ConfigManager.get(K.TRANSLATION_PROMPT_OPEN, 'false') === 'true';
     this.advancedPanelOpen = ConfigManager.get(K.ADVANCED_OPEN, 'false') === 'true';
 
+    this.summaryMode = ConfigManager.get(K.SUMMARY_MODE, 'live-check') === 'minutes' ? 'minutes' : 'live-check';
+    this.minutesPromptOpen = ConfigManager.get(K.MINUTES_PROMPT_OPEN, 'false') === 'true';
+
+    let loadedTemplates = null;
+    try {
+      const rawTemplates = ConfigManager.get(K.MINUTES_TEMPLATES, '');
+      if (rawTemplates) {
+        const parsed = JSON.parse(rawTemplates);
+        if (Array.isArray(parsed)) {
+          loadedTemplates = parsed
+            .filter((t) => t && typeof t.name === 'string' && typeof t.prompt === 'string' && t.prompt.trim())
+            .map((t, i) => ({
+              id: String(t.id || `tpl_${i}`),
+              name: t.name.trim() || `テンプレート ${i + 1}`,
+              prompt: t.prompt,
+              builtIn: Boolean(t.builtIn)
+            }));
+        }
+      }
+    } catch (e) {
+      console.warn('[MinutesTemplates] Failed to parse saved templates:', e);
+    }
+    this.minutesTemplates = (loadedTemplates && loadedTemplates.length > 0)
+      ? loadedTemplates
+      : DEFAULT_MINUTES_TEMPLATES.map((d) => ({ ...d }));
+
+    const savedTplId = ConfigManager.get(K.ACTIVE_MINUTES_TEMPLATE_ID, '');
+    const activeTpl = this.minutesTemplates.find((t) => t.id === savedTplId) || this.minutesTemplates[0];
+    this.activeMinutesTemplateId = activeTpl ? activeTpl.id : '';
+
+    const rawMinutesPrompt = ConfigManager.get(K.MINUTES_CUSTOM_PROMPT, '');
+    this.minutesCustomPrompt = rawMinutesPrompt.trim()
+      ? rawMinutesPrompt
+      : (activeTpl ? activeTpl.prompt : DEFAULT_MINUTES_TEMPLATES[0].prompt);
+
     this.summaryRange = ConfigManager.get(K.SUMMARY_RANGE, '5');
     const savedCustomMin = parseInt(ConfigManager.get(K.SUMMARY_CUSTOM_MIN, '5'), 10);
     this.summaryCustomMin = (!isNaN(savedCustomMin) && savedCustomMin >= 1 && savedCustomMin <= 360) ? savedCustomMin : 5;
@@ -4700,8 +4982,16 @@ class App {
     }
     this._syncPromptPanelUI();
 
+    this._renderMinutesTemplateSelect();
+    if (this.elInputMinutesTemplateName && activeTpl) {
+      this.elInputMinutesTemplateName.value = activeTpl.name;
+    }
+    if (this.elInputMinutesPrompt) {
+      this.elInputMinutesPrompt.value = this.minutesCustomPrompt;
+    }
     if (this.elSelectSummaryRange) this.elSelectSummaryRange.value = this.summaryRange;
     if (this.elInputSummaryCustomMin) this.elInputSummaryCustomMin.value = String(this.summaryCustomMin);
+    this._syncSummaryModeUI();
     this._syncSummaryRangeUI();
   }
 
@@ -4869,6 +5159,7 @@ class App {
       if (this.records.length === 0) return;
       if (!confirm('タイムラインの翻訳履歴を全消去しますか？')) return;
 
+      this._sessionEpoch += 1;
       this.records = [];
       this.summaryHistory = [];
       this.currentSummaryId = null;
@@ -4976,6 +5267,42 @@ class App {
 
   _bindSummaryEvents() {
     const K = ConfigManager.STORAGE_KEYS;
+
+    const switchSummaryMode = (nextMode) => {
+      const normalized = nextMode === 'minutes' ? 'minutes' : 'live-check';
+      if (this.summaryMode === normalized) return;
+      this.summaryMode = normalized;
+      ConfigManager.set(K.SUMMARY_MODE, normalized);
+      this._syncSummaryModeUI();
+      this.log('info', `サマリーモード切替: ${this._getSummaryModeLabel(normalized)}`);
+    };
+
+    this.elBtnSummaryModeCheck?.addEventListener('click', () => switchSummaryMode('live-check'));
+    this.elBtnSummaryModeMinutes?.addEventListener('click', () => switchSummaryMode('minutes'));
+
+    this.elSelectMinutesTemplate?.addEventListener('change', (e) => {
+      const tpl = this._selectMinutesTemplate(e.target.value, { syncPrompt: true });
+      if (tpl) {
+        this.log('info', `議事録プロンプト選択: ${tpl.name}`);
+        this.showToast(`議事録プロンプト「${tpl.name}」を読み込みました（手入力で調整可能です）。`, 'info');
+      }
+    });
+
+    this.elBtnToggleMinutesPrompt?.addEventListener('click', () => {
+      this.minutesPromptOpen = !this.minutesPromptOpen;
+      ConfigManager.set(K.MINUTES_PROMPT_OPEN, String(this.minutesPromptOpen));
+      this._syncSummaryModeUI();
+    });
+
+    this.elInputMinutesPrompt?.addEventListener('input', (e) => {
+      this.minutesCustomPrompt = e.target.value;
+      ConfigManager.set(K.MINUTES_CUSTOM_PROMPT, this.minutesCustomPrompt);
+    });
+
+    this.elBtnSaveMinutesTemplate?.addEventListener('click', () => this._saveCurrentMinutesTemplate());
+    this.elBtnNewMinutesTemplate?.addEventListener('click', () => this._createNewMinutesTemplate());
+    this.elBtnDeleteMinutesTemplate?.addEventListener('click', () => this._deleteCurrentMinutesTemplate());
+    this.elBtnResetMinutesTemplates?.addEventListener('click', () => this._resetDefaultMinutesTemplates());
 
     this.elSelectSummaryRange?.addEventListener('change', (e) => {
       this.summaryRange = e.target.value;
@@ -5601,11 +5928,11 @@ class App {
     try {
       const rawCurrent = ConfigManager.get(K.SESSION_DRAFT, '');
       if (rawCurrent) {
+        ConfigManager.remove(K.SESSION_DRAFT);
         const parsed = JSON.parse(rawCurrent);
         if (parsed && Array.isArray(parsed.records) && parsed.records.length > 0) {
           ConfigManager.set(K.SESSION_DRAFT_PREV, rawCurrent);
         }
-        ConfigManager.remove(K.SESSION_DRAFT);
       }
 
       const rawPrev = ConfigManager.get(K.SESSION_DRAFT_PREV, '');
@@ -5749,7 +6076,7 @@ class App {
     const pad = (n) => String(n).padStart(2, '0');
     const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
     const customTitle = this.elInputDocTitle?.value.trim() || '';
-    const latestSummary = this.summaryHistory[0] || null;
+    const latestSummary = this._getActiveSummary();
 
     let content = '';
     let ext = 'md';
@@ -5823,14 +6150,196 @@ class App {
     this._updateSummaryTargetPreview();
   }
 
+  // ---- Summary Mode & Minutes Prompt Templates Management ----
+  _getActiveSummary() {
+    return this.summaryHistory.find((s) => s.id === this.currentSummaryId) || this.summaryHistory[0] || null;
+  }
+
+  _getSummaryModeLabel(mode = this.summaryMode) {
+    return mode === 'minutes' ? '議事録用' : '進行中チェック';
+  }
+
+  _syncSummaryModeUI() {
+    const isMinutes = this.summaryMode === 'minutes';
+    if (this.elBtnSummaryModeCheck) {
+      this.elBtnSummaryModeCheck.classList.toggle('is-active', !isMinutes);
+      this.elBtnSummaryModeCheck.setAttribute('aria-pressed', String(!isMinutes));
+    }
+    if (this.elBtnSummaryModeMinutes) {
+      this.elBtnSummaryModeMinutes.classList.toggle('is-active', isMinutes);
+      this.elBtnSummaryModeMinutes.setAttribute('aria-pressed', String(isMinutes));
+    }
+    if (this.elMinutesControlsInline) {
+      this.elMinutesControlsInline.style.display = isMinutes ? 'inline-flex' : 'none';
+    }
+    if (this.elMinutesPromptPanel) {
+      this.elMinutesPromptPanel.style.display = (isMinutes && this.minutesPromptOpen) ? 'flex' : 'none';
+    }
+    if (this.elBtnToggleMinutesPrompt) {
+      this.elBtnToggleMinutesPrompt.setAttribute('aria-expanded', String(Boolean(isMinutes && this.minutesPromptOpen)));
+      this.elBtnToggleMinutesPrompt.textContent = this.minutesPromptOpen
+        ? '▲ プロンプト調整を閉じる'
+        : '✏️ プロンプト調整・登録';
+    }
+  }
+
+  _renderMinutesTemplateSelect() {
+    if (!this.elSelectMinutesTemplate) return;
+    this.elSelectMinutesTemplate.innerHTML = '';
+    for (const tpl of this.minutesTemplates) {
+      const opt = document.createElement('option');
+      opt.value = tpl.id;
+      opt.textContent = `${tpl.builtIn ? '📌 ' : '⭐ '}${tpl.name}`;
+      if (tpl.id === this.activeMinutesTemplateId) opt.selected = true;
+      this.elSelectMinutesTemplate.appendChild(opt);
+    }
+    if (!this.activeMinutesTemplateId) {
+      this.elSelectMinutesTemplate.selectedIndex = -1;
+    }
+    if (this.elBtnDeleteMinutesTemplate) {
+      this.elBtnDeleteMinutesTemplate.disabled = this.minutesTemplates.length <= 1 || !this.activeMinutesTemplateId;
+    }
+  }
+
+  _persistMinutesTemplates() {
+    ConfigManager.set(ConfigManager.STORAGE_KEYS.MINUTES_TEMPLATES, JSON.stringify(this.minutesTemplates));
+  }
+
+  _selectMinutesTemplate(templateId, { syncPrompt = true } = {}) {
+    const K = ConfigManager.STORAGE_KEYS;
+    const tpl = this.minutesTemplates.find((t) => t.id === templateId) || this.minutesTemplates[0];
+    if (!tpl) return null;
+
+    this.activeMinutesTemplateId = tpl.id;
+    ConfigManager.set(K.ACTIVE_MINUTES_TEMPLATE_ID, tpl.id);
+    if (this.elInputMinutesTemplateName) {
+      this.elInputMinutesTemplateName.value = tpl.name;
+    }
+    if (syncPrompt) {
+      this.minutesCustomPrompt = tpl.prompt;
+      ConfigManager.set(K.MINUTES_CUSTOM_PROMPT, tpl.prompt);
+      if (this.elInputMinutesPrompt) {
+        this.elInputMinutesPrompt.value = tpl.prompt;
+      }
+    }
+    this._renderMinutesTemplateSelect();
+    return tpl;
+  }
+
+  _saveCurrentMinutesTemplate() {
+    const K = ConfigManager.STORAGE_KEYS;
+    const rawName = (this.elInputMinutesTemplateName ? this.elInputMinutesTemplateName.value : '').trim();
+    const rawPrompt = (this.elInputMinutesPrompt ? this.elInputMinutesPrompt.value : this.minutesCustomPrompt || '').trim();
+
+    if (!rawPrompt) {
+      this.showToast('保存するプロンプト内容を入力してください。', 'warning');
+      this.elInputMinutesPrompt?.focus();
+      return false;
+    }
+
+    const name = rawName || 'カスタム議事録プロンプト';
+    const existing = this.minutesTemplates.find((t) => t.name.trim() === name);
+
+    if (existing) {
+      existing.prompt = rawPrompt;
+      this.activeMinutesTemplateId = existing.id;
+      this.minutesCustomPrompt = rawPrompt;
+      this._persistMinutesTemplates();
+      ConfigManager.set(K.ACTIVE_MINUTES_TEMPLATE_ID, existing.id);
+      ConfigManager.set(K.MINUTES_CUSTOM_PROMPT, rawPrompt);
+      if (this.elInputMinutesTemplateName) this.elInputMinutesTemplateName.value = existing.name;
+      this._renderMinutesTemplateSelect();
+      this.log('info', `議事録プロンプトを上書き保存: ${existing.name}`);
+      this.showToast(`事前登録プロンプト「${existing.name}」を上書き保存しました。`, 'success');
+    } else {
+      const newTpl = {
+        id: `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        prompt: rawPrompt,
+        builtIn: false
+      };
+      this.minutesTemplates.push(newTpl);
+      this.activeMinutesTemplateId = newTpl.id;
+      this.minutesCustomPrompt = rawPrompt;
+      this._persistMinutesTemplates();
+      ConfigManager.set(K.ACTIVE_MINUTES_TEMPLATE_ID, newTpl.id);
+      ConfigManager.set(K.MINUTES_CUSTOM_PROMPT, rawPrompt);
+      if (this.elInputMinutesTemplateName) this.elInputMinutesTemplateName.value = newTpl.name;
+      this._renderMinutesTemplateSelect();
+      this.log('info', `議事録プロンプトを新規事前登録: ${newTpl.name}`);
+      this.showToast(`事前登録プロンプト「${newTpl.name}」を新規登録しました！`, 'success');
+    }
+    return true;
+  }
+
+  _createNewMinutesTemplate() {
+    const K = ConfigManager.STORAGE_KEYS;
+    this.activeMinutesTemplateId = '';
+    this.minutesCustomPrompt = '';
+    ConfigManager.set(K.MINUTES_CUSTOM_PROMPT, '');
+    this._renderMinutesTemplateSelect();
+    if (this.elInputMinutesTemplateName) {
+      this.elInputMinutesTemplateName.value = '';
+      this.elInputMinutesTemplateName.focus();
+    }
+    if (this.elInputMinutesPrompt) {
+      this.elInputMinutesPrompt.value = '';
+    }
+    this.showToast('新しいプロンプト名と内容を入力し、「💾 事前登録として保存」を押してください。', 'info');
+  }
+
+  _deleteCurrentMinutesTemplate() {
+    if (this.minutesTemplates.length <= 1) {
+      this.showToast('最低1件のテンプレートは残す必要があります。', 'warning');
+      return false;
+    }
+    if (!this.activeMinutesTemplateId) {
+      this.showToast('削除するテンプレートをプルダウンから選択してください。', 'warning');
+      return false;
+    }
+
+    const idx = this.minutesTemplates.findIndex((t) => t.id === this.activeMinutesTemplateId);
+    if (idx === -1) {
+      this.showToast('削除対象のテンプレートが見つかりません。', 'warning');
+      return false;
+    }
+
+    const removed = this.minutesTemplates.splice(idx, 1)[0];
+    this._persistMinutesTemplates();
+    const nextTpl = this.minutesTemplates[Math.min(idx, this.minutesTemplates.length - 1)];
+    if (nextTpl) {
+      this._selectMinutesTemplate(nextTpl.id, { syncPrompt: true });
+    }
+    this.log('info', `議事録プロンプトを削除: ${removed?.name || ''}`);
+    this.showToast(`テンプレート「${removed?.name || ''}」を削除しました。`, 'info');
+    return true;
+  }
+
+  _resetDefaultMinutesTemplates() {
+    const builtInIds = new Set(DEFAULT_MINUTES_TEMPLATES.map((d) => d.id));
+    const customOnly = this.minutesTemplates.filter((t) => !t.builtIn && !builtInIds.has(t.id));
+    this.minutesTemplates = [
+      ...DEFAULT_MINUTES_TEMPLATES.map((d) => ({ ...d })),
+      ...customOnly
+    ];
+    this._persistMinutesTemplates();
+    const targetId = this.minutesTemplates.some((t) => t.id === this.activeMinutesTemplateId)
+      ? this.activeMinutesTemplateId
+      : this.minutesTemplates[0].id;
+    this._selectMinutesTemplate(targetId, { syncPrompt: true });
+    this.log('info', '推奨議事録プロンプト5種を初期値に復元しました。');
+    this.showToast('推奨テンプレート5種を初期状態に戻しました。', 'success');
+  }
+
   // ---- Summary Management ----
-  _getSummaryLookbackSpec() {
-    if (this.summaryRange === 'all') {
+  _getSummaryLookbackSpec(overrideRange = null) {
+    const targetRange = overrideRange || this.summaryRange;
+    if (targetRange === 'all') {
       return { mode: 'all', minutes: null, label: 'セッション全体' };
     }
-    const rawVal = this.summaryRange === 'custom'
+    const rawVal = targetRange === 'custom'
       ? (this.elInputSummaryCustomMin ? this.elInputSummaryCustomMin.value : this.summaryCustomMin)
-      : this.summaryRange;
+      : targetRange;
     const parsed = parseInt(rawVal, 10);
     const minutes = (!isNaN(parsed) && parsed >= 1) ? Math.min(360, parsed) : 5;
     return { mode: 'minutes', minutes, label: `直近${minutes}分` };
@@ -5851,8 +6360,8 @@ class App {
     return Date.now();
   }
 
-  _collectRecordsForSummary(nowMs = Date.now()) {
-    const spec = this._getSummaryLookbackSpec();
+  _collectRecordsForSummary(nowMs = Date.now(), overrideRange = null) {
+    const spec = this._getSummaryLookbackSpec(overrideRange);
     const matchedRecords = spec.mode === 'all'
       ? [...this.records]
       : this.records.filter((r) => this._getRecordTimestampMs(r) >= nowMs - spec.minutes * 60 * 1000);
@@ -5879,46 +6388,68 @@ class App {
     }
   }
 
-  async generateSummary() {
-    if (this.isSummarizing) return;
+  async generateSummary(options = {}) {
+    if (this.isSummarizing) return null;
+
+    const { overrideMode = null, overrideRange = null, silentToast = false } = options;
 
     if (!this.apiKey) {
-      this.showToast('サマリー生成には Gemini API キーが必要です。', 'warning');
-      this._openSettingsModal();
-      return;
+      if (!silentToast) {
+        this.showToast('サマリー生成には Gemini API キーが必要です。', 'warning');
+        this._openSettingsModal();
+      }
+      return null;
     }
 
     const nowMs = Date.now();
-    const { spec, records, pendingText, totalCount } = this._collectRecordsForSummary(nowMs);
+    const { spec, records, pendingText, totalCount } = this._collectRecordsForSummary(nowMs, overrideRange);
 
     if (totalCount === 0) {
-      const hint = this.records.length > 0
-        ? `（セッション全体には ${this.records.length} 件あります。対象範囲を広げてお試しください）`
-        : '';
-      this.showToast(`${spec.label}以内にサマリー対象の発話がありません${hint}`, 'warning');
-      return;
+      if (!silentToast) {
+        const hint = this.records.length > 0
+          ? `（セッション全体には ${this.records.length} 件あります。対象範囲を広げてお試しください）`
+          : '';
+        this.showToast(`${spec.label}以内にサマリー対象の発話がありません${hint}`, 'warning');
+      }
+      return null;
     }
 
+    const effectiveMode = overrideMode || this.summaryMode || 'live-check';
+    const modeLabel = this._getSummaryModeLabel(effectiveMode);
+    const modeIcon = effectiveMode === 'minutes' ? '📋' : '⚡';
+
+    const startEpoch = this._sessionEpoch;
     this.isSummarizing = true;
     this.summaryBodyCollapsed = false;
     if (this.elBtnGenerateSummary) {
       this.elBtnGenerateSummary.disabled = true;
-      this.elBtnGenerateSummary.textContent = '⏳ サマリー生成中...';
+      this.elBtnGenerateSummary.textContent = '⏳ 生成中...';
     }
     if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'flex';
     if (this.elSummaryResultBody) this.elSummaryResultBody.style.display = 'block';
     if (this.elBtnToggleSummaryBody) this.elBtnToggleSummaryBody.textContent = '▲ 折りたたむ';
     if (this.elSummaryMetaBadge) {
-      this.elSummaryMetaBadge.textContent = `${spec.label} / ${records.length}件${pendingText ? '+進行中' : ''} を集計中...`;
+      this.elSummaryMetaBadge.textContent = `${modeIcon}${modeLabel} · ${spec.label} (${records.length}件${pendingText ? '+進行中' : ''}) を推論中...`;
     }
     if (this.elSummaryContent) {
       this.elSummaryContent.className = 'summary-content is-loading';
-      this.elSummaryContent.textContent = `⏳ ${spec.label}の会話内容を分析し、日本語サマリーを生成しています...`;
+      this.elSummaryContent.textContent = `⏳ [${modeLabel}] ${spec.label}の会話を Gemini 4 (推論レベル: medium) で分析しています...`;
     }
+
+    let elapsedSec = 0;
+    const progressTimer = setInterval(() => {
+      elapsedSec += 1;
+      if (this.elBtnGenerateSummary) {
+        this.elBtnGenerateSummary.textContent = `⏳ 生成中 (${elapsedSec}秒)...`;
+      }
+      if (this.elSummaryContent && this.isSummarizing) {
+        this.elSummaryContent.textContent = `⏳ [${modeLabel}] ${spec.label}の会話を Gemini 4 (推論レベル: medium) で分析しています... (${elapsedSec}秒経過)`;
+      }
+    }, 1000);
 
     const endTimeStr = new Date(nowMs).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const startTimeStr = records.length > 0 ? (records[0].time || endTimeStr) : endTimeStr;
-    this.log('info', `会話サマリー生成開始 (範囲: ${spec.label}, 対象: ${records.length}件${pendingText ? '+認識中1件' : ''})`);
+    this.log('info', `会話サマリー生成開始 [${modeLabel}] (範囲: ${spec.label}, 対象: ${records.length}件${pendingText ? '+認識中1件' : ''})`);
 
     try {
       const result = await this.summaryService.generateSummary({
@@ -5927,36 +6458,55 @@ class App {
         rangeLabel: spec.mode === 'all' ? `セッション全体 (${startTimeStr}〜${endTimeStr})` : `${spec.label} (${startTimeStr}〜${endTimeStr})`,
         category: this.category,
         customPrompt: this.translationCustomPrompt,
+        summaryMode: effectiveMode,
+        minutesPrompt: this.minutesCustomPrompt,
         apiKey: this.apiKey
       });
 
+      if (startEpoch !== this._sessionEpoch) {
+        this.log('info', '履歴クリア後に完了したサマリー応答を破棄しました。');
+        return null;
+      }
+
       const entry = {
-        id: `sum_${nowMs}`,
+        id: `sum_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
         generatedAt: endTimeStr,
+        mode: effectiveMode,
+        modeLabel,
         rangeLabel: spec.label,
         timeSpan: `${startTimeStr}〜${endTimeStr}`,
         count: records.length,
         hasPending: Boolean(pendingText),
         markdown: result.summary,
-        model: result.model
+        model: result.model || '',
+        thinkingLevel: result.thinkingLevel || ''
       };
 
       this.summaryHistory.unshift(entry);
       this.currentSummaryId = entry.id;
       this.hasUnsavedChanges = true;
       this._saveDraftIfNeeded();
+      if (this.elSummaryResultCard) this.elSummaryResultCard.style.display = 'flex';
       this._refreshSummaryHistorySelect();
       this._renderCurrentSummary();
-      this.showToast(`${spec.label}のサマリーを出力しました！`, 'success');
+      if (!silentToast) {
+        this.showToast(`${spec.label}の${modeLabel}サマリーを出力しました！`, 'success');
+      }
+      return entry;
     } catch (err) {
+      if (startEpoch !== this._sessionEpoch) return null;
       console.error('Summary generation failed:', err);
       this.log('error', `サマリー生成失敗: ${err.message}`);
       if (this.elSummaryContent) {
         this.elSummaryContent.className = 'summary-content';
         this.elSummaryContent.textContent = `⚠️ サマリー生成に失敗しました: ${err.message}`;
       }
-      this.showToast('サマリー生成エラー: ' + err.message, 'error');
+      if (!silentToast) {
+        this.showToast('サマリー生成エラー: ' + err.message, 'error');
+      }
+      return null;
     } finally {
+      clearInterval(progressTimer);
       this.isSummarizing = false;
       if (this.elBtnGenerateSummary) {
         this.elBtnGenerateSummary.disabled = false;
@@ -5975,7 +6525,8 @@ class App {
     for (const s of this.summaryHistory) {
       const opt = document.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${s.generatedAt} (${s.rangeLabel} / ${s.count}件)`;
+      const mLabel = s.modeLabel ? `[${s.modeLabel}] ` : '';
+      opt.textContent = `${s.generatedAt} ${mLabel}(${s.rangeLabel} / ${s.count}件)`;
       if (s.id === this.currentSummaryId) opt.selected = true;
       this.elSelectSummaryHistory.appendChild(opt);
     }
@@ -5983,10 +6534,15 @@ class App {
   }
 
   _renderCurrentSummary() {
-    const entry = this.summaryHistory.find((s) => s.id === this.currentSummaryId) || this.summaryHistory[0];
+    const entry = this._getActiveSummary();
     if (!entry) return;
     if (this.elSummaryMetaBadge) {
-      this.elSummaryMetaBadge.textContent = `${entry.rangeLabel} (${entry.timeSpan} / ${entry.count}件${entry.hasPending ? '+進行中' : ''})`;
+      const modeIcon = entry.mode === 'minutes' ? '📋' : '⚡';
+      const modePart = entry.modeLabel ? `${modeIcon}${entry.modeLabel} · ` : '';
+      const modelPart = entry.model
+        ? ` · ${entry.model}${entry.thinkingLevel ? ` [${entry.thinkingLevel}]` : ''}`
+        : '';
+      this.elSummaryMetaBadge.textContent = `${modePart}${entry.rangeLabel} (${entry.timeSpan} / ${entry.count}件${entry.hasPending ? '+進行中' : ''})${modelPart}`;
     }
     if (this.elSummaryContent) {
       this.elSummaryContent.className = 'summary-content';
@@ -5997,31 +6553,41 @@ class App {
   _renderSummaryMarkdown(md) {
     const lines = String(md || '').split(/\r?\n/);
     const htmlParts = [];
-    let inList = false;
+    let listTag = null;
 
     const formatInline = (text) => this._escapeHTML(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     const closeListIfOpen = () => {
-      if (inList) {
-        htmlParts.push('</ul>');
-        inList = false;
+      if (listTag) {
+        htmlParts.push(`</${listTag}>`);
+        listTag = null;
+      }
+    };
+    const ensureList = (nextTag) => {
+      if (listTag !== nextTag) {
+        closeListIfOpen();
+        htmlParts.push(`<${nextTag}>`);
+        listTag = nextTag;
       }
     };
 
     for (const rawLine of lines) {
       const line = rawLine.trim();
-      if (!line) {
+      if (!line || /^---+\s*$/.test(line)) {
         closeListIfOpen();
         continue;
       }
-      if (/^#{1,4}\s+/.test(line)) {
+      if (/^(?:#{1,6}\s+|#{2,6}\S)/.test(line)) {
         closeListIfOpen();
-        htmlParts.push(`<h4>${formatInline(line.replace(/^#{1,4}\s+/, ''))}</h4>`);
-      } else if (/^([-*•・]|\d+\.)\s+/.test(line)) {
-        if (!inList) {
-          htmlParts.push('<ul>');
-          inList = true;
+        const headingText = line.replace(/^#{1,6}\s*/, '').trim();
+        if (headingText) {
+          htmlParts.push(`<h4>${formatInline(headingText)}</h4>`);
         }
-        htmlParts.push(`<li>${formatInline(line.replace(/^([-*•・]|\d+\.)\s+/, ''))}</li>`);
+      } else if (/^\d+[.)]\s+/.test(line)) {
+        ensureList('ol');
+        htmlParts.push(`<li>${formatInline(line.replace(/^\d+[.)]\s+/, ''))}</li>`);
+      } else if (/^[-*•・]\s+/.test(line)) {
+        ensureList('ul');
+        htmlParts.push(`<li>${formatInline(line.replace(/^[-*•・]\s+/, ''))}</li>`);
       } else {
         closeListIfOpen();
         htmlParts.push(`<p>${formatInline(line)}</p>`);
@@ -6032,12 +6598,13 @@ class App {
   }
 
   copyCurrentSummary() {
-    const entry = this.summaryHistory.find((s) => s.id === this.currentSummaryId) || this.summaryHistory[0];
+    const entry = this._getActiveSummary();
     if (!entry) {
       this.showToast('コピーするサマリーがありません。', 'warning');
       return;
     }
-    const header = `## 会話サマリー [${entry.rangeLabel} / ${entry.timeSpan} / ${entry.count}件 / 分野: ${this.category}]\n\n`;
+    const modePrefix = entry.modeLabel ? `${entry.modeLabel} / ` : '';
+    const header = `## 会話サマリー [${modePrefix}${entry.rangeLabel} / ${entry.timeSpan} / ${entry.count}件 / 分野: ${this.category}]\n\n`;
     this.copyToClipboard(header + entry.markdown)
       .then(() => this.showToast('サマリーをMarkdown形式でコピーしました。', 'info'))
       .catch((err) => this.showToast('コピーに失敗しました: ' + err.message, 'error'));
@@ -6778,6 +7345,43 @@ class App {
         return;
       }
 
+      const startEpoch = this._sessionEpoch;
+
+      // 手動保存時に「最新サマリーも冒頭に添付」がONかつ未出力の場合は待機または自動生成してから添付する
+      let activeSummary = this._getActiveSummary();
+      if (!isAuto && this.includeSummaryInDoc) {
+        if (this.isSummarizing) {
+          this.elBtnSaveDocs.disabled = true;
+          this.elSaveDocsText.textContent = 'サマリー完了待機中...';
+          this.log('info', '進行中のサマリー生成の完了を待機しています...');
+          let sumWait = 0;
+          while (this.isSummarizing && this._sessionEpoch === startEpoch && sumWait < 460) {
+            await new Promise((r) => setTimeout(r, 200));
+            sumWait++;
+          }
+          if (startEpoch !== this._sessionEpoch) return;
+          activeSummary = this._getActiveSummary();
+        }
+        if (!activeSummary || !activeSummary.markdown) {
+          if (this.apiKey && !this.isSummarizing) {
+            this.elBtnSaveDocs.disabled = true;
+            this.elSaveDocsText.textContent = '冒頭サマリー生成中...';
+            this.log('info', '「最新サマリーも冒頭に添付」が有効なため、保存前にサマリー（議事録用・セッション全体）を自動生成しています...');
+            await this.generateSummary({
+              overrideMode: 'minutes',
+              overrideRange: 'all',
+              silentToast: true
+            });
+            if (startEpoch !== this._sessionEpoch) return;
+            activeSummary = this._getActiveSummary();
+          } else if (!this.apiKey) {
+            this.log('warn', 'Gemini APIキー未設定のためサマリー自動生成をスキップし、確定翻訳のみ保存します。');
+          }
+        }
+      }
+
+      if (startEpoch !== this._sessionEpoch) return;
+
       const recordsToSave = finalizedItems.map((r) => ({
         timestamp: r.time,
         speaker: r.speaker,
@@ -6787,14 +7391,16 @@ class App {
         engine: r.engine
       }));
 
-      const latestSum = this.summaryHistory[0];
-      const summaryPayload = (this.includeSummaryInDoc && latestSum && latestSum.markdown)
+      const summaryPayload = (this.includeSummaryInDoc && activeSummary && activeSummary.markdown)
         ? {
-            markdown: latestSum.markdown,
-            rangeLabel: latestSum.rangeLabel || '',
-            timeSpan: latestSum.timeSpan || '',
-            count: latestSum.count || 0,
-            generatedAt: latestSum.generatedAt || ''
+            markdown: activeSummary.markdown,
+            mode: activeSummary.mode || 'minutes',
+            modeLabel: activeSummary.modeLabel || '',
+            rangeLabel: activeSummary.rangeLabel || '',
+            timeSpan: activeSummary.timeSpan || '',
+            count: activeSummary.count || 0,
+            generatedAt: activeSummary.generatedAt || '',
+            model: activeSummary.model || ''
           }
         : null;
 
@@ -6808,46 +7414,70 @@ class App {
       this.elSaveDocsText.textContent = isExistingMode ? 'ドキュメント同期中...' : 'ドキュメント保存中...';
       this.log(
         'info',
-        `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件${summaryPayload ? ' + 最新サマリー' : ''}, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
+        `Google ドキュメント保存開始 (確定翻訳: ${recordsToSave.length}件${summaryPayload ? ' + 冒頭サマリー' : ''}, モード: ${isExistingMode && docId ? '同一Doc上書き同期' : '新規作成'})...`
       );
+
+      const buildSavePayload = (targetDocId, targetRecords, targetSummary) => ({
+        token: this.gasToken,
+        documentId: targetDocId,
+        title,
+        folderId,
+        records: targetRecords,
+        summary: targetSummary,
+        direction: this.direction,
+        partnerLang: this.partnerLang,
+        recognitionProfile: this.recognitionProfile,
+        category: this.category,
+        model: this.liveModel,
+        saveMode: 'sync'
+      });
 
       let result;
       try {
-        result = await GasStorageClient.saveTranscript(this.gasUrl, {
-          token: this.gasToken,
-          documentId: docId,
-          title,
-          folderId,
-          records: recordsToSave,
-          summary: summaryPayload,
-          direction: this.direction,
-          partnerLang: this.partnerLang,
-          recognitionProfile: this.recognitionProfile,
-          category: this.category,
-          model: this.liveModel,
-          saveMode: 'sync'
-        });
+        result = await GasStorageClient.saveTranscript(
+          this.gasUrl,
+          buildSavePayload(docId, recordsToSave, summaryPayload)
+        );
       } catch (saveErr) {
-        if (saveErr.code === 'DOC_NOT_FOUND' && docId) {
+        if (saveErr.code === 'DOC_NOT_FOUND' && docId && startEpoch === this._sessionEpoch) {
           this.log('warn', `指定ドキュメント (ID: ${docId}) が開けなかったため、新規Googleドキュメントとして再作成します...`);
-          result = await GasStorageClient.saveTranscript(this.gasUrl, {
-            token: this.gasToken,
-            documentId: '',
-            title,
-            folderId,
-            records: recordsToSave,
-            summary: summaryPayload,
-            direction: this.direction,
-            partnerLang: this.partnerLang,
-            recognitionProfile: this.recognitionProfile,
-            category: this.category,
-            model: this.liveModel,
-            saveMode: 'sync'
-          });
+          result = await GasStorageClient.saveTranscript(
+            this.gasUrl,
+            buildSavePayload('', recordsToSave, summaryPayload)
+          );
         } else {
           throw saveErr;
         }
       }
+
+      if (startEpoch !== this._sessionEpoch) {
+        this.log('info', '履歴クリア前に開始されたGoogleドキュメント保存の結果反映をスキップしました。');
+        return;
+      }
+
+      let summaryAttached = Boolean(summaryPayload && result && result.summarySaved === true);
+
+      // デプロイ済みGASが旧版(v3.2.0以前)で payload.summary が無視された場合の後方互換フォールバック
+      if (summaryPayload && result && result.summarySaved !== true && result.documentId) {
+        this.log(
+          'warn',
+          'デプロイ済みのGAS Web Appが旧バージョンのため、後方互換モードで冒頭サマリーをドキュメント先頭へ書き込みます（最新の code.gs v3.4.0 で再デプロイすると見出し・箇条書き装飾が適用されます）。'
+        );
+        try {
+          const fallbackRecords = [buildLegacySummaryFallbackRecord(summaryPayload), ...recordsToSave];
+          const fallbackRes = await GasStorageClient.saveTranscript(
+            this.gasUrl,
+            buildSavePayload(result.documentId, fallbackRecords, null)
+          );
+          if (fallbackRes) result = fallbackRes;
+          summaryAttached = true;
+        } catch (fallbackErr) {
+          this.log('warn', `旧GAS互換サマリー追記に失敗したため、確定翻訳のみの保存結果を使用します: ${fallbackErr.message}`);
+          summaryAttached = false;
+        }
+      }
+
+      if (startEpoch !== this._sessionEpoch) return;
 
       this.savedRecordCount = recordsToSave.length;
       this.unsavedFinalizedDelta = 0;
@@ -6871,21 +7501,27 @@ class App {
         this._syncDocModeUI();
       }
 
+      const safeDocUrl = /^https?:\/\//i.test(String(result.documentUrl || '')) ? result.documentUrl : '#';
+      const safeFolderUrl = /^https?:\/\//i.test(String(result.folderUrl || '')) ? result.folderUrl : '';
       this.elSavedDocBanner.style.display = 'flex';
-      this.elSavedDocLink.href = result.documentUrl;
+      this.elSavedDocLink.href = safeDocUrl;
       this.elSavedDocLink.textContent = `📄 ${result.documentTitle || 'ドキュメント'} を開く ↗`;
-      if (result.folderUrl && this.elSavedFolderLink && this.elSavedFolderSep) {
+      if (safeFolderUrl && this.elSavedFolderLink && this.elSavedFolderSep) {
         this.elSavedFolderSep.style.display = 'inline';
         this.elSavedFolderLink.style.display = 'inline';
-        this.elSavedFolderLink.href = result.folderUrl;
+        this.elSavedFolderLink.href = safeFolderUrl;
         this.elSavedFolderLink.textContent = `📁 ${result.folderName || '保存先フォルダ'} ↗`;
+      } else if (this.elSavedFolderLink && this.elSavedFolderSep) {
+        this.elSavedFolderSep.style.display = 'none';
+        this.elSavedFolderLink.style.display = 'none';
       }
 
-      this.log('success', `Google ドキュメント同期保存完了 (確定翻訳: 全${recordsToSave.length}件): ${result.documentUrl}`);
+      const summarySuffix = summaryAttached ? '＋冒頭サマリー' : '';
+      this.log('success', `Google ドキュメント同期保存完了 (確定翻訳: 全${recordsToSave.length}件${summarySuffix}): ${result.documentUrl}`);
       this.showToast(
         isAuto
-          ? `確定翻訳 (全${recordsToSave.length}件) をGoogleドキュメントに自動同期しました。`
-          : `確定翻訳 (全${recordsToSave.length}件) をひとつのGoogleドキュメントとして保存完了しました！`,
+          ? `確定翻訳 (全${recordsToSave.length}件${summarySuffix}) をGoogleドキュメントに自動同期しました。`
+          : `確定翻訳 (全${recordsToSave.length}件${summarySuffix}) をGoogleドキュメントへ保存完了しました！`,
         'success'
       );
     } catch (err) {
@@ -6972,7 +7608,7 @@ class App {
     const md = buildTranscriptMarkdown(this.records, {
       category: this.category,
       title: this.elInputDocTitle?.value.trim() || '',
-      latestSummary: this.summaryHistory[0] || null
+      latestSummary: this._getActiveSummary()
     });
 
     this.copyToClipboard(md)
@@ -7067,6 +7703,7 @@ class App {
     if (this.category && this.category !== DEFAULT_SETTINGS.DEFAULT_CATEGORY) compact.c = this.category;
     if (this.chunkMode && this.chunkMode !== 'long') compact.cm = this.chunkMode;
     if (this.contextWindow !== undefined && Number(this.contextWindow) !== 6) compact.cw = Number(this.contextWindow);
+    if (this.summaryMode && this.summaryMode !== 'live-check') compact.smo = this.summaryMode;
     if (this.summaryRange && this.summaryRange !== '5') compact.sr = this.summaryRange;
     if (this.summaryRange === 'custom' && this.summaryCustomMin && Number(this.summaryCustomMin) !== 5) {
       compact.sm = Number(this.summaryCustomMin);
@@ -7177,6 +7814,7 @@ class App {
         ConfigManager.set(K.CATEGORY, c.c || DEFAULT_SETTINGS.DEFAULT_CATEGORY);
         ConfigManager.set(K.CHUNK_MODE, c.cm || 'long');
         ConfigManager.set(K.CONTEXT_WINDOW, String(c.cw !== undefined ? c.cw : 6));
+        ConfigManager.set(K.SUMMARY_MODE, c.smo === 'minutes' ? 'minutes' : 'live-check');
         ConfigManager.set(K.SUMMARY_RANGE, c.sr || '5');
         ConfigManager.set(K.SUMMARY_CUSTOM_MIN, String(c.sm !== undefined ? c.sm : 5));
         ConfigManager.set(K.GAIN, c.g || '2.5');

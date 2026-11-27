@@ -1,4 +1,4 @@
-/* style.css - Consolidated Responsive Stylesheet for Multilingual Transcriber (v3.3.0) */
+/* style.css - Consolidated Responsive Stylesheet for Multilingual Transcriber (v3.4.0) */
 
 :root {
   --primary: #1b365d;
@@ -853,8 +853,9 @@ body.modal-open {
 .summary-content p {
   margin: 4px 0 6px;
 }
-.summary-content ul {
-  margin: 4px 0 8px 18px;
+.summary-content ul,
+.summary-content ol {
+  margin: 4px 0 8px 20px;
   padding: 0;
 }
 .summary-content li {
@@ -1519,6 +1520,7 @@ body.modal-open {
   flex-direction: column;
   gap: 8px;
   z-index: 2000;
+  pointer-events: none;
 }
 
 .toast {
@@ -2099,13 +2101,129 @@ html[data-theme="dark"] .live-committed {
 }
 
 /* ====================================================
+   v3.4.0 Summary 2-Mode Toggle & Minutes Prompt Manager
+   ==================================================== */
+.summary-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  background: #eaecee;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  gap: 2px;
+}
+.summary-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.summary-mode-btn:hover {
+  color: var(--text-primary);
+}
+.summary-mode-btn.is-active {
+  background: var(--surface-card);
+  color: var(--blue);
+  box-shadow: var(--shadow-sm);
+}
+
+.minutes-controls-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.minutes-template-select {
+  max-width: 220px;
+}
+
+.minutes-prompt-panel {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #f8fafc;
+  border-left: 4px solid var(--blue);
+}
+.minutes-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.minutes-prompt-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+}
+.minutes-template-save-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.minutes-template-name-input {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+.minutes-delete-btn {
+  color: var(--danger);
+}
+.minutes-delete-btn:hover:not(:disabled) {
+  background: #fdecea;
+  color: var(--danger);
+  border-color: rgba(231, 76, 60, 0.4);
+}
+.textarea-minutes-prompt {
+  width: 100%;
+  resize: vertical;
+  min-height: 120px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  background: #FFFFFF;
+}
+
+html[data-theme="dark"] .summary-mode-toggle {
+  background: #0f172a;
+  border-color: var(--border-color);
+}
+html[data-theme="dark"] .summary-mode-btn.is-active {
+  background: #2563eb;
+  color: #FFFFFF;
+}
+html[data-theme="dark"] .minutes-prompt-panel {
+  background: #1e293b;
+  border-color: var(--border-color);
+  border-left-color: var(--blue);
+}
+html[data-theme="dark"] .textarea-minutes-prompt {
+  background: #0f172a;
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+html[data-theme="dark"] .minutes-delete-btn:hover:not(:disabled) {
+  background: rgba(231, 76, 60, 0.2);
+}
+
+/* ====================================================
    Responsive (Single Consolidated Mobile Breakpoint)
    ==================================================== */
 @media (max-width: 767px) {
   .app-wrapper {
     padding: 10px 12px 30px;
   }
-  .select-input, .text-input, .edit textarea, .textarea-translation-prompt, .input-summary-min {
+  .select-input, .text-input, .edit textarea, .textarea-translation-prompt, .textarea-minutes-prompt, .input-summary-min {
     font-size: 16px; /* iOS auto-zoom prevention */
   }
   .app-header {
@@ -2134,6 +2252,7 @@ html[data-theme="dark"] .live-committed {
   .control-row.main-actions,
   .advanced-controls-grid {
     flex-direction: column;
+    flex-wrap: nowrap;
     align-items: stretch;
   }
   .action-spacer {
@@ -2141,10 +2260,12 @@ html[data-theme="dark"] .live-committed {
   }
   .control-group {
     justify-content: space-between;
+    min-width: 0;
   }
   .control-group .select-input,
   .mic-device-group .select-input {
     flex: 1;
+    min-width: 0;
     max-width: 72%;
   }
   .custom-langs-grid {
@@ -2152,6 +2273,10 @@ html[data-theme="dark"] .live-committed {
   }
   .prompt-toggle-btn {
     flex-wrap: wrap;
+  }
+  .prompt-toggle-title {
+    flex-shrink: 1;
+    min-width: 0;
   }
   .doc-settings-row {
     flex-direction: column;
@@ -2166,6 +2291,30 @@ html[data-theme="dark"] .live-committed {
   .summary-bar {
     flex-direction: column;
     align-items: stretch;
+  }
+  .summary-mode-toggle {
+    width: 100%;
+  }
+  .summary-mode-btn {
+    flex: 1;
+    text-align: center;
+  }
+  .minutes-controls-inline {
+    width: 100%;
+  }
+  .minutes-template-select {
+    flex: 1;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .minutes-template-save-row {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+  }
+  .minutes-template-name-input {
+    flex: 0 0 auto;
+    width: 100%;
   }
   .summary-bar-right {
     justify-content: flex-end;
@@ -2253,5 +2402,10 @@ html[data-theme="dark"] .live-committed {
     align-self: center;
     max-height: calc(100vh - 30px);
     max-height: calc(100dvh - 30px);
+  }
+  .toast-container {
+    right: 12px;
+    left: 12px;
+    bottom: 14px;
   }
 }

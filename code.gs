@@ -1,6 +1,6 @@
 /**
  * code.gs - Google Apps Script Backend for Gemini Live Multilingual Transcriber
- * Version: 3.3.0 (UX Overhaul + Summary-in-Doc + Multilingual + EN/JA Priority + Hindi/Urdu Code-Switching Backend)
+ * Version: 3.4.0 (Summary 2-Mode + Hardened Summary-in-Doc + Multilingual Backend)
  * 
  * 主な機能:
  * 1. doPost(e): 翻訳ログ保存 (action: 'save' / 'saveToGoogleDoc') および 多言語バックアップ翻訳 (action: 'translate')
@@ -155,7 +155,7 @@ function doPost(e) {
         spreadsheetId: config.SPREADSHEET_ID,
         authRequired: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
         authPassed: true,
-        version: '3.3.0',
+        version: '3.4.0',
         timestamp: new Date().toISOString()
       });
     } else {
@@ -179,7 +179,7 @@ function doGet(e) {
   return createJsonResponse({
     status: 'ok',
     service: 'Multilingual Transcriber Backend',
-    version: '3.3.0',
+    version: '3.4.0',
     outputFolderId: config.OUTPUT_FOLDER_ID,
     spreadsheetId: config.SPREADSHEET_ID,
     authEnabled: !!(config.SECRET_TOKEN && config.SECRET_TOKEN.trim() !== ''),
@@ -398,7 +398,7 @@ function handleSaveTranscript(payload, config) {
     folderName: targetFolderName,
     folderUrl: targetFolderUrl,
     savedCount: records.length,
-    summarySaved: !!((isNew || saveMode === 'sync') && payload.summary && payload.summary.markdown),
+    summarySaved: !!((isNew || saveMode === 'sync') && payload.summary && payload.summary.markdown && String(payload.summary.markdown).trim() !== ''),
     timestamp: new Date().toISOString()
   };
 }
@@ -408,6 +408,7 @@ function handleSaveTranscript(payload, config) {
  */
 function appendSummarySectionToDoc_(body, summary) {
   var metaParts = [];
+  if (summary.modeLabel) metaParts.push(String(summary.modeLabel));
   if (summary.rangeLabel) metaParts.push(String(summary.rangeLabel));
   if (summary.timeSpan) metaParts.push(String(summary.timeSpan));
   var sumTitle = '📝 会話サマリー' + (metaParts.length > 0 ? ' [' + metaParts.join(' / ') + ']' : '');
@@ -421,19 +422,32 @@ function appendSummarySectionToDoc_(body, summary) {
   var lines = String(summary.markdown || '').split(/\r?\n/);
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i].trim();
-    if (!line) continue;
+    if (!line || /^---+$/.test(line)) continue;
     var cleanInline = line.replace(/\*\*(.+?)\*\*/g, '$1');
 
-    if (/^#{1,4}\s+/.test(cleanInline)) {
-      var subHead = body.appendParagraph(cleanInline.replace(/^#{1,4}\s+/, ''));
+    if (/^(?:#{1,6}\s+|#{2,6}\S)/.test(cleanInline)) {
+      var headText = cleanInline.replace(/^#{1,6}\s*/, '').trim();
+      if (!headText) continue;
+      var subHead = body.appendParagraph(headText);
       subHead.setHeading(DocumentApp.ParagraphHeading.HEADING4);
       subHead.setForegroundColor('#1b365d');
       subHead.setSpacingBefore(6);
       subHead.setSpacingAfter(2);
-    } else if (/^([-*•・]|\d+\.)\s+/.test(cleanInline)) {
-      var itemText = cleanInline.replace(/^([-*•・]|\d+\.)\s+/, '');
+    } else if (/^\d+[.)]\s+/.test(cleanInline)) {
+      var numText = cleanInline.replace(/^\d+[.)]\s+/, '').trim();
+      if (!numText) continue;
+      var numItem = body.appendListItem(numText);
+      if (DocumentApp.GlyphType && DocumentApp.GlyphType.NUMBER) {
+        numItem.setGlyphType(DocumentApp.GlyphType.NUMBER);
+      }
+      numItem.setForegroundColor('#2c3e50');
+    } else if (/^[-*•・]\s+/.test(cleanInline)) {
+      var itemText = cleanInline.replace(/^[-*•・]\s+/, '').trim();
+      if (!itemText) continue;
       var listItem = body.appendListItem(itemText);
-      listItem.setGlyphType(DocumentApp.GlyphType.BULLET);
+      if (DocumentApp.GlyphType && DocumentApp.GlyphType.BULLET) {
+        listItem.setGlyphType(DocumentApp.GlyphType.BULLET);
+      }
       listItem.setForegroundColor('#2c3e50');
     } else {
       var p = body.appendParagraph(cleanInline);

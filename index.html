@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Multilingual Transcriber - 多言語音声認識・文脈翻訳システム</title>
   <meta name="description" content="Gemini Live API (日英最優先＋ヒンディー/ウルドゥー雑談補足・85+多言語自動認識) および Web Speech API に対応した音声認識・長文文脈翻訳・任意範囲サマリーWebアプリ">
-  <link rel="stylesheet" href="style.css?v=3.3.0">
+  <link rel="stylesheet" href="style.css?v=3.4.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚓</text></svg>">
 </head>
 <body>
@@ -233,7 +233,7 @@
                   <input type="radio" name="doc-save-mode" value="existing">
                   既存ドキュメントに同期更新
                 </label>
-                <label class="checkbox-label doc-summary-check" title="新規作成または同期更新時に、直近で生成した会話サマリーをドキュメント冒頭に出力します（GAS v3.3.0以降）">
+                <label class="checkbox-label doc-summary-check" title="Googleドキュメント保存時、表示中または最新のサマリーを冒頭に出力します（未出力時は自動生成して添付・旧GAS環境でも自動互換出力）">
                   <input type="checkbox" id="check-include-summary" checked>
                   最新サマリーも冒頭に添付
                 </label>
@@ -311,6 +311,10 @@
         <div class="summary-bar card">
           <div class="summary-bar-left">
             <span class="summary-bar-title">📝 会話サマリー</span>
+            <div id="summary-mode-toggle" class="summary-mode-toggle" role="group" aria-label="サマリーモード切替">
+              <button type="button" id="btn-summary-mode-check" class="summary-mode-btn is-active" data-summary-mode="live-check" title="打ち合わせ進行中に聞き漏らしや誤解がないか迅速にチェックします">⚡ 進行中チェック</button>
+              <button type="button" id="btn-summary-mode-minutes" class="summary-mode-btn" data-summary-mode="minutes" title="打ち合わせ後の振り返り・議事録用サマリーを作成します">📋 議事録用</button>
+            </div>
             <div class="summary-range-group">
               <label for="select-summary-range" class="control-label">対象範囲:</label>
               <select id="select-summary-range" class="select-input select-sm" title="どこまでさかのぼってサマリーを作成するか選択">
@@ -328,12 +332,35 @@
                 <span class="summary-unit-label">分前まで</span>
               </span>
             </div>
+            <div id="minutes-controls-inline" class="minutes-controls-inline" style="display: none;">
+              <select id="select-minutes-template" class="select-input select-sm minutes-template-select" title="事前登録された議事録用プロンプトを選択"></select>
+              <button type="button" id="btn-toggle-minutes-prompt" class="btn btn-sm btn-outline" aria-expanded="false" title="議事録用プロンプトの手入力調整・事前登録管理を開く">✏️ プロンプト調整・登録</button>
+            </div>
             <span id="summary-target-preview" class="tag summary-target-badge">対象: 0件</span>
           </div>
           <div class="summary-bar-right">
-            <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したさかのぼり範囲の会話を日本語でサマリー出力 (Alt+S)">
+            <button id="btn-generate-summary" type="button" class="btn btn-primary btn-sm summary-gen-btn" title="選択したモード・さかのぼり範囲の会話を日本語でサマリー出力 (Alt+S)">
               ✨ サマリー出力
             </button>
+          </div>
+        </div>
+
+        <!-- Minutes Summary Custom & Pre-registered Prompt Panel -->
+        <div id="minutes-prompt-panel" class="card minutes-prompt-panel" style="display: none;">
+          <div class="minutes-prompt-head">
+            <span class="minutes-prompt-title">📋 議事録用サマリー プロンプト設定（事前登録 ＆ 手入力調整）</span>
+            <button type="button" id="btn-reset-minutes-templates" class="btn btn-sm btn-ghost" title="推奨プロンプト5種を初期状態に戻します（追加した独自テンプレートは保持されます）">↺ 推奨テンプレートを初期値に戻す</button>
+          </div>
+          <div class="minutes-template-save-row">
+            <label for="input-minutes-template-name" class="control-label">登録名:</label>
+            <input type="text" id="input-minutes-template-name" class="text-input minutes-template-name-input" placeholder="テンプレート名（例：定例会議、商談ヒアリング、技術確認）">
+            <button type="button" id="btn-save-minutes-template" class="btn btn-sm btn-primary" title="現在のプロンプト内容を指定した名前で事前登録します（同名なら上書き・別名なら新規追加）">💾 事前登録として保存</button>
+            <button type="button" id="btn-new-minutes-template" class="btn btn-sm btn-secondary" title="新しい空のカスタムプロンプトを作成します">＋ 新規作成</button>
+            <button type="button" id="btn-delete-minutes-template" class="btn btn-sm btn-outline minutes-delete-btn" title="現在選択しているテンプレートを削除します">🗑️ 削除</button>
+          </div>
+          <textarea id="input-minutes-prompt" class="text-input textarea-minutes-prompt" rows="6" placeholder="議事録用サマリーの出力構成や重点項目を手入力で自由に記述・調整できます..."></textarea>
+          <div class="prompt-panel-help">
+            ※ 手入力で調整した内容は自動保存され、直後の「✨ サマリー出力」に即時反映されます。よく使うプロンプトは名前を付けて「💾 事前登録として保存」しておくと、次回以降プルダウンからすぐに呼び出せます（ASR誤変換の文脈復元・否定表現の極性チェックは自動適用されます）。
           </div>
         </div>
 
@@ -421,7 +448,7 @@
         </div>
         <div id="diag-log-container" class="diag-log-box" style="display: none;">
           <div id="diag-log" class="diag-log-content">
-            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.3.0 - UX大幅改善・完全多言語対応・日英最優先＋ヒンディー/ウルドゥー雑談補足版)。</div>
+            <div class="log-line log-info">[準備完了] アプリケーションが初期化されました (v3.4.0 - Gemini 4 Neon サマリー・進行中チェック/議事録2モード・完全多言語対応版)。</div>
           </div>
         </div>
       </section>
@@ -609,6 +636,6 @@
     <div id="toast-container" class="toast-container"></div>
   </div>
 
-  <script src="app.js?v=3.3.0"></script>
+  <script src="app.js?v=3.4.0"></script>
 </body>
 </html>
